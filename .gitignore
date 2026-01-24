@@ -1,0 +1,35 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# SQLite databases (benchmarks, tests)
+*.db
+*.db-shm
+*.db-wal
+
+# Environment variables
+.env
+.env.*
+
+# Test coverage
+coverage/
+
+# TypeScript
+*.tsbuildinfo
+
+# IDE / Editor
+.claude/
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+nul
+
+# Logs
+*.log
