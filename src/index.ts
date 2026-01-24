@@ -82,5 +82,5 @@ export type { SQLiteRegistryConfig } from './command-registry/sqlite-registry-ad
 
 export { command, CommandBuilder, ParamBuilder } from './command-builder/index.js';
 
-export { McpServer, StdioTransport } from './mcp/index.js';
-export type { McpServerConfig, JsonRpcRequest, JsonRpcResponse } from './mcp/index.js';
+export { McpServer, StdioTransport, HttpSseTransport } from './mcp/index.js';
+export type { McpServerConfig, JsonRpcRequest, JsonRpcResponse, HttpTransportConfig } from './mcp/index.js';
