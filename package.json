@@ -4,6 +4,30 @@
   "type": "module",
   "description": "AI-first CLI framework - 2 tools + vector discovery",
   "license": "MIT",
+  "author": "Mauricio Perera",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MauricioPerera/Agent-Shell.git"
+  },
+  "homepage": "https://github.com/MauricioPerera/Agent-Shell#readme",
+  "bugs": {
+    "url": "https://github.com/MauricioPerera/Agent-Shell/issues"
+  },
+  "keywords": [
+    "ai",
+    "agent",
+    "cli",
+    "llm",
+    "mcp",
+    "shell",
+    "vector-search",
+    "command-registry",
+    "rbac",
+    "typescript"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "bin": {
