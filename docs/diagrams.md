@@ -1,7 +1,7 @@
 # Diagramas: Agent Shell v1.0
 
 > Generados a partir de los contratos de especificacion del sistema.
-> Fecha: 2026-01-22
+> Fecha: 2026-01-24
 
 ## Indice
 
@@ -12,6 +12,7 @@
 5. [Secuencia: Flujo Batch](#5-secuencia-flujo-batch)
 6. [Diagrama de Estados: Ejecucion de Comando](#6-diagrama-de-estados-ejecucion-de-comando)
 7. [ERD: Entidades del Sistema](#7-erd-entidades-del-sistema)
+8. [Secuencia: Flujo HTTP/SSE Transport](#8-secuencia-flujo-httpsse-transport)
 
 ---
 
@@ -24,10 +25,27 @@ Muestra todos los modulos del sistema y sus relaciones de dependencia segun los 
 title: Arquitectura de Componentes - Agent Shell
 ---
 flowchart TB
-    subgraph Agent["Agente LLM (2 tools)"]
+    subgraph Agent["Agente LLM (local)"]
         T1["cli_help()"]
         T2["cli_exec(cmd)"]
     end
+
+    subgraph RemoteAgent["Agente Remoto (HTTP)"]
+        RT1["POST /rpc"]
+        RT2["GET /sse"]
+    end
+
+    subgraph Transport["Transport Layer (Pluggable)"]
+        STDIO["StdioTransport\n(JSON-RPC stdin/stdout)"]
+        HTTP["HttpSseTransport\n(JSON-RPC HTTP + SSE)"]
+    end
+
+    T1 --> STDIO
+    T2 --> STDIO
+    RT1 --> HTTP
+    RT2 --> HTTP
+    STDIO --> EP
+    HTTP --> EP
 
     subgraph Core["Core (Orquestador)"]
         direction TB
@@ -61,8 +79,6 @@ flowchart TB
         H3["Handler N..."]
     end
 
-    T1 --> EP
-    T2 --> EP
     EP --> MW_PRE
     MW_PRE --> PARSER
     PARSER --> ROUTER
@@ -104,10 +120,14 @@ flowchart TB
     style CONTEXT fill:#e8f5e9
     style SECURITY fill:#fff9c4
     style Agent fill:#fff3e0
+    style RemoteAgent fill:#e1f5fe
+    style Transport fill:#f3e5f5
     style Adapters fill:#fce4ec
 ```
 
 **Notas:**
+- Transport Layer es pluggable: StdioTransport (local) o HttpSseTransport (remoto)
+- Ambos transportes implementan la misma interfaz `MessageHandler`
 - Core es el unico punto de entrada (2 entry points: `cli_help`, `cli_exec`)
 - Parser es zero-dependency y stateless
 - Vector Index depende de EmbeddingAdapter y VectorStorageAdapter (patron Strategy)
@@ -689,6 +709,83 @@ erDiagram
 
 ---
 
+## 8. Secuencia: Flujo HTTP/SSE Transport
+
+Flujo de comunicacion entre un agente remoto y Agent Shell via HTTP POST (requests) y SSE (notificaciones). Definido en el contrato `http-transport.md`.
+
+```mermaid
+---
+title: Secuencia - Flujo HTTP/SSE Transport
+---
+sequenceDiagram
+    autonumber
+
+    actor Client as Cliente HTTP<br/>(Agente/Frontend)
+    participant HTTP as HttpSseTransport
+    participant MCP as McpServer
+    participant Core as Core
+
+    Note over Client,Core: Fase 1: Establecer conexion SSE
+
+    Client->>HTTP: GET /sse
+    HTTP->>HTTP: Registrar cliente SSE<br/>sessionId = randomUUID()
+    HTTP-->>Client: 200 text/event-stream
+    HTTP-->>Client: event: connected<br/>data: {"sessionId": "abc-123"}
+
+    loop Cada 30s
+        HTTP-->>Client: event: heartbeat<br/>data: {"time": 1706140800000}
+    end
+
+    Note over Client,Core: Fase 2: Inicializar protocolo MCP
+
+    Client->>HTTP: POST /rpc<br/>{"jsonrpc":"2.0","id":1,<br/>"method":"initialize"}
+    HTTP->>HTTP: Parse JSON + Validate
+    HTTP->>MCP: handleMessage(request)
+    MCP-->>HTTP: JsonRpcResponse {protocolVersion,<br/>capabilities, serverInfo}
+    HTTP-->>Client: 200 application/json<br/>JsonRpcResponse
+
+    Note over Client,Core: Fase 3: Listar tools disponibles
+
+    Client->>HTTP: POST /rpc<br/>{"jsonrpc":"2.0","id":2,<br/>"method":"tools/list"}
+    HTTP->>MCP: handleMessage(request)
+    MCP-->>HTTP: {tools: [cli_help, cli_exec]}
+    HTTP-->>Client: 200 application/json
+
+    Note over Client,Core: Fase 4: Ejecutar comando
+
+    Client->>HTTP: POST /rpc<br/>{"jsonrpc":"2.0","id":3,<br/>"method":"tools/call",<br/>"params":{"name":"cli_exec",<br/>"arguments":{"command":"search users"}}}
+    HTTP->>MCP: handleMessage(request)
+    MCP->>Core: exec("search users")
+    Core-->>MCP: Response {code:0, data:[...]}
+    MCP-->>HTTP: McpToolResult {content:[{text:...}]}
+    HTTP-->>Client: 200 application/json
+
+    Note over Client,Core: Fase 5: Notificaciones (server-push)
+
+    MCP->>HTTP: notify("progress", {status: "indexing"})
+    HTTP-->>Client: event: message<br/>data: {"jsonrpc":"2.0",<br/>"method":"progress",<br/>"params":{"status":"indexing"}}
+
+    Note over Client,Core: Fase 6: Health check
+
+    Client->>HTTP: GET /health
+    HTTP-->>Client: 200 {"status":"ok",<br/>"uptime":3600,<br/>"connectedClients":1,<br/>"transport":"http-sse"}
+
+    Note over Client,Core: Fase 7: Desconexion
+
+    Client->>HTTP: Close SSE connection
+    HTTP->>HTTP: Remove client from Set
+```
+
+**Notas:**
+- El endpoint POST `/rpc` es stateless (cada request es independiente)
+- El endpoint GET `/sse` mantiene una conexion abierta para notificaciones push
+- Los heartbeats previenen timeout en proxies/load balancers intermedios
+- El flujo MCP (initialize -> tools/list -> tools/call) es identico al de StdioTransport
+- CORS headers se agregan automaticamente cuando `corsOrigin` esta configurado
+- El health endpoint no requiere autenticacion
+
+---
+
 ## Resumen de Interfaces Clave
 
 | Modulo | Interface Principal | Contrato |
@@ -701,6 +798,7 @@ erDiagram
 | JQ Filter | `applyFilter(data, expression): FilterResult` | jq-filter.md |
 | Context Store | `get()`, `set()`, `getAll()`, `recordCommand()`, `undo()` | context-store.md |
 | Security | `AuditLogger`, `RBAC`, `maskSecrets()`, `containsSecret()` | security.md |
+| HTTP Transport | `HttpSseTransport.start()`, `.stop()`, `.notify()`, `.onMessage()` | http-transport.md |
 
 ---
 
@@ -710,7 +808,9 @@ erDiagram
 |-------|-------------|
 | Verde claro (`#ccffcc` / `#e8f5e9`) | Exito, modulos especializados |
 | Rojo claro (`#ffcccc` / `rgb(255,235,235)`) | Errores, fallos |
-| Azul claro (`#cce5ff` / `rgb(230,245,255)`) | Info, modos especiales |
+| Azul claro (`#cce5ff` / `rgb(230,245,255)`) | Info, modos especiales, Core |
+| Azul mas claro (`#e1f5fe`) | Agente remoto (HTTP) |
 | Amarillo claro (`#ffffcc`) | Requiere atencion (confirm) |
-| Naranja claro (`#fff3e0`) | Agente externo |
+| Naranja claro (`#fff3e0`) | Agente externo (local) |
+| Purpura claro (`#f3e5f5`) | Transport Layer |
 | Rosa claro (`#fce4ec`) | Adapters/interfaces externas |

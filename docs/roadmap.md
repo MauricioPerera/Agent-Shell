@@ -2,9 +2,9 @@
 
 ## Estado Actual
 
-El framework tiene su **roadmap 100% completado** (443 tests, 13 test files, 12 modulos). Cuenta con MCP Server, CLI, Command Builder SDK, SQLite adapters, pgvector adapter, CI/CD pipeline, modulo de seguridad completo (audit logging, RBAC con permisos a nivel de recurso, secret detection, encriptacion at-rest), rate limiting, confirm tokens con TTL, expiracion de sesiones y politicas de retencion.
+El framework tiene las **Fases 1-7 completadas** y **Fase 8 en progreso** (475 tests, 14 test files, 13 modulos). Cuenta con MCP Server con transportes pluggables (stdio + HTTP/SSE), CLI, Command Builder SDK, SQLite adapters, pgvector adapter, CI/CD pipeline, modulo de seguridad completo (audit logging, RBAC con permisos a nivel de recurso, secret detection, encriptacion at-rest), rate limiting, confirm tokens con TTL, expiracion de sesiones y politicas de retencion.
 
-**Todos los items del roadmap estan implementados.** Documentacion de adapters disponible en `docs/adapters.md`.
+**Fase 8 (Conectividad Remota) en progreso.** Documentacion de adapters disponible en `docs/adapters.md`.
 
 ---
 
@@ -210,6 +210,47 @@ El framework tiene su **roadmap 100% completado** (443 tests, 13 test files, 12 
 
 ---
 
+## Fase 8: Conectividad Remota (HTTP/SSE Transport) ⏳ EN PROGRESO
+
+### 8.1 ~~HTTP/SSE Transport Adapter~~ ✅ IMPLEMENTADO
+
+- **Estado**: Implementado como `HttpSseTransport`
+- **Ubicacion**: `src/mcp/http-transport.ts`
+- **Descripcion**: Transporte alternativo a stdio que expone el McpServer como servicio HTTP
+- **Caracteristicas**:
+  - Endpoint POST `/rpc` para recibir JSON-RPC requests
+  - Endpoint GET `/sse` para stream de notificaciones via Server-Sent Events
+  - Endpoint GET `/health` para health checks
+  - Session management via sessionId en evento `connected`
+  - CORS configurable (`corsOrigin` string o array)
+  - Heartbeat SSE periodico para mantener conexiones vivas
+  - Request timeout configurable
+  - Max body size configurable (default 64KB)
+  - Reutiliza la misma interfaz `MessageHandler` que `StdioTransport`
+  - Zero dependencias externas (usa `node:http` y `node:crypto` nativos)
+
+### 8.2 ~~Subcomando CLI `serve --transport http`~~ ✅ IMPLEMENTADO
+
+- **Estado**: Implementado en `src/cli/index.ts`
+- **Ubicacion**: `src/cli/index.ts`
+- **Descripcion**: Flag `--transport http|stdio` en el subcomando `serve` para elegir transporte
+- **Config**: `--port`, `--host`, `--cors-origin`
+
+### 8.3 Documentacion del HTTP/SSE Transport
+
+- **Estado**: Pendiente
+- **Objetivo**: Guia de uso y configuracion del transporte HTTP/SSE
+- **Ubicacion planificada**: `docs/http-transport.md`
+- **Cobertura**: Setup, endpoints, autenticacion, ejemplos de uso con curl/fetch, integracion con frontends
+
+### 8.4 ~~Tests del HTTP/SSE Transport~~ ✅ IMPLEMENTADO
+
+- **Estado**: 32 tests en `tests/http-transport.test.ts`
+- **Ubicacion**: `tests/http-transport.test.ts`
+- **Cobertura**: Lifecycle (5), POST /rpc (8), GET /sse (6), GET /health (2), Routing (2), CORS (5), Integration (2), Config (1), Timeout (1)
+
+---
+
 ## Resumen de Estado
 
 ### Seguridad
@@ -236,7 +277,7 @@ El framework tiene su **roadmap 100% completado** (443 tests, 13 test files, 12 
 
 | Aspecto | Estado | Fase |
 |:---|:---|:---|
-| MCP Server | ✅ Implementado (JSON-RPC stdio) | Fase 5 |
+| MCP Server | ✅ Implementado (JSON-RPC stdio + HTTP/SSE) | Fase 5+8 |
 | CLI entry point | ✅ Implementado (`bin.agent-shell`) | Fase 5 |
 | SQLite adapters | ✅ Implementado (Storage + Registry) | Fase 6 |
 | Config npm publish | ✅ Configurado (files, license, bin) | Fase 6 |
@@ -247,6 +288,15 @@ El framework tiene su **roadmap 100% completado** (443 tests, 13 test files, 12 
 | Command builder SDK | ✅ Implementado (fluent API) | Fase 7 |
 | Docs adapters | ✅ Implementado (`docs/adapters.md`) | Fase 7 |
 | Changelog | ✅ Creado (Keep a Changelog) | Fase 7 |
+
+### Conectividad Remota
+
+| Aspecto | Estado | Fase |
+|:---|:---|:---|
+| HTTP/SSE Transport | ✅ Implementado (`HttpSseTransport`) | Fase 8 |
+| CLI `--transport http` | ✅ Implementado (flags: port, host, cors-origin) | Fase 8 |
+| Docs HTTP/SSE | ⏳ Pendiente | Fase 8 |
+| Tests HTTP/SSE | ✅ Implementado (32 tests) | Fase 8 |
 
 ---
 
@@ -270,12 +320,13 @@ El framework tiene su **roadmap 100% completado** (443 tests, 13 test files, 12 
 - Politicas de retencion de historial (por edad y cantidad)
 - Busqueda semantica vectorial con adapters pluggables
 - Demo funcional con Ollama y Cloudflare Workers AI
-- MCP Server (JSON-RPC 2.0 sobre stdio, 2 tools: cli_help, cli_exec)
-- CLI entry point con subcomandos (serve, help, version)
+- MCP Server (JSON-RPC 2.0, 2 tools: cli_help, cli_exec)
+- Transportes pluggables: StdioTransport (local) + HttpSseTransport (HTTP/SSE remoto)
+- CLI entry point con subcomandos (serve, help, version) y --transport http|stdio
 - Command Builder SDK (fluent API para definir comandos)
 - SQLite adapters (StorageAdapter + RegistryAdapter, zero deps)
 - Permisos a nivel de recurso (namespace:action:resourceId con wildcards y $param)
 - PgVector adapter (PostgreSQL + pgvector, HNSW index, cosine/L2/IP)
 - CI/CD pipeline (GitHub Actions: typecheck, test, build, publish)
 - Documentacion de adapters (guia con interfaces, ejemplos, patrones)
-- 443 tests pasando (13 test files: 7 unit + 1 MCP + 1 security + 1 integration + 1 SQLite + 1 builder + 1 pgvector)
+- 475 tests pasando (14 test files: 7 unit + 1 MCP + 1 HTTP transport + 1 security + 1 integration + 1 SQLite + 1 builder + 1 pgvector)

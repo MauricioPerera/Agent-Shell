@@ -196,33 +196,47 @@ namespace:comando | Descripcion concisa
 ## Arquitectura de Alto Nivel
 
 ```
-+------------------+
-|   Agente LLM     |
-|  (2 tools only)  |
-+--------+---------+
-         |
-    cli_help() / cli_exec()
-         |
-+--------v---------+
-|   Agent Shell    |
-|   (Gateway)      |
-|                  |
-|  - Parser        |
-|  - Router        |
-|  - Executor      |
-|  - Security      |
-|  - JQ Filter     |
-|  - Modes         |
-+--------+---------+
-         |
-    +----+----+
-    |         |
-+---v---+ +---v--------+
-| Vector| | Command    |
-| Index | | Registry   |
-| (DB)  | | (handlers) |
-+-------+ +------------+
++------------------+      +------------------+
+|   Agente LLM     |      |  Agente Remoto   |
+|  (local/stdio)   |      |  (HTTP client)   |
++--------+---------+      +--------+---------+
+         |                          |
+    cli_help() / cli_exec()    POST /rpc + GET /sse
+         |                          |
++--------v---------+    +-----------v--------+
+| StdioTransport   |    | HttpSseTransport   |
+| (JSON-RPC stdio) |    | (JSON-RPC HTTP+SSE)|
++--------+---------+    +-----------+--------+
+         |                          |
+         +----------+  +------------+
+                    |  |
+             +------v--v-------+
+             |   McpServer     |
+             |   (Gateway)     |
+             |                 |
+             |  - Parser       |
+             |  - Router       |
+             |  - Executor     |
+             |  - Security     |
+             |  - JQ Filter    |
+             |  - Modes        |
+             +--------+--------+
+                      |
+                 +----+----+
+                 |         |
+           +-----v-+ +----v-------+
+           | Vector | | Command    |
+           | Index  | | Registry   |
+           | (DB)   | | (handlers) |
+           +--------+ +------------+
 ```
+
+### Transportes Soportados
+
+| Transporte | Protocolo | Uso principal |
+|-----------|-----------|---------------|
+| **StdioTransport** | JSON-RPC 2.0 sobre stdin/stdout | Integracion local (MCP clients, IDEs) |
+| **HttpSseTransport** | JSON-RPC 2.0 sobre HTTP + SSE | Integracion remota (web, servicios, multi-agente) |
 
 ---
 
@@ -249,6 +263,13 @@ Almacen de estado de sesion para persistir valores entre llamadas. Soporta TTL d
 ### 7. Security
 Modulo transversal que provee audit logging (EventEmitter tipado), RBAC con herencia de roles, deteccion y masking de secretos, y encriptacion de storage (AES-256-GCM).
 
+### 8. Transport Layer (Pluggable)
+Capa de transporte intercambiable que abstrae la comunicacion entre agentes y el McpServer:
+- **StdioTransport**: JSON-RPC 2.0 sobre stdin/stdout (integracion local, MCP clients)
+- **HttpSseTransport**: JSON-RPC 2.0 sobre HTTP POST + Server-Sent Events (integracion remota, web, multi-agente)
+
+Ambos transportes implementan la misma interfaz `MessageHandler`, permitiendo que el McpServer sea agnostico al medio de comunicacion.
+
 ---
 
 ## Ventajas sobre MCP Directo
@@ -272,6 +293,8 @@ Modulo transversal que provee audit logging (EventEmitter tipado), RBAC con here
 3. **Entornos con contexto limitado**: Modelos pequenos o con ventana reducida
 4. **Operaciones sensibles**: Donde dry-run y confirmacion son criticos
 5. **Testing de agentes**: Validar comportamiento sin ejecucion real
+6. **Integracion remota via HTTP/SSE**: Agentes o frontends que consumen Agent Shell como servicio HTTP, recibiendo notificaciones en tiempo real via SSE
+7. **Arquitecturas multi-agente**: Multiples agentes conectados a una misma instancia de Agent Shell via HTTP, cada uno con su sesion independiente
 
 ---
 

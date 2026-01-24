@@ -86,6 +86,37 @@ export interface McpServerConfig {
   core: any;
 }
 
+// --- HTTP/SSE Transport ---
+
+/** Configuracion del transporte HTTP/SSE. */
+export interface HttpTransportConfig {
+  /** Puerto del servidor HTTP. Default: 3000 */
+  port?: number;
+  /** Host de bind. Default: '127.0.0.1' */
+  host?: string;
+  /** Origenes CORS permitidos. Default: ninguno (sin CORS headers) */
+  corsOrigin?: string | string[];
+  /** Intervalo de heartbeat SSE en ms. Default: 30000 */
+  heartbeatInterval?: number;
+  /** Timeout de request en ms. Default: 30000 */
+  requestTimeout?: number;
+  /** Tamano maximo del body en bytes. Default: 65536 (64KB) */
+  maxBodySize?: number;
+}
+
+export interface SseClient {
+  id: string;
+  response: import('node:http').ServerResponse;
+  connectedAt: number;
+}
+
+export interface HealthResponse {
+  status: 'ok';
+  uptime: number;
+  connectedClients: number;
+  transport: 'http-sse';
+}
+
 // --- JSON-RPC Error Codes ---
 
 export const PARSE_ERROR = -32700;
