@@ -23,7 +23,9 @@
     "vector-search",
     "command-registry",
     "rbac",
-    "typescript"
+    "typescript",
+    "hnsw",
+    "minimemory"
   ],
   "engines": {
     "node": ">=18.0.0"
@@ -41,6 +43,10 @@
     "./mcp": {
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts"
+    },
+    "./minimemory": {
+      "import": "./dist/minimemory/index.js",
+      "types": "./dist/minimemory/index.d.ts"
     }
   },
   "files": [
@@ -54,6 +60,14 @@
     "test:watch": "vitest",
     "dev": "tsup --watch",
     "prepublishOnly": "npm run build"
+  },
+  "peerDependencies": {
+    "minimemory": ">=0.1.0"
+  },
+  "peerDependenciesMeta": {
+    "minimemory": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "bun-types": "^1.3.6",

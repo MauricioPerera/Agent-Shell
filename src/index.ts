@@ -84,3 +84,25 @@ export { command, CommandBuilder, ParamBuilder } from './command-builder/index.j
 
 export { McpServer, StdioTransport, HttpSseTransport } from './mcp/index.js';
 export type { McpServerConfig, JsonRpcRequest, JsonRpcResponse, HttpTransportConfig } from './mcp/index.js';
+
+// minimemory integration (optional peer dependency)
+export {
+  createVectorStorage,
+  isMinimemoryAvailable,
+  loadMinimemory,
+  MiniMemoryVectorStorage,
+} from './minimemory/index.js';
+export type {
+  MiniMemoryVectorStorageConfig,
+  MiniMemoryApiConfig,
+  StorageFactoryOptions,
+  StorageFactoryResult,
+  MiniMemorySearchResult,
+  MiniMemoryHybridParams,
+  MiniMemoryStats,
+  TaskEpisode,
+  CodeSnippet,
+  ErrorSolution,
+  AgentMemoryStats,
+  RecallResult,
+} from './minimemory/index.js';
