@@ -49,9 +49,11 @@ import { McpServer, StdioTransport } from 'agent-shell/mcp';
 npm install -g agent-shell
 
 # Usar como binario
-agent-shell help     # Muestra ayuda
-agent-shell version  # Muestra version
-agent-shell serve    # Requiere registry configurado programaticamente (ver MCP Server)
+agent-shell help                                         # Muestra ayuda
+agent-shell version                                      # Muestra version
+agent-shell serve                                        # MCP server (stdio) con todos los skills
+agent-shell serve --transport http --token my-secret     # HTTP server con auth
+agent-shell serve --transport http --profile reader      # HTTP con perfil restringido
 ```
 
 **Configuracion del paquete:**
@@ -193,14 +195,19 @@ const response = await server.handleMessage({
 
 ### CLI
 
-Entry point de linea de comandos para uso standalone o como binario MCP.
+Entry point de linea de comandos. Registra todos los skills automaticamente.
 
 ```bash
-# Despues de instalar globalmente o via npx
-agent-shell help       # Muestra ayuda
-agent-shell version    # Muestra version
-agent-shell serve      # MCP server (requiere registry configurado programaticamente)
+agent-shell help                                          # Muestra ayuda
+agent-shell version                                       # Muestra version
+agent-shell serve                                         # MCP server (stdio) con 21 skills
+agent-shell serve --transport http --token secret         # HTTP server con Bearer auth
+agent-shell serve --transport http --profile operator     # Con perfil de permisos
+agent-shell serve --transport http --no-shell-skills      # Sin skills de sistema
 ```
+
+**Env vars:** `AGENT_SHELL_TOKEN`, `AGENT_SHELL_PORT`, `AGENT_SHELL_HOST`, `AGENT_SHELL_PROFILE`
+**Config file:** `agent-shell.config.json` (env vars override)
 
 El binario se registra automaticamente en `package.json`:
 
@@ -697,6 +704,41 @@ registerSkills(registry); // 9 comandos
 | `registry:stats` | Conteos, namespaces, tags |
 | `registry:export` | Export JSON |
 
+## VPS Deployment (Remote Access)
+
+Deploy Agent Shell on a VPS and connect from Claude Desktop without SSH.
+
+```
+Claude Desktop ──HTTPS──→ Nginx (TLS) ──→ Agent Shell (port 3000)
+                                            ├── 21 skills
+                                            ├── Bearer token auth
+                                            └── Agent profile (operator)
+```
+
+**Quick start:**
+
+```bash
+# On VPS
+git clone https://github.com/MauricioPerera/Agent-Shell.git
+cd Agent-Shell && npm install && npm run build
+AGENT_SHELL_TOKEN=$(openssl rand -hex 32) node dist/server/index.js
+```
+
+**Claude Desktop config** (`claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "my-vps": {
+      "url": "https://your-domain.com/sse",
+      "headers": { "Authorization": "Bearer your-token" }
+    }
+  }
+}
+```
+
+Full guide with Nginx + Let's Encrypt + systemd: [docs/deployment.md](docs/deployment.md)
+
 ## Protocolo de Interaccion (Help)
 
 El protocolo que recibe el agente LLM al llamar `cli_help()`:
@@ -792,11 +834,13 @@ src/
 │   ├── shell-exec.ts        # shell:exec, which
 │   ├── shell-env.ts         # env:get, list
 │   └── index.ts             # registerSkills, registerShellSkills, registerAllSkills
-└── just-bash/
-    ├── types.ts             # ShellAdapter, ShellResult interfaces
-    ├── adapter.ts           # JustBashShellAdapter, NativeShellAdapter
-    ├── factory.ts           # createShellAdapter, isJustBashAvailable
-    └── index.ts             # Barrel exports
+├── just-bash/
+│   ├── types.ts             # ShellAdapter, ShellResult interfaces
+│   ├── adapter.ts           # JustBashShellAdapter, NativeShellAdapter
+│   ├── factory.ts           # createShellAdapter, isJustBashAvailable
+│   └── index.ts             # Barrel exports
+└── server/
+    └── index.ts             # Production HTTP server entry point
 
 contracts/                   # Contratos de especificacion por modulo
 tests/                       # 913 tests across 24 suites (vitest)
@@ -805,12 +849,12 @@ docs/                        # PRD, diagramas, roadmap, schemas
 
 ## Tests
 
-913 tests across 24 suites:
+923 tests across 25 suites:
 
 ```bash
 bun run test
 
-# 24 suites, 913 tests passing
+# 25 suites, 923 tests passing
 # Key suites:
 # ✓ full-system.test.ts (65 tests)        — Full stack integration battery
 # ✓ scalability-promise.test.ts (16 tests) — Token economy proof
@@ -827,7 +871,8 @@ bun run test
 # ✓ shell-skills.test.ts (27 tests)       — System shell skills
 # ✓ just-bash-adapter.test.ts (24 tests)  — Shell adapter
 # ✓ agent-permissions.test.ts (22 tests)  — Permission enforcement
-# + 9 more suites
+# ✓ http-auth.test.ts (10 tests)          — Bearer token auth
+# + 8 more suites
 ```
 
 ## Stack Tecnico

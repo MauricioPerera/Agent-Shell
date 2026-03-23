@@ -27,6 +27,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Env variable masking**: `env:get` and `env:list` mask variables with PASSWORD, SECRET, TOKEN, KEY patterns
 - **Full system integration test**: 65-test battery validating the entire stack end-to-end
 - **Scalability promise test**: 16 tests proving constant ~600 token footprint from 5 to 1000 commands
+- **Bearer Token Auth**: `HttpTransportConfig.auth` with `bearerToken` + `excludePaths` for HTTP/SSE transport authentication
+- **Production Server** (`src/server/index.ts`): Standalone entry point that bootstraps registry + skills + core + MCP with config from env vars or `agent-shell.config.json`
+- **CLI `serve` command**: Now functional — `agent-shell serve --transport http --token <secret> --profile operator` starts authenticated HTTP server with all skills
+- **Deployment Guide** (`docs/deployment.md`): VPS deployment with Nginx + Let's Encrypt + systemd + Claude Desktop config
+- **Config file support**: `agent-shell.config.json` with env var overrides
 - **MCP `initialize` enforcement**: Server now rejects `tools/list` and `tools/call` before `initialize` per MCP spec
 - **MCP `notifications/initialized`**: Server handles client acknowledgement notification
 - **Core history cap**: FIFO eviction at 10,000 entries prevents unbounded memory growth
@@ -57,8 +62,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **RBAC Methods**: `checkPermission()`, `checkPermissions()`, `getMissingPermissions()` on RBAC class
 - **PgVector Adapter**: `PgVectorStorageAdapter` for PostgreSQL with pgvector extension (cosine, L2, inner product distances, HNSW index)
 - **Adapter Documentation**: Comprehensive guide at `docs/adapters.md` covering all adapter interfaces with examples
-- 913 total tests across 24 suites (from original 400)
-- 65 full system integration tests, 16 scalability tests, 30 skills tests, 27 shell skills tests, 24 adapter tests, 22 permission tests, 14 matryoshka tests
+- 923 total tests across 25 suites (from original 400)
+- 65 full system integration tests, 16 scalability tests, 30 skills tests, 27 shell skills tests, 24 adapter tests, 22 permission tests, 14 matryoshka tests, 10 HTTP auth tests
 
 ### Changed
 
@@ -75,6 +80,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Demo adapters**: `MiniMemoryVectorStorage` and `MiniMemoryApiAdapter` constructors now accept optional `binding` parameter for testability
 - **Shell skills refactored**: `shell:exec`, `shell:which`, `file:read`, `file:write`, `file:list` now use `ShellAdapter` injection instead of direct `child_process`/`fs` imports
 - **Agent profiles on operator/reader**: Include shell skill permissions (`http:*`, `json:*`, `file:read`, `shell:exec`, `env:read`)
+- **CLI rewrite**: `agent-shell serve` now bootstraps full stack with skills, reads config from env vars/file, supports `--token`, `--profile`, `--no-cli-skills`, `--no-shell-skills`
+- **tsup build**: Added `src/server/index.ts` as additional entry point
 - **Executor `revokeConfirm()`**: Now returns `boolean` (true if revoked, false if not found)
 - **Executor `revokeAllConfirms()`**: Now returns `number` (count of revoked tokens)
 - **EncryptedStorageAdapter**: Removed `as any` casts, proper CipherGCM/DecipherGCM typing with type narrowing
