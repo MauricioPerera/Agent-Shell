@@ -258,7 +258,7 @@ describe('Shell skills with adapter injection', () => {
     registerShellSkills(registry, mock);
 
     const all = registry.listAll();
-    expect(all).toHaveLength(12);
+    expect(all).toHaveLength(18);
     expect(registry.getNamespaces()).toContain('shell');
     expect(registry.getNamespaces()).toContain('file');
     expect(registry.getNamespaces()).toContain('http');
@@ -268,6 +268,6 @@ describe('Shell skills with adapter injection', () => {
     const registry = new CommandRegistry();
     registerShellSkills(registry);
 
-    expect(registry.listAll()).toHaveLength(12);
+    expect(registry.listAll()).toHaveLength(18);
   });
 });

@@ -333,12 +333,12 @@ describe('File Skills', () => {
 
 describe('Shell Skills Registration', () => {
 
-  it('INT01: registerShellSkills registers 12 commands', () => {
+  it('INT01: registerShellSkills registers 18 commands', () => {
     const registry = new CommandRegistry();
     registerShellSkills(registry);
 
     const all = registry.listAll();
-    expect(all).toHaveLength(12);
+    expect(all).toHaveLength(18);
   });
 
   it('INT02: all shell skill definitions have requiredPermissions', () => {

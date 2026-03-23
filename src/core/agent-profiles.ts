@@ -21,6 +21,7 @@ export const AGENT_PROFILES: Record<AgentProfile, string[]> = {
     '*:read', '*:list', '*:get', '*:create', '*:update', '*:execute',
     'search', 'describe', 'context', 'history',
     'http:read', 'http:write', 'json:read', 'file:read', 'shell:exec', 'shell:read', 'env:read',
+    'workspace:write', 'workspace:read',
   ],
 
   /** Read-only. Can discover and describe, but not execute actions. */
@@ -28,6 +29,7 @@ export const AGENT_PROFILES: Record<AgentProfile, string[]> = {
     '*:read', '*:list', '*:get',
     'search', 'describe', 'context',
     'http:read', 'json:read', 'file:read', 'shell:read', 'env:read',
+    'workspace:read',
   ],
 
   /** No access. Must receive explicit permissions. */

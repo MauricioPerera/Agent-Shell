@@ -92,6 +92,7 @@ export {
   scaffoldCommands, wizardCommands, registryAdminCommands,
   httpCommands, jsonCommands, fileCommands, shellCommands, envCommands,
   createFileCommands, createShellCommands,
+  workspaceCommands, createWorkspaceCommands, WorkspaceState,
 } from './skills/index.js';
 export type { SkillEntry } from './skills/index.js';
 

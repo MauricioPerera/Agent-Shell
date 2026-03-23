@@ -37,6 +37,7 @@ import { jsonCommands } from './shell-json.js';
 import { createFileCommands } from './shell-file.js';
 import { createShellCommands } from './shell-exec.js';
 import { envCommands } from './shell-env.js';
+import { createWorkspaceCommands } from './workspace.js';
 
 export type { SkillEntry } from './scaffold.js';
 export { scaffoldCommands } from './scaffold.js';
@@ -47,6 +48,7 @@ export { jsonCommands } from './shell-json.js';
 export { fileCommands, createFileCommands } from './shell-file.js';
 export { shellCommands, createShellCommands } from './shell-exec.js';
 export { envCommands } from './shell-env.js';
+export { workspaceCommands, createWorkspaceCommands, WorkspaceState } from './workspace.js';
 
 /** Registers all CLI creation skills (9 commands). */
 export function registerSkills(registry: CommandRegistry): void {
@@ -62,7 +64,7 @@ export function registerSkills(registry: CommandRegistry): void {
 }
 
 /**
- * Registers all system shell skills (12 commands): http, json, file, shell, env.
+ * Registers all system shell skills (18 commands): http, json, file, shell, env, workspace.
  *
  * @param registry - CommandRegistry to register into
  * @param shellAdapter - Optional ShellAdapter. If not provided, auto-detects
@@ -84,6 +86,9 @@ export function registerShellSkills(registry: CommandRegistry, shellAdapter?: Sh
     registry.register(definition, handler);
   }
   for (const { definition, handler } of envCommands) {
+    registry.register(definition, handler);
+  }
+  for (const { definition, handler } of createWorkspaceCommands()) {
     registry.register(definition, handler);
   }
 }
