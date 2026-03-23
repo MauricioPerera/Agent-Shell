@@ -38,6 +38,10 @@ import { createFileCommands } from './shell-file.js';
 import { createShellCommands } from './shell-exec.js';
 import { envCommands } from './shell-env.js';
 import { createWorkspaceCommands } from './workspace.js';
+import { gitCommands } from './shell-git.js';
+import { createCronCommands } from './cron.js';
+import { createSecretCommands } from './secret-store.js';
+import { createProcessCommands } from './process-mgr.js';
 
 export type { SkillEntry } from './scaffold.js';
 export { scaffoldCommands } from './scaffold.js';
@@ -49,6 +53,10 @@ export { fileCommands, createFileCommands } from './shell-file.js';
 export { shellCommands, createShellCommands } from './shell-exec.js';
 export { envCommands } from './shell-env.js';
 export { workspaceCommands, createWorkspaceCommands, WorkspaceState } from './workspace.js';
+export { gitCommands } from './shell-git.js';
+export { cronCommands, createCronCommands, CronScheduler } from './cron.js';
+export { secretCommands, createSecretCommands, SecretStore } from './secret-store.js';
+export { processCommands, createProcessCommands, ProcessManager } from './process-mgr.js';
 
 /** Registers all CLI creation skills (9 commands). */
 export function registerSkills(registry: CommandRegistry): void {
@@ -89,6 +97,18 @@ export function registerShellSkills(registry: CommandRegistry, shellAdapter?: Sh
     registry.register(definition, handler);
   }
   for (const { definition, handler } of createWorkspaceCommands()) {
+    registry.register(definition, handler);
+  }
+  for (const { definition, handler } of gitCommands) {
+    registry.register(definition, handler);
+  }
+  for (const { definition, handler } of createCronCommands()) {
+    registry.register(definition, handler);
+  }
+  for (const { definition, handler } of createSecretCommands()) {
+    registry.register(definition, handler);
+  }
+  for (const { definition, handler } of createProcessCommands()) {
     registry.register(definition, handler);
   }
 }

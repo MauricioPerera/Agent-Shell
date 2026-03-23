@@ -93,6 +93,10 @@ export {
   httpCommands, jsonCommands, fileCommands, shellCommands, envCommands,
   createFileCommands, createShellCommands,
   workspaceCommands, createWorkspaceCommands, WorkspaceState,
+  gitCommands,
+  cronCommands, createCronCommands, CronScheduler,
+  secretCommands, createSecretCommands, SecretStore,
+  processCommands, createProcessCommands, ProcessManager,
 } from './skills/index.js';
 export type { SkillEntry } from './skills/index.js';
 

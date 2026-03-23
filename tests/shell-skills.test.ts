@@ -338,7 +338,7 @@ describe('Shell Skills Registration', () => {
     registerShellSkills(registry);
 
     const all = registry.listAll();
-    expect(all).toHaveLength(18);
+    expect(all).toHaveLength(40);
   });
 
   it('INT02: all shell skill definitions have requiredPermissions', () => {
