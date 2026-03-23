@@ -94,7 +94,7 @@ agent-shell serve --transport http --profile reader      # HTTP con perfil restr
 | **ContextStore** | Estado de sesion, historial FIFO, undo con snapshots, TTL, secret detection |
 | **JQ Filter** | Filtrado JSON post-ejecucion con sintaxis jq-subset |
 | **Security** | Audit logging, RBAC, deteccion de secretos, encriptacion de storage |
-| **Skills** | CLI creation (scaffold, wizard, registry admin) + system shell (http, json, file, shell, env) + workspace (persistent cwd/env) |
+| **Skills** | 49 system commands (file, shell, http, json, env, workspace, git, cron, secret, process) + 9 CLI creation commands |
 | **ShellAdapter** | Backend pluggable: just-bash (sandboxed) o native (child_process). Auto-detect. |
 
 ## Uso Basico
@@ -675,9 +675,13 @@ registerShellSkills(registry, adapter);
 |-----------|----------|---------|---------|
 | `http` | get, post, request | `http:read/write` | fetch nativo |
 | `json` | filter, parse | `json:read` | jq-filter interno |
-| `file` | read, write, list | `file:read/write` | ShellAdapter |
+| `file` | read, write, list, mkdir, delete, rename, chmod | `file:read/write/delete` | ShellAdapter + fs |
 | `shell` | exec, which | `shell:exec/read` | ShellAdapter |
 | `env` | get, list | `env:read` | process.env (masks secrets) |
+| `git` | clone, status, diff, commit, push, pull | `git:read/write` | execSync |
+| `cron` | schedule, list, cancel, history | `cron:read/write` | setInterval |
+| `secret` | set, get, list, delete | `secret:read/write` | AES-256 in-memory |
+| `process` | spawn, list, kill, logs | `process:read/write` | child_process.spawn |
 
 **ShellAdapter backends:**
 - **`just-bash`** (peer dep opcional): Interprete bash TS, filesystem virtual, 79 comandos Unix built-in, sin procesos reales
@@ -704,6 +708,48 @@ workspace:reset    → limpia todo
 | env | Solo process.env | process.env + workspace env |
 | timeout | 30s | 120s (configurable) |
 | history | No | Ultimos 100 comandos |
+
+### Git, Cron, Secrets, Processes
+
+```bash
+# Git — typed operations without workspace:run "git ..."
+git:clone --url https://github.com/user/repo.git --path /opt/myapp
+git:status --cwd /opt/myapp
+git:commit --message "feat: deploy" --add-all true --cwd /opt/myapp
+git:push --remote origin --branch main
+
+# Cron — recurring tasks
+cron:schedule --name backup --command "tar czf /tmp/backup.tar.gz /data" --interval 1h
+cron:schedule --name healthcheck --command "curl http://localhost:3000/health" --interval 30s
+cron:list
+cron:cancel --name backup
+
+# Secrets — AES-256 encrypted, never in logs
+secret:set --name DB_PASSWORD --value supersecret
+secret:get --name DB_PASSWORD
+secret:list   # → names only, no values
+
+# Process Manager — background with log capture
+process:spawn --name devserver --command "npm run dev" --cwd /opt/myapp
+process:logs --name devserver
+process:list
+process:kill --name devserver
+```
+
+### Ejemplo: Deploy completo via MCP
+
+```bash
+workspace:init --path /opt/myapp --create true
+git:clone --url https://github.com/user/repo.git --path /opt/myapp
+workspace:cd --path /opt/myapp
+secret:set --name DB_PASSWORD --value supersecret
+workspace:env --set DATABASE_URL=postgres://user:pass@localhost/mydb
+workspace:run --command "npm install" --timeout 180000
+workspace:run --command "npm run build"
+process:spawn --name server --command "npm start"
+cron:schedule --name backup --command "tar czf /tmp/backup.tar.gz /opt/myapp/data" --interval 1h
+workspace:status
+```
 
 ## CLI Creation Skills
 
@@ -856,6 +902,10 @@ src/
 │   ├── shell-exec.ts        # shell:exec, which
 │   ├── shell-env.ts         # env:get, list
 │   ├── workspace.ts         # workspace:init, run, cd, env, status, reset
+│   ├── shell-git.ts         # git:clone, status, diff, commit, push, pull
+│   ├── cron.ts              # cron:schedule, list, cancel, history
+│   ├── secret-store.ts      # secret:set, get, list, delete (AES-256)
+│   ├── process-mgr.ts       # process:spawn, list, kill, logs
 │   └── index.ts             # registerSkills, registerShellSkills, registerAllSkills
 ├── just-bash/
 │   ├── types.ts             # ShellAdapter, ShellResult interfaces
@@ -866,18 +916,18 @@ src/
     └── index.ts             # Production HTTP server entry point
 
 contracts/                   # Contratos de especificacion por modulo
-tests/                       # 943 tests across 26 suites (vitest)
+tests/                       # 975 tests across 27 suites (vitest)
 docs/                        # PRD, diagramas, roadmap, schemas
 ```
 
 ## Tests
 
-943 tests across 26 suites:
+975 tests across 27 suites:
 
 ```bash
 bun run test
 
-# 26 suites, 943 tests passing
+# 27 suites, 975 tests passing
 # Key suites:
 # ✓ full-system.test.ts (65 tests)        — Full stack integration battery
 # ✓ scalability-promise.test.ts (16 tests) — Token economy proof
@@ -896,7 +946,8 @@ bun run test
 # ✓ agent-permissions.test.ts (22 tests)  — Permission enforcement
 # ✓ http-auth.test.ts (10 tests)          — Bearer token auth
 # ✓ workspace.test.ts (20 tests)          — Persistent workspace
-# + 7 more suites
+# ✓ infra-complete.test.ts (32 tests)     — Git, cron, secrets, process mgr
+# + 6 more suites
 ```
 
 ## Stack Tecnico

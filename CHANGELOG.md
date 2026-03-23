@@ -15,8 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`defaultMatryoshkaConfig()` factory**: Sensible defaults for 768d models (64→128→256→768 funnel)
 - **`SearchResponse.matryoshkaStages`**: Optional diagnostics showing candidate narrowing per layer
 - **CLI Creation Skills** (9 commands): `scaffold:init`, `scaffold:add-namespace`, `scaffold:add-command`, `wizard:create-command`, `wizard:create-namespace`, `registry:list`, `registry:describe`, `registry:stats`, `registry:export`
-- **System Shell Skills** (12 commands): `http:get`, `http:post`, `http:request`, `json:filter`, `json:parse`, `file:read`, `file:write`, `file:list`, `shell:exec`, `shell:which`, `env:get`, `env:list`
-- **Workspace Skills** (6 commands): `workspace:init`, `workspace:run`, `workspace:cd`, `workspace:env`, `workspace:status`, `workspace:reset` — persistent cwd, env, and command history across calls for DevOps workflows
+- **System Shell Skills** (18 commands): `http:get/post/request`, `json:filter/parse`, `file:read/write/list/mkdir/delete/rename/chmod`, `shell:exec/which`, `env:get/list`
+- **Workspace Skills** (6 commands): `workspace:init/run/cd/env/status/reset` — persistent cwd, env, and command history across calls
+- **Git Skills** (6 commands): `git:clone/status/diff/commit/push/pull` — typed git operations with per-command permissions
+- **Cron Skills** (4 commands): `cron:schedule/list/cancel/history` — recurring tasks with shorthand (`30s`, `5m`, `1h`) and cron expressions
+- **Secret Store** (4 commands): `secret:set/get/list/delete` — AES-256-CBC encrypted at rest, values never appear in logs
+- **Process Manager** (4 commands): `process:spawn/list/kill/logs` — background processes with stdout/stderr buffer tracking
 - **Agent Profiles**: Predefined permission profiles (`admin`, `operator`, `reader`, `restricted`) with `agentProfile` config on Core
 - **Permission Enforcement in Core**: `executeCommand()`, `executePipeline()`, search filtering, and describe access control now check agent permissions
 - **ShellAdapter Interface**: Pluggable backend for shell/file skills — `JustBashShellAdapter` (sandboxed, just-bash) or `NativeShellAdapter` (child_process, fallback)
@@ -63,8 +67,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **RBAC Methods**: `checkPermission()`, `checkPermissions()`, `getMissingPermissions()` on RBAC class
 - **PgVector Adapter**: `PgVectorStorageAdapter` for PostgreSQL with pgvector extension (cosine, L2, inner product distances, HNSW index)
 - **Adapter Documentation**: Comprehensive guide at `docs/adapters.md` covering all adapter interfaces with examples
-- 943 total tests across 26 suites (from original 400)
-- 65 full system integration tests, 20 workspace tests, 16 scalability tests, 30 skills tests, 27 shell skills tests, 24 adapter tests, 22 permission tests, 14 matryoshka tests, 10 HTTP auth tests
+- 975 total tests across 27 suites (from original 400)
+- 65 full system tests, 32 infrastructure tests, 20 workspace tests, 16 scalability tests, 30 skills tests, 27 shell skills tests, 24 adapter tests, 22 permission tests, 14 matryoshka tests, 10 HTTP auth tests
 
 ### Changed
 
