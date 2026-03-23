@@ -92,6 +92,8 @@ agent-shell serve    # Requiere registry configurado programaticamente (ver MCP 
 | **ContextStore** | Estado de sesion, historial FIFO, undo con snapshots, TTL, secret detection |
 | **JQ Filter** | Filtrado JSON post-ejecucion con sintaxis jq-subset |
 | **Security** | Audit logging, RBAC, deteccion de secretos, encriptacion de storage |
+| **Skills** | CLI creation (scaffold, wizard, registry admin) + system shell (http, json, file, shell, env) |
+| **ShellAdapter** | Backend pluggable: just-bash (sandboxed) o native (child_process). Auto-detect. |
 
 ## Uso Basico
 
@@ -610,6 +612,91 @@ const loaded = registryAdapter.loadAll(); // Cargar en cold-start
 
 **Caracteristicas:** Auto-migrations, transacciones atomicas, sin dependencias externas (interfaz inyectable).
 
+## Agent Profiles (Control de Acceso)
+
+Agent Shell permite limitar lo que un agente puede descubrir y ejecutar mediante perfiles predefinidos o permisos custom.
+
+```typescript
+// Agente admin — acceso total
+const core = new Core({ registry, agentProfile: 'admin' });
+
+// Agente reader — solo puede buscar, describir y leer
+const core = new Core({ registry, agentProfile: 'reader' });
+
+// Permisos custom
+const core = new Core({ registry, permissions: ['users:read', 'users:create', 'orders:*'] });
+
+// RBAC con roles
+const rbac = new RBAC({ roles: [...], defaultRole: 'viewer' });
+const core = new Core({ registry, rbac, permissions: ['viewer'] });
+```
+
+| Profile | Puede hacer | No puede |
+|---------|-------------|----------|
+| `admin` | Todo | — |
+| `operator` | CRUD, shell, http, files, env | Delete, admin |
+| `reader` | Read, search, describe | Crear, modificar, eliminar |
+| `restricted` | Solo comandos publicos (sin `requiredPermissions`) | Todo lo demas |
+
+**Enforcement en 3 capas:**
+- **Ejecucion**: `executeCommand()` verifica permisos antes del handler
+- **Discovery**: `search` oculta comandos sin permiso; `describe` deniega inspeccion
+- **Pipeline**: Cada step verificado individualmente
+
+Sin `agentProfile` ni `permissions` = sin restricciones (backward compatible).
+
+## Shell Skills (Acceso al Sistema)
+
+Skills opcionales que dan al agente capacidades reales del sistema, protegidas por permisos.
+
+```typescript
+import { registerShellSkills, createShellAdapter } from 'agent-shell';
+
+// Auto-detect: just-bash sandboxed si esta instalado, native child_process si no
+registerShellSkills(registry);
+
+// Forzar backend sandboxed con filesystem virtual
+const adapter = createShellAdapter({
+  prefer: 'just-bash',
+  files: { '/workspace/data.json': '{}' },
+  network: { allowedUrlPrefixes: ['https://api.myapp.com/'] },
+});
+registerShellSkills(registry, adapter);
+```
+
+| Namespace | Comandos | Permiso | Backend |
+|-----------|----------|---------|---------|
+| `http` | get, post, request | `http:read/write` | fetch nativo |
+| `json` | filter, parse | `json:read` | jq-filter interno |
+| `file` | read, write, list | `file:read/write` | ShellAdapter |
+| `shell` | exec, which | `shell:exec/read` | ShellAdapter |
+| `env` | get, list | `env:read` | process.env (masks secrets) |
+
+**ShellAdapter backends:**
+- **`just-bash`** (peer dep opcional): Interprete bash TS, filesystem virtual, 79 comandos Unix built-in, sin procesos reales
+- **`native`** (fallback): `child_process` + `fs/promises`, acceso real al sistema
+
+## CLI Creation Skills
+
+Skills para generar proyectos CLI con Agent Shell.
+
+```typescript
+import { registerSkills } from 'agent-shell';
+registerSkills(registry); // 9 comandos
+```
+
+| Skill | Funcion |
+|-------|---------|
+| `scaffold:init --name my-cli` | Genera proyecto completo (package.json, tsconfig, entry point) |
+| `scaffold:add-namespace --namespace users` | Genera directorio + barrel export |
+| `scaffold:add-command --namespace users --name create` | Genera archivo con CommandBuilder |
+| `wizard:create-command --namespace users --name create --description "..."` | Retorna CommandDefinition + handler skeleton |
+| `wizard:create-namespace --namespace users --commands '[...]'` | Crea N definiciones de una vez |
+| `registry:list` | Lista comandos registrados |
+| `registry:describe --command users:create` | Definicion completa |
+| `registry:stats` | Conteos, namespaces, tags |
+| `registry:export` | Export JSON |
+
 ## Protocolo de Interaccion (Help)
 
 El protocolo que recibe el agente LLM al llamar `cli_help()`:
@@ -690,38 +777,57 @@ src/
 │   ├── rbac-types.ts        # Tipos RBAC
 │   ├── permission-matcher.ts # Matching de permisos con wildcards
 │   └── index.ts             # Barrel exports
-└── vector-index/
-    ├── types.ts             # EmbeddingAdapter, VectorStorageAdapter
-    ├── pgvector-types.ts    # PgClient, PgVectorConfig interfaces
-    ├── pgvector-storage-adapter.ts  # PostgreSQL + pgvector adapter
-    └── index.ts             # VectorIndex
+├── vector-index/
+│   ├── types.ts             # EmbeddingAdapter, VectorStorageAdapter
+│   ├── matryoshka.ts        # Matryoshka progressive search
+│   ├── pgvector-storage-adapter.ts  # PostgreSQL + pgvector adapter
+│   └── index.ts             # VectorIndex
+├── skills/
+│   ├── scaffold.ts          # scaffold:init, add-namespace, add-command
+│   ├── wizard.ts            # wizard:create-command, create-namespace
+│   ├── registry-admin.ts    # registry:list, describe, stats, export
+│   ├── shell-http.ts        # http:get, post, request
+│   ├── shell-json.ts        # json:filter, parse
+│   ├── shell-file.ts        # file:read, write, list
+│   ├── shell-exec.ts        # shell:exec, which
+│   ├── shell-env.ts         # env:get, list
+│   └── index.ts             # registerSkills, registerShellSkills, registerAllSkills
+└── just-bash/
+    ├── types.ts             # ShellAdapter, ShellResult interfaces
+    ├── adapter.ts           # JustBashShellAdapter, NativeShellAdapter
+    ├── factory.ts           # createShellAdapter, isJustBashAvailable
+    └── index.ts             # Barrel exports
 
 contracts/                   # Contratos de especificacion por modulo
-tests/                       # Tests unitarios e integracion (vitest)
+tests/                       # 913 tests across 24 suites (vitest)
 docs/                        # PRD, diagramas, roadmap, schemas
 ```
 
 ## Tests
 
-400 tests cubriendo todos los modulos:
+913 tests across 24 suites:
 
 ```bash
 bun run test
 
-# Output:
-# ✓ tests/parser.test.ts (39 tests)
-# ✓ tests/jq-filter.test.ts (40 tests)
-# ✓ tests/context-store.test.ts (37 tests)
-# ✓ tests/command-registry.test.ts (29 tests)
-# ✓ tests/executor.test.ts (42 tests)
-# ✓ tests/vector-index.test.ts (32 tests)
-# ✓ tests/core.test.ts (29 tests)
-# ✓ tests/mcp-server.test.ts (20 tests)
-# ✓ tests/security.test.ts (45 tests)
-# ✓ tests/integration.test.ts (26 tests)
-# ✓ tests/sqlite-adapters.test.ts (35 tests)
-# ✓ tests/pgvector-adapter.test.ts
-# ✓ tests/command-builder.test.ts (26 tests)
+# 24 suites, 913 tests passing
+# Key suites:
+# ✓ full-system.test.ts (65 tests)        — Full stack integration battery
+# ✓ scalability-promise.test.ts (16 tests) — Token economy proof
+# ✓ minimemory-api.test.ts (100 tests)    — MiniMemory integration
+# ✓ minimemory-commands.test.ts (82 tests) — MiniMemory commands
+# ✓ security.test.ts (63 tests)           — RBAC, audit, secrets
+# ✓ vector-index.test.ts (46 tests)       — Vector search + matryoshka
+# ✓ executor.test.ts (42 tests)           — Execution engine
+# ✓ jq-filter.test.ts (40 tests)          — JSON filtering
+# ✓ context-store.test.ts (37 tests)      — Session state
+# ✓ sqlite-adapters.test.ts (35 tests)    — SQLite persistence
+# ✓ http-transport.test.ts (32 tests)     — HTTP/SSE transport
+# ✓ skills.test.ts (30 tests)             — CLI creation skills
+# ✓ shell-skills.test.ts (27 tests)       — System shell skills
+# ✓ just-bash-adapter.test.ts (24 tests)  — Shell adapter
+# ✓ agent-permissions.test.ts (22 tests)  — Permission enforcement
+# + 9 more suites
 ```
 
 ## Stack Tecnico

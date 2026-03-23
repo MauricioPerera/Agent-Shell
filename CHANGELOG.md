@@ -14,6 +14,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`funnelSearch()` function**: Standalone, testable progressive search with configurable layers and diagnostics
 - **`defaultMatryoshkaConfig()` factory**: Sensible defaults for 768d models (64→128→256→768 funnel)
 - **`SearchResponse.matryoshkaStages`**: Optional diagnostics showing candidate narrowing per layer
+- **CLI Creation Skills** (9 commands): `scaffold:init`, `scaffold:add-namespace`, `scaffold:add-command`, `wizard:create-command`, `wizard:create-namespace`, `registry:list`, `registry:describe`, `registry:stats`, `registry:export`
+- **System Shell Skills** (12 commands): `http:get`, `http:post`, `http:request`, `json:filter`, `json:parse`, `file:read`, `file:write`, `file:list`, `shell:exec`, `shell:which`, `env:get`, `env:list`
+- **Agent Profiles**: Predefined permission profiles (`admin`, `operator`, `reader`, `restricted`) with `agentProfile` config on Core
+- **Permission Enforcement in Core**: `executeCommand()`, `executePipeline()`, search filtering, and describe access control now check agent permissions
+- **ShellAdapter Interface**: Pluggable backend for shell/file skills — `JustBashShellAdapter` (sandboxed, just-bash) or `NativeShellAdapter` (child_process, fallback)
+- **just-bash Integration**: Optional peer dependency for sandboxed bash execution with virtual filesystem and 79 built-in Unix commands
+- **`registerSkills()`**: One-call registration of all 9 CLI creation skills
+- **`registerShellSkills()`**: One-call registration of all 12 system skills with optional `ShellAdapter` injection
+- **`registerAllSkills()`**: Registers all 21 skills (CLI + shell)
+- **`createShellAdapter()`**: Factory with auto-detection of just-bash availability
+- **Env variable masking**: `env:get` and `env:list` mask variables with PASSWORD, SECRET, TOKEN, KEY patterns
+- **Full system integration test**: 65-test battery validating the entire stack end-to-end
+- **Scalability promise test**: 16 tests proving constant ~600 token footprint from 5 to 1000 commands
 - **MCP `initialize` enforcement**: Server now rejects `tools/list` and `tools/call` before `initialize` per MCP spec
 - **MCP `notifications/initialized`**: Server handles client acknowledgement notification
 - **Core history cap**: FIFO eviction at 10,000 entries prevents unbounded memory growth
@@ -44,9 +57,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **RBAC Methods**: `checkPermission()`, `checkPermissions()`, `getMissingPermissions()` on RBAC class
 - **PgVector Adapter**: `PgVectorStorageAdapter` for PostgreSQL with pgvector extension (cosine, L2, inner product distances, HNSW index)
 - **Adapter Documentation**: Comprehensive guide at `docs/adapters.md` covering all adapter interfaces with examples
-- 43 new tests (18 permission matcher + 25 pgvector adapter)
-- 14 new matryoshka tests (funnel search, adapter wrapper, truncateVector)
-- 1 new MCP initialization enforcement test
+- 913 total tests across 24 suites (from original 400)
+- 65 full system integration tests, 16 scalability tests, 30 skills tests, 27 shell skills tests, 24 adapter tests, 22 permission tests, 14 matryoshka tests
 
 ### Changed
 
@@ -61,6 +73,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **minimemory type fixes**: Fixed 8 TypeScript errors from `CommandMetadata` vs `Record<string, unknown>` incompatibility using proper type casts at the Rust binding boundary
 - **minimemory test fixes**: Tests now use injected mock bindings via constructor parameter instead of fragile `require()` cache patching
 - **Demo adapters**: `MiniMemoryVectorStorage` and `MiniMemoryApiAdapter` constructors now accept optional `binding` parameter for testability
+- **Shell skills refactored**: `shell:exec`, `shell:which`, `file:read`, `file:write`, `file:list` now use `ShellAdapter` injection instead of direct `child_process`/`fs` imports
+- **Agent profiles on operator/reader**: Include shell skill permissions (`http:*`, `json:*`, `file:read`, `shell:exec`, `env:read`)
 - **Executor `revokeConfirm()`**: Now returns `boolean` (true if revoked, false if not found)
 - **Executor `revokeAllConfirms()`**: Now returns `number` (count of revoked tokens)
 - **EncryptedStorageAdapter**: Removed `as any` casts, proper CipherGCM/DecipherGCM typing with type narrowing
