@@ -94,7 +94,7 @@ agent-shell serve --transport http --profile reader      # HTTP con perfil restr
 | **ContextStore** | Estado de sesion, historial FIFO, undo con snapshots, TTL, secret detection |
 | **JQ Filter** | Filtrado JSON post-ejecucion con sintaxis jq-subset |
 | **Security** | Audit logging, RBAC, deteccion de secretos, encriptacion de storage |
-| **Skills** | CLI creation (scaffold, wizard, registry admin) + system shell (http, json, file, shell, env) |
+| **Skills** | CLI creation (scaffold, wizard, registry admin) + system shell (http, json, file, shell, env) + workspace (persistent cwd/env) |
 | **ShellAdapter** | Backend pluggable: just-bash (sandboxed) o native (child_process). Auto-detect. |
 
 ## Uso Basico
@@ -683,6 +683,28 @@ registerShellSkills(registry, adapter);
 - **`just-bash`** (peer dep opcional): Interprete bash TS, filesystem virtual, 79 comandos Unix built-in, sin procesos reales
 - **`native`** (fallback): `child_process` + `fs/promises`, acceso real al sistema
 
+### Workspace (Estado persistente)
+
+A diferencia de `shell:exec` (stateless), el workspace mantiene `cwd`, `env` y historial entre llamadas. Ideal para flujos DevOps.
+
+```
+workspace:init --path /opt/myapp --create true
+workspace:env --set DATABASE_URL=postgres://localhost/mydb
+workspace:run --command "git clone https://github.com/user/repo ."
+workspace:run --command "npm install" --timeout 180000
+workspace:cd --path src
+workspace:run --command "npm run build"
+workspace:status   → { cwd, envCount, recentCommands }
+workspace:reset    → limpia todo
+```
+
+| Aspecto | `shell:exec` | `workspace:run` |
+|---------|-------------|-----------------|
+| cwd | Independiente por comando | Persiste entre llamadas |
+| env | Solo process.env | process.env + workspace env |
+| timeout | 30s | 120s (configurable) |
+| history | No | Ultimos 100 comandos |
+
 ## CLI Creation Skills
 
 Skills para generar proyectos CLI con Agent Shell.
@@ -833,6 +855,7 @@ src/
 │   ├── shell-file.ts        # file:read, write, list
 │   ├── shell-exec.ts        # shell:exec, which
 │   ├── shell-env.ts         # env:get, list
+│   ├── workspace.ts         # workspace:init, run, cd, env, status, reset
 │   └── index.ts             # registerSkills, registerShellSkills, registerAllSkills
 ├── just-bash/
 │   ├── types.ts             # ShellAdapter, ShellResult interfaces
@@ -843,18 +866,18 @@ src/
     └── index.ts             # Production HTTP server entry point
 
 contracts/                   # Contratos de especificacion por modulo
-tests/                       # 913 tests across 24 suites (vitest)
+tests/                       # 943 tests across 26 suites (vitest)
 docs/                        # PRD, diagramas, roadmap, schemas
 ```
 
 ## Tests
 
-923 tests across 25 suites:
+943 tests across 26 suites:
 
 ```bash
 bun run test
 
-# 25 suites, 923 tests passing
+# 26 suites, 943 tests passing
 # Key suites:
 # ✓ full-system.test.ts (65 tests)        — Full stack integration battery
 # ✓ scalability-promise.test.ts (16 tests) — Token economy proof
@@ -872,7 +895,8 @@ bun run test
 # ✓ just-bash-adapter.test.ts (24 tests)  — Shell adapter
 # ✓ agent-permissions.test.ts (22 tests)  — Permission enforcement
 # ✓ http-auth.test.ts (10 tests)          — Bearer token auth
-# + 8 more suites
+# ✓ workspace.test.ts (20 tests)          — Persistent workspace
+# + 7 more suites
 ```
 
 ## Stack Tecnico
