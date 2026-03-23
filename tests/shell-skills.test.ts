@@ -9,11 +9,17 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { CommandRegistry } from '../src/command-registry/index.js';
 import { httpCommands } from '../src/skills/shell-http.js';
 import { jsonCommands } from '../src/skills/shell-json.js';
-import { fileCommands } from '../src/skills/shell-file.js';
-import { shellCommands } from '../src/skills/shell-exec.js';
+import { createFileCommands } from '../src/skills/shell-file.js';
+import { createShellCommands } from '../src/skills/shell-exec.js';
 import { envCommands } from '../src/skills/shell-env.js';
 import { registerShellSkills } from '../src/skills/index.js';
+import { NativeShellAdapter } from '../src/just-bash/adapter.js';
 import type { SkillEntry } from '../src/skills/scaffold.js';
+
+// Create adapter-bound commands for testing
+const nativeAdapter = new NativeShellAdapter();
+const shellCommands = createShellCommands(nativeAdapter);
+const fileCommands = createFileCommands(nativeAdapter);
 
 function findHandler(entries: SkillEntry[], namespace: string, name: string): Function {
   const entry = entries.find(e => e.definition.namespace === namespace && e.definition.name === name);

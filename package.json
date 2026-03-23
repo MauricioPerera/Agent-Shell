@@ -62,10 +62,14 @@
     "prepublishOnly": "npm run build"
   },
   "peerDependencies": {
-    "minimemory": ">=0.1.0"
+    "minimemory": ">=0.1.0",
+    "just-bash": ">=2.0.0"
   },
   "peerDependenciesMeta": {
     "minimemory": {
+      "optional": true
+    },
+    "just-bash": {
       "optional": true
     }
   },

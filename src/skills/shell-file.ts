@@ -1,11 +1,10 @@
 /**
  * @module skills/shell-file
- * @description File system skills using fs/promises.
+ * @description File system skills using ShellAdapter for pluggable backend.
  */
 
 import { command } from '../command-builder/index.js';
-import { readFile, writeFile, readdir, stat } from 'node:fs/promises';
-import { join } from 'node:path';
+import type { ShellAdapter } from '../just-bash/types.js';
 import type { SkillEntry } from './scaffold.js';
 
 const readDef = command('file', 'read')
@@ -39,61 +38,55 @@ readDef.requiredPermissions = ['file:read'];
 writeDef.requiredPermissions = ['file:write'];
 listDef.requiredPermissions = ['file:read'];
 
-export const fileCommands: SkillEntry[] = [
-  {
-    definition: readDef,
-    handler: async (args: any) => {
-      try {
-        const encoding = (args.encoding || 'utf-8') as BufferEncoding;
-        const content = await readFile(args.path, { encoding });
-        const stats = await stat(args.path);
-        return { success: true, data: { path: args.path, content, size: stats.size } };
-      } catch (err: any) {
-        return { success: false, data: null, error: `file:read failed: ${err.message}` };
-      }
-    },
-  },
-  {
-    definition: writeDef,
-    handler: async (args: any) => {
-      try {
-        await writeFile(args.path, args.content, 'utf-8');
-        const size = Buffer.byteLength(args.content, 'utf-8');
-        return { success: true, data: { path: args.path, size, written: true } };
-      } catch (err: any) {
-        return { success: false, data: null, error: `file:write failed: ${err.message}` };
-      }
-    },
-  },
-  {
-    definition: listDef,
-    handler: async (args: any) => {
-      try {
-        const dirEntries = await readdir(args.path, { withFileTypes: true });
-        let entries = await Promise.all(
-          dirEntries.map(async (entry) => {
-            const fullPath = join(args.path, entry.name);
-            let size = 0;
-            try {
-              const s = await stat(fullPath);
-              size = s.size;
-            } catch { /* ignore */ }
-            return {
-              name: entry.name,
-              type: entry.isDirectory() ? 'directory' : 'file',
-              size,
-            };
-          })
-        );
-
-        if (args.pattern) {
-          entries = entries.filter(e => e.name.includes(args.pattern));
+/**
+ * Creates file command entries bound to a ShellAdapter.
+ * Called by registerShellSkills() with the active adapter.
+ */
+export function createFileCommands(adapter: ShellAdapter): SkillEntry[] {
+  return [
+    {
+      definition: readDef,
+      handler: async (args: any) => {
+        try {
+          const data = await adapter.readFile(args.path, args.encoding);
+          return { success: true, data };
+        } catch (err: any) {
+          return { success: false, data: null, error: `file:read failed: ${err.message}` };
         }
-
-        return { success: true, data: { path: args.path, entries, count: entries.length } };
-      } catch (err: any) {
-        return { success: false, data: null, error: `file:list failed: ${err.message}` };
-      }
+      },
     },
-  },
-];
+    {
+      definition: writeDef,
+      handler: async (args: any) => {
+        try {
+          const data = await adapter.writeFile(args.path, args.content);
+          return { success: true, data };
+        } catch (err: any) {
+          return { success: false, data: null, error: `file:write failed: ${err.message}` };
+        }
+      },
+    },
+    {
+      definition: listDef,
+      handler: async (args: any) => {
+        try {
+          const data = await adapter.listDir(args.path, args.pattern || undefined);
+          return { success: true, data };
+        } catch (err: any) {
+          return { success: false, data: null, error: `file:list failed: ${err.message}` };
+        }
+      },
+    },
+  ];
+}
+
+// Legacy export for backward compatibility
+export const fileCommands: SkillEntry[] = createFileCommands(
+  new Proxy({} as ShellAdapter, {
+    get(_, prop) {
+      const { NativeShellAdapter } = require('../just-bash/adapter.js');
+      const real = new NativeShellAdapter();
+      return (real as any)[prop].bind(real);
+    },
+  })
+);

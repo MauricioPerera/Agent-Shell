@@ -1,12 +1,11 @@
 /**
  * @module skills/shell-exec
  * @description System shell execution skills.
- * These are the most dangerous skills — require explicit 'shell:exec' permission.
+ * Uses ShellAdapter for pluggable backend (just-bash sandboxed or native child_process).
  */
 
 import { command } from '../command-builder/index.js';
-import { execSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import type { ShellAdapter } from '../just-bash/types.js';
 import type { SkillEntry } from './scaffold.js';
 
 const execDef = command('shell', 'exec')
@@ -16,7 +15,7 @@ const execDef = command('shell', 'exec')
   .optionalParam('cwd', 'string', '')
   .optionalParam('timeout', 'int', 30000)
   .example('shell:exec --command "ls -la" --timeout 5000')
-  .tags('shell', 'exec', 'system', 'dangerous')
+  .tags('shell', 'exec', 'system')
   .build();
 
 const whichDef = command('shell', 'which')
@@ -30,51 +29,52 @@ const whichDef = command('shell', 'which')
 execDef.requiredPermissions = ['shell:exec'];
 whichDef.requiredPermissions = ['shell:read'];
 
-export const shellCommands: SkillEntry[] = [
-  {
-    definition: execDef,
-    handler: async (args: any) => {
-      try {
-        const timeout = args.timeout ?? 30000;
-        const opts: any = {
-          encoding: 'utf-8' as BufferEncoding,
-          timeout,
-          maxBuffer: 1024 * 1024, // 1MB
-          stdio: ['pipe', 'pipe', 'pipe'],
-        };
-        if (args.cwd) opts.cwd = args.cwd;
+/**
+ * Creates shell command entries bound to a ShellAdapter.
+ * Called by registerShellSkills() with the active adapter.
+ */
+export function createShellCommands(adapter: ShellAdapter): SkillEntry[] {
+  return [
+    {
+      definition: execDef,
+      handler: async (args: any) => {
+        try {
+          const result = await adapter.exec(args.command, {
+            cwd: args.cwd || undefined,
+            timeout: args.timeout ?? 30000,
+          });
+          return {
+            success: true,
+            data: { ...result, command: args.command, backend: adapter.backend },
+          };
+        } catch (err: any) {
+          return { success: false, data: null, error: `shell:exec failed: ${err.message}` };
+        }
+      },
+    },
+    {
+      definition: whichDef,
+      handler: async (args: any) => {
+        try {
+          const result = await adapter.which(args.program);
+          return { success: true, data: result };
+        } catch (err: any) {
+          return { success: true, data: { program: args.program, path: null, found: false } };
+        }
+      },
+    },
+  ];
+}
 
-        const stdout = execSync(args.command, opts) as string;
-        return {
-          success: true,
-          data: { stdout: stdout.trim(), stderr: '', exitCode: 0, command: args.command },
-        };
-      } catch (err: any) {
-        // execSync throws on non-zero exit code
-        return {
-          success: true, // still "success" in the sense the command ran
-          data: {
-            stdout: (err.stdout || '').toString().trim(),
-            stderr: (err.stderr || '').toString().trim(),
-            exitCode: err.status ?? 1,
-            command: args.command,
-          },
-        };
-      }
+// Legacy export for backward compatibility (uses NativeShellAdapter inline)
+export const shellCommands: SkillEntry[] = createShellCommands(
+  // Lazy-init native adapter to avoid import issues at module load time
+  new Proxy({} as ShellAdapter, {
+    get(_, prop) {
+      // Deferred init: create real NativeShellAdapter on first use
+      const { NativeShellAdapter } = require('../just-bash/adapter.js');
+      const real = new NativeShellAdapter();
+      return (real as any)[prop].bind(real);
     },
-  },
-  {
-    definition: whichDef,
-    handler: async (args: any) => {
-      try {
-        const isWindows = process.platform === 'win32';
-        const cmd = isWindows ? `where ${args.program}` : `which ${args.program}`;
-        const result = execSync(cmd, { encoding: 'utf-8', timeout: 5000, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
-        const path = result.split('\n')[0].trim();
-        return { success: true, data: { program: args.program, path, found: true } };
-      } catch {
-        return { success: true, data: { program: args.program, path: null, found: false } };
-      }
-    },
-  },
-];
+  })
+);

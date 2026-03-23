@@ -91,8 +91,16 @@ export {
   registerSkills, registerShellSkills, registerAllSkills,
   scaffoldCommands, wizardCommands, registryAdminCommands,
   httpCommands, jsonCommands, fileCommands, shellCommands, envCommands,
+  createFileCommands, createShellCommands,
 } from './skills/index.js';
 export type { SkillEntry } from './skills/index.js';
+
+// Shell adapter (pluggable just-bash / native backend)
+export {
+  createShellAdapter, isJustBashAvailable,
+  JustBashShellAdapter, NativeShellAdapter,
+} from './just-bash/index.js';
+export type { ShellAdapter, ShellResult, ShellAdapterConfig, DirEntry } from './just-bash/index.js';
 
 // minimemory integration (optional peer dependency)
 export {
