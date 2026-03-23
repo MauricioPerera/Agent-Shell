@@ -85,6 +85,10 @@ export { command, CommandBuilder, ParamBuilder } from './command-builder/index.j
 export { McpServer, StdioTransport, HttpSseTransport } from './mcp/index.js';
 export type { McpServerConfig, JsonRpcRequest, JsonRpcResponse, HttpTransportConfig } from './mcp/index.js';
 
+// CLI creation skills
+export { registerSkills, scaffoldCommands, wizardCommands, registryAdminCommands } from './skills/index.js';
+export type { SkillEntry } from './skills/index.js';
+
 // minimemory integration (optional peer dependency)
 export {
   createVectorStorage,
