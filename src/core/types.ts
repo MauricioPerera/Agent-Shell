@@ -55,6 +55,12 @@ export interface CoreConfig {
   registry: CoreRegistry;
   vectorIndex?: CoreVectorIndex;
   contextStore?: CoreContextStore;
+  /** Agent permissions for this Core instance. If set, enforces access control. */
+  permissions?: string[];
+  /** Optional RBAC instance for role-based permission resolution. */
+  rbac?: import('../security/rbac.js').RBAC;
+  /** Predefined agent profile. Takes precedence over permissions[]. */
+  agentProfile?: import('./agent-profiles.js').AgentProfile;
   maxInputLength?: number;
   timeouts?: {
     parser_ms?: number;

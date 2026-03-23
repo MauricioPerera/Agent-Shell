@@ -44,11 +44,12 @@ export type {
   ExecutorConfig,
 } from './executor/index.js';
 
-export { Core } from './core/index.js';
+export { Core, resolveAgentPermissions, AGENT_PROFILES } from './core/index.js';
 export type {
   CoreResponse,
   CoreConfig,
 } from './core/index.js';
+export type { AgentProfile } from './core/agent-profiles.js';
 
 export { VectorIndex, PgVectorStorageAdapter } from './vector-index/index.js';
 export type {

@@ -9,10 +9,14 @@
 
 import { parse } from '../parser/index.js';
 import { applyFilter } from '../jq-filter/index.js';
+import { matchPermissions } from '../security/permission-matcher.js';
+import { resolveAgentPermissions } from './agent-profiles.js';
 import type { ParseResult, ParsedCommand, ParseError } from '../parser/index.js';
 import type { CoreResponse, CoreConfig, CoreRegistry, CoreVectorIndex, CoreContextStore, LogEntry } from './types.js';
 
 export { Core };
+export { resolveAgentPermissions, AGENT_PROFILES } from './agent-profiles.js';
+export type { AgentProfile } from './agent-profiles.js';
 export type { CoreResponse, CoreConfig, CoreRegistry, CoreVectorIndex, CoreContextStore } from './types.js';
 
 const LOG_LEVELS: Record<string, number> = { DEBUG: 0, INFO: 1, WARN: 2, ERROR: 3 };
@@ -98,6 +102,7 @@ class Core {
   private readonly registry: CoreRegistry;
   private readonly vectorIndex: CoreVectorIndex | null;
   private readonly contextStore: CoreContextStore | null;
+  private readonly agentPermissions: string[] | null;
   private readonly logger: CoreLogger;
   private readonly history: Array<{ command: string; code: number; timestamp: string }> = [];
   private static readonly MAX_HISTORY = 10_000;
@@ -108,6 +113,7 @@ class Core {
     this.registry = config.registry;
     this.vectorIndex = config.vectorIndex || null;
     this.contextStore = config.contextStore || null;
+    this.agentPermissions = resolveAgentPermissions(config);
     this.logger = new CoreLogger(config.logging);
   }
 
@@ -269,6 +275,13 @@ class Core {
       return { _error: { code: 2, error: `Command not found: ${namespace}:${command}` } };
     }
 
+    // Check agent permissions
+    if (this.agentPermissions && registeredCmd.requiredPermissions?.length) {
+      if (!matchPermissions(this.agentPermissions, registeredCmd.requiredPermissions)) {
+        return { _error: { code: 3, error: `Permission denied: ${namespace}:${command}` } };
+      }
+    }
+
     // Validate mode: check required params
     if (flags.validate) {
       return this.validateCommand(registeredCmd, args);
@@ -303,6 +316,14 @@ class Core {
         }
         const query = args.positional.join(' ');
         const searchResult = await this.vectorIndex.search(query);
+        // Filter results by agent permissions — hide commands the agent cannot access
+        if (this.agentPermissions && searchResult.results) {
+          searchResult.results = searchResult.results.filter((r: any) => {
+            const cmd = this.registry.get(r.namespace, r.command);
+            if (!cmd?.requiredPermissions?.length) return true;
+            return matchPermissions(this.agentPermissions!, cmd.requiredPermissions);
+          });
+        }
         return searchResult;
       }
 
@@ -315,6 +336,12 @@ class Core {
         const definition = this.registry.get(ns, cmd);
         if (!definition) {
           return { _error: { code: 2, error: `Command not found: ${target}` } };
+        }
+        // Check agent permissions before revealing command definition
+        if (this.agentPermissions && definition.requiredPermissions?.length) {
+          if (!matchPermissions(this.agentPermissions, definition.requiredPermissions)) {
+            return { _error: { code: 3, error: `Permission denied: cannot describe ${target}` } };
+          }
         }
         return definition;
       }
@@ -411,6 +438,13 @@ class Core {
       const registeredCmd = this.registry.get(namespace, command);
       if (!registeredCmd) {
         return { _error: { code: 2, error: `Command not found: ${namespace}:${command}` } };
+      }
+
+      // Check agent permissions for each pipeline step
+      if (this.agentPermissions && registeredCmd.requiredPermissions?.length) {
+        if (!matchPermissions(this.agentPermissions, registeredCmd.requiredPermissions)) {
+          return { _error: { code: 3, error: `Permission denied at pipeline step: ${namespace}:${command}` } };
+        }
       }
 
       const handlerArgs: Record<string, any> = { ...args.named };
