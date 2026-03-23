@@ -34,6 +34,8 @@ export class HttpSseTransport {
   private readonly heartbeatInterval: number;
   private readonly requestTimeout: number;
   private readonly maxBodySize: number;
+  private readonly authToken: string | null;
+  private readonly authExcludePaths: Set<string>;
 
   constructor(config?: HttpTransportConfig) {
     this._port = config?.port ?? 3000;
@@ -42,6 +44,8 @@ export class HttpSseTransport {
     this.heartbeatInterval = config?.heartbeatInterval ?? 30_000;
     this.requestTimeout = config?.requestTimeout ?? 30_000;
     this.maxBodySize = config?.maxBodySize ?? 65_536;
+    this.authToken = config?.auth?.bearerToken ?? null;
+    this.authExcludePaths = new Set(config?.auth?.excludePaths ?? ['/health']);
   }
 
   /** Registra el handler de mensajes (misma interfaz que StdioTransport). */
@@ -127,6 +131,15 @@ export class HttpSseTransport {
 
     // Apply CORS headers
     this.applyCorsHeaders(req, res);
+
+    // Bearer token authentication
+    if (this.authToken && !this.authExcludePaths.has(url)) {
+      const authHeader = req.headers.authorization;
+      if (!authHeader || authHeader !== `Bearer ${this.authToken}`) {
+        this.sendJson(res, 401, { error: 'Unauthorized', message: 'Valid Bearer token required in Authorization header' });
+        return;
+      }
+    }
 
     if (url === '/rpc' && method === 'POST') {
       this.handleRpc(req, res);

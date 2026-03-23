@@ -102,6 +102,13 @@ export interface HttpTransportConfig {
   host?: string;
   /** Origenes CORS permitidos. Default: ninguno (sin CORS headers) */
   corsOrigin?: string | string[];
+  /** Bearer token authentication. If set, all requests require Authorization header. */
+  auth?: {
+    /** Required Bearer token value. */
+    bearerToken: string;
+    /** Paths excluded from auth (default: ['/health']). */
+    excludePaths?: string[];
+  };
   /** Intervalo de heartbeat SSE en ms. Default: 30000 */
   heartbeatInterval?: number;
   /** Timeout de request en ms. Default: 30000 */

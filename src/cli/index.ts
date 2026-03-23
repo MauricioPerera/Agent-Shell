@@ -3,15 +3,21 @@
  * @module cli
  * @description Entry point CLI de Agent Shell.
  *
- * Subcomandos:
- *   serve   - Inicia el servidor MCP (stdio o http)
- *   help    - Muestra ayuda del CLI
- *   version - Muestra la version
+ * Subcommands:
+ *   serve   - Start MCP server (stdio, http, or production HTTP with auth)
+ *   help    - Show CLI help
+ *   version - Show version
  */
 
 import { McpServer } from '../mcp/server.js';
 import { HttpSseTransport } from '../mcp/http-transport.js';
 import { Core } from '../core/index.js';
+import { CommandRegistry } from '../command-registry/index.js';
+import { registerSkills, registerShellSkills } from '../skills/index.js';
+import { createShellAdapter } from '../just-bash/factory.js';
+import type { AgentProfile } from '../core/agent-profiles.js';
+import { readFileSync, existsSync } from 'node:fs';
+import { resolve } from 'node:path';
 
 const VERSION = '0.1.0';
 
@@ -22,91 +28,142 @@ Usage:
   agent-shell <command> [options]
 
 Commands:
-  serve       Start MCP server (default: stdio transport)
+  serve       Start MCP server with all skills registered
   version     Show version
   help        Show this help message
 
 Serve Options:
-  --transport <stdio|http>  Transport to use (default: stdio)
-  --port <number>           HTTP port (default: 3000, only with --transport http)
-  --host <string>           HTTP host (default: 127.0.0.1, only with --transport http)
-  --cors-origin <origin>    CORS origin (only with --transport http)
+  --transport <stdio|http>  Transport (default: stdio)
+  --port <number>           HTTP port (default: 3000)
+  --host <string>           HTTP host (default: 0.0.0.0)
+  --token <string>          Bearer token for auth (or env: AGENT_SHELL_TOKEN)
+  --profile <string>        Agent profile: admin|operator|reader|restricted
+  --cors-origin <origin>    CORS origin (default: *)
+  --no-cli-skills           Skip registering CLI creation skills
+  --no-shell-skills         Skip registering system shell skills
 
-Options:
-  --help, -h  Show help
+Environment Variables:
+  AGENT_SHELL_PORT          HTTP port
+  AGENT_SHELL_HOST          HTTP host
+  AGENT_SHELL_TOKEN         Bearer token
+  AGENT_SHELL_PROFILE       Agent profile
+  AGENT_SHELL_CORS_ORIGIN   CORS origin
+
+Config File:
+  agent-shell.config.json   Loaded from working directory (env vars override)
 
 Examples:
-  agent-shell serve                          Start MCP server (stdio)
-  agent-shell serve --transport http         Start HTTP/SSE server on port 3000
-  agent-shell serve --transport http --port 8080
-  agent-shell version                        Print version
+  agent-shell serve                                    Stdio transport
+  agent-shell serve --transport http --token secret    HTTP with auth
+  AGENT_SHELL_TOKEN=secret agent-shell serve --transport http
 
-For more info: https://github.com/anthropics/agent-shell
+For deployment guide: docs/deployment.md
 `.trim();
-
-function showHelp(): void {
-  console.log(USAGE);
-}
-
-function showVersion(): void {
-  console.log(`agent-shell v${VERSION}`);
-}
 
 function parseFlag(args: string[], flag: string): string | undefined {
   const idx = args.indexOf(flag);
-  if (idx !== -1 && idx + 1 < args.length) {
-    return args[idx + 1];
-  }
+  if (idx !== -1 && idx + 1 < args.length) return args[idx + 1];
   return undefined;
 }
 
-function serve(config: { registry: any; vectorIndex?: any; contextStore?: any }): void {
-  const core = new Core(config);
+function hasFlag(args: string[], flag: string): boolean {
+  return args.includes(flag);
+}
+
+function loadConfigFile(): Record<string, any> {
+  const configPath = resolve(process.cwd(), 'agent-shell.config.json');
+  if (!existsSync(configPath)) return {};
+  try {
+    return JSON.parse(readFileSync(configPath, 'utf-8'));
+  } catch {
+    return {};
+  }
+}
+
+function buildRegistry(args: string[]): CommandRegistry {
+  const registry = new CommandRegistry();
+
+  if (!hasFlag(args, '--no-cli-skills')) {
+    registerSkills(registry);
+  }
+
+  if (!hasFlag(args, '--no-shell-skills')) {
+    const adapter = createShellAdapter();
+    registerShellSkills(registry, adapter);
+  }
+
+  return registry;
+}
+
+function serveStdio(args: string[]): void {
+  const fileConfig = loadConfigFile();
+  const profile = (parseFlag(args, '--profile') || process.env.AGENT_SHELL_PROFILE || fileConfig.agentProfile) as AgentProfile | undefined;
+
+  const registry = buildRegistry(args);
+  const coreConfig: any = { registry };
+  if (profile) coreConfig.agentProfile = profile;
+
+  const core = new Core(coreConfig);
   const server = new McpServer({ core, version: VERSION });
 
-  // Graceful shutdown
-  process.on('SIGINT', () => {
-    server.stop();
-    process.exit(0);
-  });
-  process.on('SIGTERM', () => {
-    server.stop();
-    process.exit(0);
-  });
+  process.on('SIGINT', () => { server.stop(); process.exit(0); });
+  process.on('SIGTERM', () => { server.stop(); process.exit(0); });
 
   server.start();
 }
 
 async function serveHttp(args: string[]): Promise<void> {
-  const port = parseInt(parseFlag(args, '--port') || '3000', 10);
-  const host = parseFlag(args, '--host') || '127.0.0.1';
-  const corsOrigin = parseFlag(args, '--cors-origin');
+  const fileConfig = loadConfigFile();
 
-  // Programmatic registry setup required
-  console.error('Error: "serve --transport http" requires a configured registry.');
-  console.error('Use the HttpSseTransport API programmatically with your command registry.');
-  console.error('');
-  console.error('Example:');
-  console.error('  import { Core, McpServer, HttpSseTransport } from "agent-shell";');
-  console.error('  const core = new Core({ registry });');
-  console.error('  const mcp = new McpServer({ core });');
-  console.error(`  const transport = new HttpSseTransport({ port: ${port}, host: "${host}"${corsOrigin ? `, corsOrigin: "${corsOrigin}"` : ''} });`);
-  console.error('  transport.onMessage((req) => mcp.handleMessage(req));');
-  console.error('  await transport.start();');
-  process.exit(1);
+  const port = parseInt(parseFlag(args, '--port') || process.env.AGENT_SHELL_PORT || fileConfig.port || '3000', 10);
+  const host = parseFlag(args, '--host') || process.env.AGENT_SHELL_HOST || fileConfig.host || '0.0.0.0';
+  const token = parseFlag(args, '--token') || process.env.AGENT_SHELL_TOKEN || fileConfig.auth?.bearerToken;
+  const profile = (parseFlag(args, '--profile') || process.env.AGENT_SHELL_PROFILE || fileConfig.agentProfile) as AgentProfile | undefined;
+  const corsOrigin = parseFlag(args, '--cors-origin') || process.env.AGENT_SHELL_CORS_ORIGIN || fileConfig.corsOrigin || '*';
+
+  const registry = buildRegistry(args);
+  const totalCommands = registry.listAll().length;
+
+  const coreConfig: any = { registry };
+  if (profile) coreConfig.agentProfile = profile;
+
+  const core = new Core(coreConfig);
+  const mcpServer = new McpServer({ core, version: VERSION });
+
+  const transport = new HttpSseTransport({
+    port, host, corsOrigin,
+    auth: token ? { bearerToken: token } : undefined,
+  });
+
+  transport.onMessage(async (msg) => mcpServer.handleMessage(msg));
+  await transport.start();
+
+  console.log(`Agent Shell v${VERSION}`);
+  console.log(`  ${totalCommands} commands registered`);
+  console.log(`  Auth: ${token ? 'Bearer token' : 'DISABLED'}`);
+  console.log(`  Profile: ${profile || 'unrestricted'}`);
+  console.log(`  Listening: http://${host}:${port}`);
+
+  if (!token) {
+    console.warn('\n  WARNING: No auth token set. Server is open.');
+    console.warn('  Use --token <value> or AGENT_SHELL_TOKEN env var.\n');
+  }
+
+  process.on('SIGINT', async () => { await transport.stop(); process.exit(0); });
+  process.on('SIGTERM', async () => { await transport.stop(); process.exit(0); });
 }
 
-/** Punto de entrada principal del CLI. */
+/** CLI entry point. */
 export function main(args: string[] = process.argv.slice(2)): void {
   const command = args[0];
 
   if (!command || command === 'help' || command === '--help' || command === '-h') {
-    showHelp();
+    console.log(USAGE);
     return;
   }
 
   if (command === 'version' || command === '--version' || command === '-v') {
-    showVersion();
+    console.log(`agent-shell v${VERSION}`);
     return;
   }
 
@@ -118,22 +175,12 @@ export function main(args: string[] = process.argv.slice(2)): void {
       return;
     }
 
-    if (transport !== 'stdio') {
-      console.error(`Unknown transport: ${transport}. Use "stdio" or "http".`);
-      process.exit(1);
+    if (transport === 'stdio') {
+      serveStdio(args);
       return;
     }
 
-    // In serve mode, the registry must be provided programmatically
-    // or via a config file. For now, we start with an empty registry.
-    // Users should use the API directly for custom setups.
-    console.error('Error: "serve" requires a configured registry.');
-    console.error('Use the McpServer API programmatically with your command registry.');
-    console.error('');
-    console.error('Example:');
-    console.error('  import { Core, McpServer } from "agent-shell";');
-    console.error('  const core = new Core({ registry });');
-    console.error('  new McpServer({ core }).start();');
+    console.error(`Unknown transport: ${transport}. Use "stdio" or "http".`);
     process.exit(1);
     return;
   }

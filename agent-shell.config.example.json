@@ -1,0 +1,14 @@
+{
+  "port": 3000,
+  "host": "0.0.0.0",
+  "auth": {
+    "bearerToken": "CHANGE-ME-use-a-strong-random-token"
+  },
+  "agentProfile": "operator",
+  "corsOrigin": "*",
+  "skills": {
+    "cli": true,
+    "shell": true
+  },
+  "shellAdapter": "native"
+}
