@@ -15,6 +15,7 @@ import type {
   JsonRpcRequest,
   JsonRpcResponse,
   McpServerConfig,
+  McpCore,
   McpToolDefinition,
   McpToolCallParams,
   McpToolResult,
@@ -23,6 +24,7 @@ import type {
 import {
   METHOD_NOT_FOUND,
   INVALID_PARAMS,
+  INVALID_REQUEST,
   INTERNAL_ERROR,
 } from './types.js';
 
@@ -60,7 +62,7 @@ const TOOLS: McpToolDefinition[] = [
  */
 export class McpServer {
   private readonly transport: StdioTransport;
-  private readonly core: any;
+  private readonly core: McpCore;
   private readonly name: string;
   private readonly version: string;
   private initialized = false;
@@ -93,12 +95,25 @@ export class McpServer {
     switch (request.method) {
       case 'initialize':
         return this.handleInitialize(request);
-      case 'tools/list':
-        return this.handleToolsList(request);
-      case 'tools/call':
-        return this.handleToolsCall(request);
+      case 'notifications/initialized':
+        // Client acknowledgement after initialize - no response needed for notifications
+        return null;
       case 'ping':
         return this.handlePing(request);
+      case 'tools/list':
+      case 'tools/call': {
+        // Reject requests before initialization per MCP spec
+        if (!this.initialized) {
+          return {
+            jsonrpc: '2.0',
+            id: request.id!,
+            error: { code: INVALID_REQUEST, message: 'Server not initialized. Send "initialize" first.' },
+          };
+        }
+        return request.method === 'tools/list'
+          ? this.handleToolsList(request)
+          : this.handleToolsCall(request);
+      }
       default:
         return {
           jsonrpc: '2.0',

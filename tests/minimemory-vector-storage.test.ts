@@ -22,7 +22,6 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { createRequire } from 'module';
 
 // Create mock state
 let _currentInstance: any = null;
@@ -81,30 +80,25 @@ function _resetMock(): void {
   MockVectorDB.mockClear();
 }
 
-// Override require cache to inject our mock for 'minimemory'
-const require = createRequire(import.meta.url);
-const minimemoryMock = {
+// Use the mock binding directly — the src/ MiniMemoryVectorStorage accepts
+// an optional `binding` parameter, avoiding the need to mock require('minimemory').
+const mockBinding = {
   VectorDB: MockVectorDB,
-  _getMockInstance,
-  _getMockStore,
-  _resetMock,
 };
-
-// Find and replace the minimemory in require cache
-const minimemoryPath = require.resolve('minimemory');
-require.cache[minimemoryPath] = {
-  id: minimemoryPath,
-  filename: minimemoryPath,
-  loaded: true,
-  exports: minimemoryMock,
-} as any;
 
 // Use the mock VectorDB for assertions
 const VectorDB = MockVectorDB;
 
-import { MiniMemoryVectorStorage } from '../demo/adapters/minimemory-vector-storage.js';
-import type { MiniMemoryVectorStorageConfig } from '../demo/adapters/minimemory-vector-storage.js';
+import { MiniMemoryVectorStorage as _MiniMemoryVectorStorage } from '../src/minimemory/vector-storage.js';
+import type { MiniMemoryVectorStorageConfig } from '../src/minimemory/types.js';
 import type { VectorEntry, VectorSearchQuery } from '../src/vector-index/types.js';
+
+// Wrap constructor to always inject mock binding
+class MiniMemoryVectorStorage extends _MiniMemoryVectorStorage {
+  constructor(config: MiniMemoryVectorStorageConfig) {
+    super(config, mockBinding as any);
+  }
+}
 
 // --- Helpers ---
 

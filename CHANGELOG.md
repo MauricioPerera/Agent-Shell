@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Matryoshka Progressive Search**: Multi-resolution funnel search (64d→128d→256d→768d) for faster vector discovery with Matryoshka-trained embedding models
+- **MatryoshkaEmbeddingAdapter**: Adapter-agnostic decorator that truncates embeddings to configurable dimensions
+- **`funnelSearch()` function**: Standalone, testable progressive search with configurable layers and diagnostics
+- **`defaultMatryoshkaConfig()` factory**: Sensible defaults for 768d models (64→128→256→768 funnel)
+- **`SearchResponse.matryoshkaStages`**: Optional diagnostics showing candidate narrowing per layer
+- **MCP `initialize` enforcement**: Server now rejects `tools/list` and `tools/call` before `initialize` per MCP spec
+- **MCP `notifications/initialized`**: Server handles client acknowledgement notification
+- **Core history cap**: FIFO eviction at 10,000 entries prevents unbounded memory growth
 - **Core Rate Limiting**: Sliding window (120 req/min) with burst control (20 req/s)
 - **Core Timeouts**: Global 30s timeout + per-subsystem (parser 100ms, search 2s, executor 5s, jq 500ms)
 - **Core Pipeline Depth Limit**: Max 10 commands per pipeline
@@ -37,9 +45,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **PgVector Adapter**: `PgVectorStorageAdapter` for PostgreSQL with pgvector extension (cosine, L2, inner product distances, HNSW index)
 - **Adapter Documentation**: Comprehensive guide at `docs/adapters.md` covering all adapter interfaces with examples
 - 43 new tests (18 permission matcher + 25 pgvector adapter)
+- 14 new matryoshka tests (funnel search, adapter wrapper, truncateVector)
+- 1 new MCP initialization enforcement test
 
 ### Changed
 
+- **Strong typing**: Replaced `any` dependencies in Core, Executor, and McpServer with concrete interfaces (`CoreRegistry`, `CoreVectorIndex`, `CoreContextStore`, `McpCore`, `ExecutorRegistry`)
+- **Batch parallel execution**: Both Core and Executor now use `Promise.allSettled()` for true parallel batch execution (was sequential `for...of`)
+- **VectorIndex native search**: `search()` now delegates to `storageAdapter.search()` for native backend performance (pgvector HNSW, minimemory), with in-memory cosine fallback
+- **Timer leak fix**: `withTimeout()` in Core and Executor now clears `setTimeout` via `.finally()` to prevent orphaned timers
+- **CSV escape**: Output format `csv` now correctly escapes values containing commas, quotes, and newlines (RFC 4180)
+- **Batch limit aligned**: Core batch limit changed from 50 to 20, consistent with parser's `MAX_BATCH_SIZE`
+- **HELP_TEXT in English**: Unified interaction protocol to English for consistency with all other messages
+- **Executor**: Removed unnecessary `structuredClone()` on every execution
+- **minimemory type fixes**: Fixed 8 TypeScript errors from `CommandMetadata` vs `Record<string, unknown>` incompatibility using proper type casts at the Rust binding boundary
+- **minimemory test fixes**: Tests now use injected mock bindings via constructor parameter instead of fragile `require()` cache patching
+- **Demo adapters**: `MiniMemoryVectorStorage` and `MiniMemoryApiAdapter` constructors now accept optional `binding` parameter for testability
 - **Executor `revokeConfirm()`**: Now returns `boolean` (true if revoked, false if not found)
 - **Executor `revokeAllConfirms()`**: Now returns `number` (count of revoked tokens)
 - **EncryptedStorageAdapter**: Removed `as any` casts, proper CipherGCM/DecipherGCM typing with type narrowing

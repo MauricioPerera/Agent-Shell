@@ -220,6 +220,50 @@ class OllamaEmbeddingAdapter implements EmbeddingAdapter {
 }
 ```
 
+### MatryoshkaEmbeddingAdapter (Decorator)
+
+Wrapper adapter-agnostico que habilita Matryoshka progressive search. Envuelve cualquier `EmbeddingAdapter` existente y opcionalmente trunca los vectores a una dimension maxima.
+
+```typescript
+import { MatryoshkaEmbeddingAdapter } from 'agent-shell';
+
+// Pass-through: preserva dimension original (768d)
+const adapter = new MatryoshkaEmbeddingAdapter(ollamaAdapter);
+
+// Truncar: cap a 256d para storage mas compacto
+const truncated = new MatryoshkaEmbeddingAdapter(ollamaAdapter, 256);
+
+const result = await truncated.embed('test');
+// result.vector.length === 256
+// result.dimensions === 256
+```
+
+> **Importante:** Para que Matryoshka funcione correctamente, el modelo de embeddings debe estar entrenado con Matryoshka loss. Modelos compatibles: Gemma Embedding, nomic-embed-text, mxbai-embed-large (Ollama), OpenAI text-embedding-3-small/large.
+
+**Configuracion de busqueda progresiva:**
+
+```typescript
+import { VectorIndex, defaultMatryoshkaConfig } from 'agent-shell';
+
+const index = new VectorIndex({
+  embeddingAdapter: ollamaAdapter,  // cualquier adapter, no necesita wrapper
+  storageAdapter: memoryAdapter,
+  defaultTopK: 5,
+  defaultThreshold: 0.3,
+  matryoshka: defaultMatryoshkaConfig(768),
+  // Equivale a:
+  // matryoshka: {
+  //   enabled: true,
+  //   fullDimensions: 768,
+  //   layers: [
+  //     { dimensions: 64, candidateTopK: 50 },
+  //     { dimensions: 128, candidateTopK: 25 },
+  //     { dimensions: 256, candidateTopK: 10 },
+  //   ],
+  // },
+});
+```
+
 ---
 
 ## 3. VectorStorageAdapter (Almacenamiento vectorial)

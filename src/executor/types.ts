@@ -8,6 +8,11 @@
 
 import type { AuditLogger } from '../security/audit-logger.js';
 
+/** Interfaz minima del registry consumida por Executor. */
+export interface ExecutorRegistry {
+  resolve(fullName: string): { ok: true; value: { definition: any; handler: Function; undoHandler?: Function } } | { ok: false; error: any };
+}
+
 /** Resultado de una ejecucion simple de comando. */
 export interface ExecutionResult {
   code: 0 | 1 | 2 | 3 | 4;

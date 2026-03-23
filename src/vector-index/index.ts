@@ -22,11 +22,14 @@ import type {
   IndexStats,
   HealthStatus,
   VectorIndexConfig,
+  MatryoshkaStageInfo,
 } from './types.js';
 import { MAX_RESULTS, VectorIndexError } from './types.js';
+import { funnelSearch } from './matryoshka.js';
 
 export { VectorIndex };
 export { PgVectorStorageAdapter } from './pgvector-storage-adapter.js';
+export { MatryoshkaEmbeddingAdapter, funnelSearch, truncateVector, defaultMatryoshkaConfig } from './matryoshka.js';
 export type { PgClient, PgVectorConfig, PgQueryResult } from './pgvector-types.js';
 export type {
   EmbeddingAdapter,
@@ -43,6 +46,9 @@ export type {
   IndexStats,
   HealthStatus,
   VectorIndexConfig,
+  MatryoshkaConfig,
+  MatryoshkaResolutionLayer,
+  MatryoshkaStageInfo,
 } from './types.js';
 export { VectorIndexError, VECTOR_ERROR_CODES } from './types.js';
 
@@ -260,34 +266,45 @@ class VectorIndex {
     }
     const queryVector = embResult.vector;
 
-    // Compute cosine similarity against all indexed vectors
-    let candidates: { id: string; score: number; metadata: CommandMetadata }[] = [];
+    let candidates: { id: string; score: number; metadata: CommandMetadata }[];
+    let matryoshkaStages: MatryoshkaStageInfo[] | undefined;
 
-    for (const [id, entry] of this.indexed) {
-      // Namespace filter
-      if (options?.namespace && entry.metadata.namespace !== options.namespace) {
-        continue;
-      }
-      // Tags filter (all tags must match)
-      if (options?.tags && options.tags.length > 0) {
-        const entryTags = entry.metadata.tags || [];
-        const hasAllTags = options.tags.every(t => entryTags.includes(t));
-        if (!hasAllTags) continue;
-      }
-      // ExcludeIds filter
-      if (options?.excludeIds && options.excludeIds.includes(id)) {
-        continue;
-      }
-
-      const score = cosineSimilarity(queryVector, entry.vector);
-      if (score >= threshold) {
-        candidates.push({ id, score, metadata: entry.metadata });
+    if (this.config.matryoshka?.enabled) {
+      // Matryoshka progressive funnel search against in-memory index
+      const funnel = funnelSearch(
+        queryVector,
+        this.indexed.entries(),
+        this.config.matryoshka.layers,
+        this.config.matryoshka.fullDimensions,
+        topK,
+        threshold,
+        options,
+      );
+      candidates = funnel.results;
+      matryoshkaStages = funnel.stages;
+    } else {
+      // Standard path: delegate to storage adapter with in-memory fallback
+      try {
+        const searchQuery: import('./types.js').VectorSearchQuery = {
+          vector: queryVector,
+          topK,
+          threshold,
+          filters: {
+            namespace: options?.namespace,
+            tags: options?.tags,
+            excludeIds: options?.excludeIds,
+          },
+        };
+        const storageResults = await this.storageAdapter.search(searchQuery);
+        candidates = storageResults.map(r => ({
+          id: r.id,
+          score: r.score,
+          metadata: r.metadata,
+        }));
+      } catch {
+        candidates = this.searchInMemory(queryVector, topK, threshold, options);
       }
     }
-
-    // Sort by score descending and limit to topK
-    candidates.sort((a, b) => b.score - a.score);
-    candidates = candidates.slice(0, topK);
 
     const totalIndexed = this.indexed.size;
     const searchTimeMs = Date.now() - startTime;
@@ -308,7 +325,35 @@ class VectorIndex {
       totalIndexed,
       searchTimeMs,
       model: this.embeddingAdapter.getModelId(),
+      ...(matryoshkaStages ? { matryoshkaStages } : {}),
     };
+  }
+
+  /** Fallback: in-memory brute-force cosine similarity search. */
+  private searchInMemory(
+    queryVector: number[],
+    topK: number,
+    threshold: number,
+    options?: SearchOptions
+  ): { id: string; score: number; metadata: CommandMetadata }[] {
+    let candidates: { id: string; score: number; metadata: CommandMetadata }[] = [];
+
+    for (const [id, entry] of this.indexed) {
+      if (options?.namespace && entry.metadata.namespace !== options.namespace) continue;
+      if (options?.tags && options.tags.length > 0) {
+        const entryTags = entry.metadata.tags || [];
+        if (!options.tags.every(t => entryTags.includes(t))) continue;
+      }
+      if (options?.excludeIds && options.excludeIds.includes(id)) continue;
+
+      const score = cosineSimilarity(queryVector, entry.vector);
+      if (score >= threshold) {
+        candidates.push({ id, score, metadata: entry.metadata });
+      }
+    }
+
+    candidates.sort((a, b) => b.score - a.score);
+    return candidates.slice(0, topK);
   }
 
   /**

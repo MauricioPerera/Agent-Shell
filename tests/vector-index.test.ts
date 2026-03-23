@@ -174,16 +174,28 @@ function createMockStorageAdapter(): VectorStorageAdapter & { _entries: Map<stri
       return { success: ids.length, failed: 0 };
     },
     async search(query: VectorSearchQuery): Promise<VectorSearchResult[]> {
-      // Simular busqueda por similaridad (mock: retornar todos con score decreciente)
+      // Compute real cosine similarity for accurate test results
       const all = Array.from(entries.values());
-      let results = all.map((entry, idx) => ({
-        id: entry.id,
-        score: Math.max(0, 1 - idx * 0.1),
-        metadata: entry.metadata,
-      }));
+      let results = all.map((entry) => {
+        let dot = 0, normA = 0, normB = 0;
+        for (let i = 0; i < query.vector.length; i++) {
+          dot += query.vector[i] * entry.vector[i];
+          normA += query.vector[i] * query.vector[i];
+          normB += entry.vector[i] * entry.vector[i];
+        }
+        const denom = Math.sqrt(normA) * Math.sqrt(normB);
+        const score = denom === 0 ? 0 : dot / denom;
+        return { id: entry.id, score, metadata: entry.metadata };
+      });
 
       if (query.filters?.namespace) {
         results = results.filter(r => r.metadata.namespace === query.filters!.namespace);
+      }
+      if (query.filters?.tags && query.filters.tags.length > 0) {
+        results = results.filter(r => query.filters!.tags!.every(t => r.metadata.tags.includes(t)));
+      }
+      if (query.filters?.excludeIds) {
+        results = results.filter(r => !query.filters!.excludeIds!.includes(r.id));
       }
       if (query.threshold) {
         results = results.filter(r => r.score >= query.threshold!);
@@ -799,6 +811,235 @@ describe('Vector Index', () => {
     it('E005: removeCommand de id inexistente no crashea', async () => {
       // Debe ser no-op con warning, no excepcion
       await expect(vectorIndex.removeCommand('nonexistent:cmd')).resolves.not.toThrow();
+    });
+  });
+
+  // ==========================================================================
+  // Matryoshka Progressive Search
+  // ==========================================================================
+
+  describe('Matryoshka progressive search', () => {
+    let matryoshkaIndex: VectorIndex;
+    let embeddingAdapter: EmbeddingAdapter;
+    let storageAdapter: ReturnType<typeof createMockStorageAdapter>;
+
+    beforeEach(async () => {
+      embeddingAdapter = createMockEmbeddingAdapter(768);
+      storageAdapter = createMockStorageAdapter();
+      matryoshkaIndex = new VectorIndex({
+        embeddingAdapter,
+        storageAdapter,
+        defaultTopK: 5,
+        defaultThreshold: 0.3,
+        matryoshka: {
+          enabled: true,
+          fullDimensions: 768,
+          layers: [
+            { dimensions: 64, candidateTopK: 50 },
+            { dimensions: 128, candidateTopK: 25 },
+            { dimensions: 256, candidateTopK: 10 },
+          ],
+        },
+      });
+
+      const commands: CommandDefinition[] = [
+        createSampleCommand({ namespace: 'users', name: 'create', description: 'Crea un nuevo usuario' }),
+        createSampleCommand({ namespace: 'users', name: 'list', description: 'Lista todos los usuarios' }),
+        createSampleCommand({ namespace: 'users', name: 'get', description: 'Obtiene un usuario por ID' }),
+        createSampleCommand({ namespace: 'users', name: 'delete', description: 'Elimina un usuario' }),
+        createSampleCommand({ namespace: 'orders', name: 'create', description: 'Crea una nueva orden de compra' }),
+        createSampleCommand({ namespace: 'orders', name: 'list', description: 'Lista todas las ordenes' }),
+        createSampleCommand({ namespace: 'auth', name: 'login', description: 'Inicia sesion de usuario' }),
+      ];
+      await matryoshkaIndex.indexBatch(commands);
+    });
+
+    it('M01: returns matryoshkaStages diagnostics in response', async () => {
+      const response = await matryoshkaIndex.search('crear usuario');
+
+      expect(response.matryoshkaStages).toBeDefined();
+      expect(response.matryoshkaStages!.length).toBe(4); // 64d, 128d, 256d, 768d
+      expect(response.matryoshkaStages![0].dimensions).toBe(64);
+      expect(response.matryoshkaStages![1].dimensions).toBe(128);
+      expect(response.matryoshkaStages![2].dimensions).toBe(256);
+      expect(response.matryoshkaStages![3].dimensions).toBe(768);
+    });
+
+    it('M02: funnel progressively narrows candidates', async () => {
+      const response = await matryoshkaIndex.search('crear usuario');
+      const stages = response.matryoshkaStages!;
+
+      // First stage starts with all 7 commands
+      expect(stages[0].candidatesIn).toBe(7);
+      // Each stage should output <= its configured candidateTopK (or fewer if input is smaller)
+      for (let i = 0; i < stages.length - 1; i++) {
+        expect(stages[i + 1].candidatesIn).toBeLessThanOrEqual(stages[i].candidatesOut);
+      }
+    });
+
+    it('M03: returns valid results with scores', async () => {
+      const response = await matryoshkaIndex.search('crear usuario');
+
+      expect(response.results.length).toBeGreaterThan(0);
+      expect(response.results[0].score).toBeGreaterThan(0);
+      expect(response.results[0].commandId).toBeDefined();
+      expect(response.results[0].namespace).toBeDefined();
+    });
+
+    it('M04: threshold 0.99 returns 0 results for irrelevant query', async () => {
+      const response = await matryoshkaIndex.search('receta de cocina', { threshold: 0.99 });
+
+      expect(response.results).toHaveLength(0);
+      expect(response.matryoshkaStages).toBeDefined();
+    });
+
+    it('M05: namespace filter works in matryoshka mode', async () => {
+      const response = await matryoshkaIndex.search('crear', { namespace: 'orders' });
+
+      for (const result of response.results) {
+        expect(result.namespace).toBe('orders');
+      }
+    });
+
+    it('M06: empty index returns empty results', async () => {
+      const emptyIndex = new VectorIndex({
+        embeddingAdapter,
+        storageAdapter: createMockStorageAdapter(),
+        defaultTopK: 5,
+        defaultThreshold: 0.3,
+        matryoshka: {
+          enabled: true,
+          fullDimensions: 768,
+          layers: [{ dimensions: 64, candidateTopK: 50 }],
+        },
+      });
+
+      const response = await emptyIndex.search('test');
+
+      expect(response.results).toHaveLength(0);
+      expect(response.matryoshkaStages).toBeDefined();
+    });
+
+    it('M07: single intermediate layer config works', async () => {
+      const singleLayerIndex = new VectorIndex({
+        embeddingAdapter,
+        storageAdapter,
+        defaultTopK: 5,
+        defaultThreshold: 0.3,
+        matryoshka: {
+          enabled: true,
+          fullDimensions: 768,
+          layers: [{ dimensions: 128, candidateTopK: 10 }],
+        },
+      });
+
+      // Re-index into this instance
+      await singleLayerIndex.indexBatch([
+        createSampleCommand({ namespace: 'users', name: 'create', description: 'Crea un usuario' }),
+        createSampleCommand({ namespace: 'users', name: 'list', description: 'Lista usuarios' }),
+      ]);
+
+      const response = await singleLayerIndex.search('crear usuario');
+
+      expect(response.matryoshkaStages).toHaveLength(2); // 128d + 768d final
+      expect(response.results.length).toBeGreaterThan(0);
+    });
+
+    it('M08: does not return matryoshkaStages when disabled', async () => {
+      const normalIndex = new VectorIndex({
+        embeddingAdapter,
+        storageAdapter,
+        defaultTopK: 5,
+        defaultThreshold: 0.3,
+      });
+
+      await normalIndex.indexBatch([
+        createSampleCommand({ namespace: 'users', name: 'create', description: 'Crea un usuario' }),
+      ]);
+
+      const response = await normalIndex.search('crear usuario');
+
+      expect(response.matryoshkaStages).toBeUndefined();
+    });
+  });
+
+  // ==========================================================================
+  // MatryoshkaEmbeddingAdapter
+  // ==========================================================================
+
+  describe('MatryoshkaEmbeddingAdapter', () => {
+    it('M09: truncates vectors to maxDimensions', async () => {
+      const inner = createMockEmbeddingAdapter(768);
+      const { MatryoshkaEmbeddingAdapter } = await import('../src/vector-index/matryoshka.js');
+      const adapter = new MatryoshkaEmbeddingAdapter(inner, 256);
+
+      const result = await adapter.embed('test query');
+
+      expect(result.vector).toHaveLength(256);
+      expect(result.dimensions).toBe(256);
+    });
+
+    it('M10: passes through when no maxDimensions', async () => {
+      const inner = createMockEmbeddingAdapter(768);
+      const { MatryoshkaEmbeddingAdapter } = await import('../src/vector-index/matryoshka.js');
+      const adapter = new MatryoshkaEmbeddingAdapter(inner);
+
+      const result = await adapter.embed('test query');
+
+      expect(result.vector).toHaveLength(768);
+    });
+
+    it('M11: embedBatch truncates all results', async () => {
+      const inner = createMockEmbeddingAdapter(768);
+      const { MatryoshkaEmbeddingAdapter } = await import('../src/vector-index/matryoshka.js');
+      const adapter = new MatryoshkaEmbeddingAdapter(inner, 128);
+
+      const results = await adapter.embedBatch(['hello', 'world', 'test']);
+
+      expect(results).toHaveLength(3);
+      for (const r of results) {
+        expect(r.vector).toHaveLength(128);
+        expect(r.dimensions).toBe(128);
+      }
+    });
+
+    it('M12: getDimensions reports maxDimensions when set', async () => {
+      const inner = createMockEmbeddingAdapter(768);
+      const { MatryoshkaEmbeddingAdapter } = await import('../src/vector-index/matryoshka.js');
+
+      const truncated = new MatryoshkaEmbeddingAdapter(inner, 256);
+      expect(truncated.getDimensions()).toBe(256);
+
+      const passthrough = new MatryoshkaEmbeddingAdapter(inner);
+      expect(passthrough.getDimensions()).toBe(768);
+    });
+  });
+
+  // ==========================================================================
+  // truncateVector utility
+  // ==========================================================================
+
+  describe('truncateVector', () => {
+    it('M13: truncates 768d vector to 64d', async () => {
+      const { truncateVector } = await import('../src/vector-index/matryoshka.js');
+      const vector = Array.from({ length: 768 }, (_, i) => i * 0.01);
+
+      const truncated = truncateVector(vector, 64);
+
+      expect(truncated).toHaveLength(64);
+      expect(truncated[0]).toBe(vector[0]);
+      expect(truncated[63]).toBe(vector[63]);
+    });
+
+    it('M14: returns original when dimensions >= vector length', async () => {
+      const { truncateVector } = await import('../src/vector-index/matryoshka.js');
+      const vector = [0.1, 0.2, 0.3];
+
+      const same = truncateVector(vector, 5);
+      expect(same).toBe(vector); // same reference, no copy
+
+      const exact = truncateVector(vector, 3);
+      expect(exact).toBe(vector);
     });
   });
 });

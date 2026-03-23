@@ -28,13 +28,24 @@ async function sendMessage(server: any, request: JsonRpcRequest): Promise<JsonRp
   return server.handleMessage(request);
 }
 
+/** Sends an initialize request to put the server into initialized state. */
+async function initializeServer(server: any): Promise<void> {
+  await sendMessage(server, {
+    jsonrpc: '2.0',
+    id: 'init',
+    method: 'initialize',
+    params: { protocolVersion: '2024-11-05', capabilities: {} },
+  });
+}
+
 describe('McpServer', () => {
   let core: ReturnType<typeof createMockCore>;
   let server: McpServer;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     core = createMockCore();
     server = new McpServer({ core, name: 'test-shell', version: '0.0.1' });
+    await initializeServer(server);
   });
 
   describe('initialize', () => {
@@ -114,6 +125,7 @@ describe('McpServer', () => {
       const helpSpy = vi.fn(() => 'protocol text');
       const spyCore = createMockCore({ help: helpSpy });
       const spyServer = new McpServer({ core: spyCore });
+      await initializeServer(spyServer);
 
       await sendMessage(spyServer, {
         jsonrpc: '2.0',
@@ -146,6 +158,7 @@ describe('McpServer', () => {
       const execSpy = vi.fn(async () => ({ code: 0, data: null, error: null, meta: {} }));
       const spyCore = createMockCore({ exec: execSpy });
       const spyServer = new McpServer({ core: spyCore });
+      await initializeServer(spyServer);
 
       await sendMessage(spyServer, {
         jsonrpc: '2.0',
@@ -162,6 +175,7 @@ describe('McpServer', () => {
         exec: async () => ({ code: 2, data: null, error: 'Not found', meta: {} }),
       });
       const failServer = new McpServer({ core: failCore });
+      await initializeServer(failServer);
 
       const response = await sendMessage(failServer, {
         jsonrpc: '2.0',
@@ -201,6 +215,7 @@ describe('McpServer', () => {
         exec: async () => { throw new Error('unexpected failure'); },
       });
       const throwServer = new McpServer({ core: throwCore });
+      await initializeServer(throwServer);
 
       const response = await sendMessage(throwServer, {
         jsonrpc: '2.0',
@@ -248,6 +263,19 @@ describe('McpServer', () => {
 
       expect(response!.error).toBeDefined();
       expect(response!.error!.code).toBe(-32602);
+    });
+
+    it('T15b: retorna INVALID_REQUEST si no se ha inicializado', async () => {
+      const uninitServer = new McpServer({ core, name: 'test-shell', version: '0.0.1' });
+      const response = await sendMessage(uninitServer, {
+        jsonrpc: '2.0',
+        id: 'uninit',
+        method: 'tools/call',
+        params: { name: 'cli_help' },
+      });
+
+      expect(response!.error).toBeDefined();
+      expect(response!.error!.code).toBe(-32600);
     });
 
     it('T16: no retorna respuesta para notificaciones (sin id)', async () => {

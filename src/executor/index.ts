@@ -7,11 +7,11 @@
  * historial) y retorna una respuesta estandarizada.
  */
 
-import type { ExecutionResult, ExecutionError, ExecutionMeta, BatchResult, PipelineResult, PipelineStep, ExecutionContext } from './types.js';
+import type { ExecutionResult, ExecutionError, ExecutionMeta, BatchResult, PipelineResult, PipelineStep, ExecutionContext, ExecutorRegistry } from './types.js';
 import { maskSecrets } from '../security/secret-patterns.js';
 import { matchPermissions } from '../security/permission-matcher.js';
 
-export { type ExecutionResult, type ExecutionError, type ExecutionMeta, type BatchResult, type PipelineResult, type PipelineStep, type ExecutionContext, type ExecutorConfig, type HistoryStore } from './types.js';
+export { type ExecutionResult, type ExecutionError, type ExecutionMeta, type BatchResult, type PipelineResult, type PipelineStep, type ExecutionContext, type ExecutorConfig, type HistoryStore, type ExecutorRegistry } from './types.js';
 
 /** Pending confirm tokens storage. */
 interface PendingConfirm {
@@ -32,12 +32,12 @@ interface PendingConfirm {
  * ```
  */
 export class Executor {
-  private registry: any;
+  private registry: ExecutorRegistry;
   private context: ExecutionContext;
   private pendingConfirms: Map<string, PendingConfirm> = new Map();
   private rateLimitTimestamps: number[] = [];
 
-  constructor(registry: any, context: ExecutionContext) {
+  constructor(registry: ExecutorRegistry, context: ExecutionContext) {
     this.registry = registry;
     this.context = context;
   }
@@ -46,16 +46,13 @@ export class Executor {
   async execute(parseResult: any): Promise<ExecutionResult | BatchResult | PipelineResult> {
     this.cleanExpiredConfirms();
 
-    // Deep-copy to avoid mutating input
-    const pr = structuredClone(parseResult);
-
-    if (pr.type === 'batch') {
-      return this.executeBatch(pr);
+    if (parseResult.type === 'batch') {
+      return this.executeBatch(parseResult);
     }
-    if (pr.type === 'pipeline') {
-      return this.executePipeline(pr);
+    if (parseResult.type === 'pipeline') {
+      return this.executePipeline(parseResult);
     }
-    return this.executeSingle(pr.commands[0]);
+    return this.executeSingle(parseResult.commands[0]);
   }
 
   /** Ejecuta undo de un comando por su historyId. */
@@ -345,12 +342,17 @@ export class Executor {
       };
     }
 
-    const results: ExecutionResult[] = [];
+    // Execute all commands in parallel
+    const settled = await Promise.allSettled(
+      commands.map((cmd: any) => this.executeSingle(cmd))
+    );
 
-    for (const cmd of commands) {
-      const result = await this.executeSingle(cmd);
-      results.push(result);
-    }
+    const results: ExecutionResult[] = settled.map((outcome) => {
+      if (outcome.status === 'fulfilled') {
+        return outcome.value;
+      }
+      return this.errorResult(1, 'E_HANDLER_ERROR', (outcome.reason as Error)?.message || 'Unknown error', 'normal', '');
+    });
 
     const succeeded = results.filter(r => r.code === 0).length;
     const failed = results.length - succeeded;
@@ -540,12 +542,15 @@ export class Executor {
   private async executeWithTimeout(handler: Function, args: any, input?: any): Promise<any> {
     const timeout = this.context.config.timeout_ms;
 
+    let timerId: ReturnType<typeof setTimeout>;
     const handlerPromise = handler(args, input);
     const timeoutPromise = new Promise((_, reject) => {
-      setTimeout(() => reject(new Error('E_TIMEOUT')), timeout);
+      timerId = setTimeout(() => reject(new Error('E_TIMEOUT')), timeout);
     });
 
-    return Promise.race([handlerPromise, timeoutPromise]);
+    return Promise.race([handlerPromise, timeoutPromise]).finally(() => {
+      clearTimeout(timerId!);
+    });
   }
 
   private resolveInputRefs(named: Record<string, any>, input: any): Record<string, any> {

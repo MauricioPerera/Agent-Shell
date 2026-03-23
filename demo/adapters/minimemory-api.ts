@@ -118,18 +118,23 @@ export class MiniMemoryApiAdapter {
   private VectorDB: any;
   private AgentMemory: any;
 
-  constructor(config: MiniMemoryConfig) {
+  constructor(config: MiniMemoryConfig, binding?: { VectorDB: any; AgentMemory?: any }) {
     this.config = config;
 
-    try {
-      const mm = require('minimemory');
-      this.VectorDB = mm.VectorDB;
-      this.AgentMemory = mm.AgentMemory;
-    } catch {
-      throw new Error(
-        'minimemory Node.js binding not found. Install with: npm install minimemory ' +
-        '(or build from source: https://github.com/MauricioPerera/minimemory)'
-      );
+    if (binding) {
+      this.VectorDB = binding.VectorDB;
+      this.AgentMemory = binding.AgentMemory;
+    } else {
+      try {
+        const mm = require('minimemory');
+        this.VectorDB = mm.VectorDB;
+        this.AgentMemory = mm.AgentMemory;
+      } catch {
+        throw new Error(
+          'minimemory Node.js binding not found. Install with: npm install minimemory ' +
+          '(or build from source: https://github.com/MauricioPerera/minimemory)'
+        );
+      }
     }
 
     this.initDb();

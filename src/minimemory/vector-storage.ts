@@ -14,6 +14,7 @@ import type {
   VectorEntry,
   VectorSearchQuery,
   VectorSearchResult,
+  CommandMetadata,
   BatchStorageResult,
   HealthStatus,
 } from '../vector-index/types.js';
@@ -88,7 +89,7 @@ export class MiniMemoryVectorStorage implements VectorStorageAdapter {
   }
 
   async upsert(entry: VectorEntry): Promise<void> {
-    const metadata = this.serializeMetadata(entry.metadata);
+    const metadata = this.serializeMetadata(entry.metadata as unknown as Record<string, unknown>);
 
     if (this.idSet.has(entry.id)) {
       this.db.update(entry.id, entry.vector, metadata);
@@ -106,7 +107,7 @@ export class MiniMemoryVectorStorage implements VectorStorageAdapter {
 
     for (const entry of entries) {
       try {
-        const metadata = this.serializeMetadata(entry.metadata);
+        const metadata = this.serializeMetadata(entry.metadata as unknown as Record<string, unknown>);
         if (this.idSet.has(entry.id)) {
           this.db.update(entry.id, entry.vector, metadata);
         } else {
@@ -167,7 +168,7 @@ export class MiniMemoryVectorStorage implements VectorStorageAdapter {
         continue;
       }
 
-      const metadata = this.deserializeMetadata(raw.metadata || {});
+      const metadata = this.deserializeMetadata(raw.metadata || {}) as unknown as CommandMetadata;
 
       // Apply namespace filter
       if (query.filters?.namespace && metadata.namespace !== query.filters.namespace) {
@@ -181,7 +182,7 @@ export class MiniMemoryVectorStorage implements VectorStorageAdapter {
 
       // Apply tags filter
       if (query.filters?.tags && query.filters.tags.length > 0) {
-        const entryTags = metadata.tags || [];
+        const entryTags: string[] = metadata.tags || [];
         const hasMatchingTag = query.filters.tags.some(t => entryTags.includes(t));
         if (!hasMatchingTag) continue;
       }

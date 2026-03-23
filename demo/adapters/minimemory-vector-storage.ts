@@ -42,18 +42,22 @@ export class MiniMemoryVectorStorage implements VectorStorageAdapter {
   private config: MiniMemoryVectorStorageConfig;
   private idSet: Set<string> = new Set();
 
-  constructor(config: MiniMemoryVectorStorageConfig) {
+  constructor(config: MiniMemoryVectorStorageConfig, binding?: { VectorDB: any }) {
     this.config = config;
 
-    // Dynamic import of the napi-rs binding
+    // Use injected binding (for testing) or dynamic require
     let VectorDB: any;
-    try {
-      ({ VectorDB } = require('minimemory'));
-    } catch {
-      throw new Error(
-        'minimemory Node.js binding not found. Install with: npm install minimemory ' +
-        '(or build from source: https://github.com/MauricioPerera/minimemory)'
-      );
+    if (binding) {
+      VectorDB = binding.VectorDB;
+    } else {
+      try {
+        ({ VectorDB } = require('minimemory'));
+      } catch {
+        throw new Error(
+          'minimemory Node.js binding not found. Install with: npm install minimemory ' +
+          '(or build from source: https://github.com/MauricioPerera/minimemory)'
+        );
+      }
     }
 
     const dbConfig: Record<string, any> = {

@@ -14,18 +14,24 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
-// --- Import mock module (created in node_modules/minimemory for require() compatibility) ---
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const minimemoryMock = require('minimemory');
+// --- Self-contained mock state ---
+const mockState = {
+  store: new Map<string, { vector: number[] | null; meta: Record<string, any> }>(),
+  vectorDBInstance: null as any,
+  agentMemoryInstance: null as any,
+  vectorDBConstructor: null as any,
+  withFulltext: null as any,
+  agentMemoryConstructor: null as any,
+};
 
-// Type-safe reference to mockState
-const mockState = minimemoryMock.mockState as {
-  store: Map<string, { vector: number[] | null; meta: Record<string, any> }>;
-  vectorDBInstance: any;
-  agentMemoryInstance: any;
-  vectorDBConstructor: any;
-  withFulltext: any;
-  agentMemoryConstructor: any;
+// Mock binding injected via the adapter's optional `binding` parameter.
+// The VectorDB mock is a constructor function with a static `withFulltext` method.
+const MockVectorDB = vi.fn((...args: any[]) => mockState.vectorDBConstructor?.(...args));
+(MockVectorDB as any).withFulltext = vi.fn((...args: any[]) => mockState.withFulltext?.(...args));
+
+const mockBinding = {
+  VectorDB: MockVectorDB,
+  AgentMemory: vi.fn((...args: any[]) => mockState.agentMemoryConstructor?.(...args)),
 };
 
 // Setup function to initialize mock state before each test
@@ -110,7 +116,7 @@ function setupMocks() {
 // --- Import adapter ---
 
 import {
-  MiniMemoryApiAdapter,
+  MiniMemoryApiAdapter as _MiniMemoryApiAdapter,
   type MiniMemoryConfig,
   type MiniMemoryInsertParams,
   type MiniMemoryHybridParams,
@@ -119,6 +125,13 @@ import {
   type CodeSnippet,
   type ErrorSolution,
 } from '../demo/adapters/minimemory-api';
+
+// Wrap constructor to always inject mock binding
+class MiniMemoryApiAdapter extends _MiniMemoryApiAdapter {
+  constructor(config: MiniMemoryConfig) {
+    super(config, mockBinding as any);
+  }
+}
 
 // =============================================================================
 // SECTION 1: MUST DO - Initialization

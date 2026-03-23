@@ -10,10 +10,10 @@
 import { parse } from '../parser/index.js';
 import { applyFilter } from '../jq-filter/index.js';
 import type { ParseResult, ParsedCommand, ParseError } from '../parser/index.js';
-import type { CoreResponse, CoreConfig, LogEntry } from './types.js';
+import type { CoreResponse, CoreConfig, CoreRegistry, CoreVectorIndex, CoreContextStore, LogEntry } from './types.js';
 
 export { Core };
-export type { CoreResponse, CoreConfig } from './types.js';
+export type { CoreResponse, CoreConfig, CoreRegistry, CoreVectorIndex, CoreContextStore } from './types.js';
 
 const LOG_LEVELS: Record<string, number> = { DEBUG: 0, INFO: 1, WARN: 2, ERROR: 3 };
 
@@ -36,56 +36,56 @@ class CoreLogger {
   }
 }
 
-/** Protocolo de interaccion estatico retornado por help(). */
-const HELP_TEXT = `Agent Shell - Protocolo de Interaccion
+/** Static interaction protocol returned by help(). */
+const HELP_TEXT = `Agent Shell - Interaction Protocol
 
-El agente LLM interactua con el sistema usando exactamente 2 herramientas:
+The LLM agent interacts with the system using exactly 2 tools:
 
-1. cli_help() - Retorna este protocolo de interaccion
-2. cli_exec(cmd: string) - Ejecuta un comando y retorna respuesta estructurada
+1. cli_help() - Returns this interaction protocol
+2. cli_exec(cmd: string) - Executes a command and returns structured response
 
-== Descubrimiento ==
-  search <query>           Busqueda semantica de comandos
-  describe <ns:cmd>        Ver definicion de un comando
+== Discovery ==
+  search <query>           Semantic command search
+  describe <ns:cmd>        View command definition
 
-== Ejecucion ==
-  namespace:comando --arg valor    Ejecutar un comando registrado
-  --dry-run                        Simular sin ejecutar
-  --validate                       Solo validar argumentos
-  --confirm                        Previsualizar antes de ejecutar
+== Execution ==
+  namespace:command --arg value    Execute a registered command
+  --dry-run                        Simulate without executing
+  --validate                       Only validate arguments
+  --confirm                        Preview before executing
 
-== Filtrado ==
-  comando | .campo                 Extraer campo del resultado
-  comando | [.a, .b]              Multi-select de campos
+== Filtering ==
+  command | .field                 Extract field from result
+  command | [.a, .b]              Multi-select fields
 
-== Paginacion ==
-  --limit N                        Limitar resultados
-  --offset N                       Saltar primeros N
+== Pagination ==
+  --limit N                        Limit results
+  --offset N                       Skip first N
 
-== Composicion ==
-  cmd1 >> cmd2                     Pipeline: output de cmd1 como input de cmd2
+== Composition ==
+  cmd1 >> cmd2                     Pipeline: output of cmd1 as input of cmd2
 
 == Batch ==
-  batch [cmd1, cmd2, cmd3]         Ejecutar multiples comandos
+  batch [cmd1, cmd2, cmd3]         Execute multiple commands in parallel
 
-== Estado ==
-  context                          Ver contexto actual
-  context:set key valor            Guardar valor en contexto
-  context:get key                  Obtener valor del contexto
+== State ==
+  context                          View current context
+  context:set key value            Store value in context
+  context:get key                  Get value from context
 
-== Historial ==
-  history                          Ver historial de comandos
-  undo <id>                        Revertir un comando
+== History ==
+  history                          View command history
+  undo <id>                        Revert a command
 
 == Output ==
-  --format json|table|csv          Formato de salida
+  --format json|table|csv          Output format
 
-== Errores ==
-  code 0: Exito
-  code 1: Error de sintaxis / general
-  code 2: Comando no encontrado
-  code 3: Permisos / rate limit
-  code 4: Requiere confirmacion
+== Error Codes ==
+  code 0: Success
+  code 1: Syntax / general error
+  code 2: Command not found
+  code 3: Permission denied / rate limit
+  code 4: Requires confirmation
 `;
 
 /**
@@ -95,11 +95,12 @@ El agente LLM interactua con el sistema usando exactamente 2 herramientas:
  */
 class Core {
   private readonly config: CoreConfig;
-  private readonly registry: any;
-  private readonly vectorIndex: any;
-  private readonly contextStore: any;
+  private readonly registry: CoreRegistry;
+  private readonly vectorIndex: CoreVectorIndex | null;
+  private readonly contextStore: CoreContextStore | null;
   private readonly logger: CoreLogger;
   private readonly history: Array<{ command: string; code: number; timestamp: string }> = [];
+  private static readonly MAX_HISTORY = 10_000;
   private rateLimitTimestamps: number[] = [];
 
   constructor(config: CoreConfig) {
@@ -135,10 +136,13 @@ class Core {
   }
 
   private withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+    let timerId: ReturnType<typeof setTimeout>;
     const timeoutPromise = new Promise<never>((_, reject) => {
-      setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+      timerId = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
     });
-    return Promise.race([promise, timeoutPromise]);
+    return Promise.race([promise, timeoutPromise]).finally(() => {
+      clearTimeout(timerId);
+    });
   }
 
   /**
@@ -430,27 +434,26 @@ class Core {
   }
 
   private async executeBatch(commands: ParsedCommand[]): Promise<any[]> {
-    const maxBatchSize = 50;
+    const maxBatchSize = 20;
     if (commands.length > maxBatchSize) {
       return [{ code: 1, data: null, error: `Batch exceeds maximum size of ${maxBatchSize} commands` }];
     }
 
-    const results: any[] = [];
+    // Execute all commands in parallel
+    const settled = await Promise.allSettled(
+      commands.map(cmd => this.executeCommand(cmd))
+    );
 
-    for (const cmd of commands) {
-      try {
-        const data = await this.executeCommand(cmd);
-        if (data && typeof data === 'object' && '_error' in data) {
-          results.push({ code: data._error.code, data: null, error: data._error.error });
-        } else {
-          results.push({ code: 0, data, error: null });
-        }
-      } catch (err: any) {
-        results.push({ code: 1, data: null, error: err.message });
+    return settled.map((outcome) => {
+      if (outcome.status === 'rejected') {
+        return { code: 1, data: null, error: (outcome.reason as Error)?.message || 'Unknown error' };
       }
-    }
-
-    return results;
+      const data = outcome.value;
+      if (data && typeof data === 'object' && '_error' in data) {
+        return { code: data._error.code, data: null, error: data._error.error };
+      }
+      return { code: 0, data, error: null };
+    });
   }
 
   private applyJqFilter(data: any, expression: string): any {
@@ -476,8 +479,14 @@ class Core {
     const keys = Object.keys(data[0]);
 
     if (format === 'csv') {
-      const header = keys.join(',');
-      const rows = data.map((row: any) => keys.map(k => String(row[k] ?? '')).join(','));
+      const escapeCsv = (val: string): string => {
+        if (val.includes(',') || val.includes('"') || val.includes('\n') || val.includes('\r')) {
+          return '"' + val.replace(/"/g, '""') + '"';
+        }
+        return val;
+      };
+      const header = keys.map(escapeCsv).join(',');
+      const rows = data.map((row: any) => keys.map(k => escapeCsv(String(row[k] ?? ''))).join(','));
       return [header, ...rows].join('\n');
     }
 
@@ -519,6 +528,10 @@ class Core {
       code,
       timestamp: new Date().toISOString(),
     });
+    // FIFO: evict oldest entries when exceeding max history
+    while (this.history.length > Core.MAX_HISTORY) {
+      this.history.shift();
+    }
   }
 
   private buildResponse(

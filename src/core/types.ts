@@ -31,11 +31,30 @@ export interface LogEntry {
   timestamp: string;
 }
 
+/** Interfaz minima del registry consumida por Core. */
+export interface CoreRegistry {
+  /** Returns a registered command or a falsy value if not found. */
+  get(namespace: string, name: string): any;
+}
+
+/** Interfaz minima del vector index consumida por Core. */
+export interface CoreVectorIndex {
+  search(query: string, options?: any): Promise<any>;
+}
+
+/** Interfaz minima del context store consumida por Core. */
+export interface CoreContextStore {
+  get(key: string): { data?: any };
+  set(key: string, value: any): void;
+  delete(key: string): void;
+  getAll(): { data?: Record<string, any> };
+}
+
 /** Configuracion del Core. */
 export interface CoreConfig {
-  registry: any;
-  vectorIndex?: any;
-  contextStore?: any;
+  registry: CoreRegistry;
+  vectorIndex?: CoreVectorIndex;
+  contextStore?: CoreContextStore;
   maxInputLength?: number;
   timeouts?: {
     parser_ms?: number;

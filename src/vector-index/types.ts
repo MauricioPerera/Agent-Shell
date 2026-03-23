@@ -136,6 +136,15 @@ export interface SearchResponse {
   totalIndexed: number;
   searchTimeMs: number;
   model: string;
+  /** Diagnostics when matryoshka progressive search is enabled. */
+  matryoshkaStages?: MatryoshkaStageInfo[];
+}
+
+/** Diagnostic info for a single matryoshka funnel stage. */
+export interface MatryoshkaStageInfo {
+  dimensions: number;
+  candidatesIn: number;
+  candidatesOut: number;
 }
 
 /** Opciones para busqueda semantica. */
@@ -171,6 +180,25 @@ export interface VectorIndexConfig {
   defaultThreshold: number;
   batchSize?: number;
   indexableFields?: string[];
+  /** Matryoshka progressive search configuration. */
+  matryoshka?: MatryoshkaConfig;
+}
+
+/** A single resolution layer in the matryoshka funnel. */
+export interface MatryoshkaResolutionLayer {
+  /** Truncated dimension for this layer (e.g. 64, 128, 256). */
+  dimensions: number;
+  /** How many top candidates survive this layer and pass to the next. */
+  candidateTopK: number;
+}
+
+/** Configuration for matryoshka progressive vector search. */
+export interface MatryoshkaConfig {
+  enabled: boolean;
+  /** Intermediate layers ordered from lowest to highest dimension. Does NOT include the final full-dimension layer. */
+  layers: MatryoshkaResolutionLayer[];
+  /** Native embedding dimension (e.g. 768). Final ranking always happens at this dimension. */
+  fullDimensions: number;
 }
 
 /** Limite maximo de resultados por query. */

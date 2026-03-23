@@ -7,7 +7,7 @@
  * while gracefully degrading to brute-force in-memory when it's not.
  */
 
-import type { VectorStorageAdapter } from '../vector-index/types.js';
+import type { VectorStorageAdapter, CommandMetadata, VectorSearchResult } from '../vector-index/types.js';
 import type { StorageFactoryOptions, StorageFactoryResult, MiniMemoryBinding } from './types.js';
 import { MiniMemoryVectorStorage } from './vector-storage.js';
 
@@ -129,7 +129,7 @@ export async function createVectorStorage(options: StorageFactoryOptions): Promi
  * This is the fallback when minimemory is not available.
  */
 function createInMemoryStorage(): VectorStorageAdapter {
-  const entries = new Map<string, { vector: number[]; metadata: Record<string, unknown> }>();
+  const entries = new Map<string, { vector: number[]; metadata: CommandMetadata }>();
 
   return {
     async upsert(entry) {
@@ -155,7 +155,7 @@ function createInMemoryStorage(): VectorStorageAdapter {
     },
 
     async search(query) {
-      const results: Array<{ id: string; score: number; metadata: Record<string, unknown> }> = [];
+      const results: VectorSearchResult[] = [];
 
       for (const [id, entry] of entries) {
         // Apply filters
@@ -173,12 +173,12 @@ function createInMemoryStorage(): VectorStorageAdapter {
         }
 
         if (query.filters?.tags && query.filters.tags.length > 0) {
-          const entryTags = (entry.metadata.tags as string[]) || [];
+          const entryTags: string[] = entry.metadata.tags || [];
           const hasMatchingTag = query.filters.tags.some(t => entryTags.includes(t));
           if (!hasMatchingTag) continue;
         }
 
-        results.push({ id, score, metadata: entry.metadata as any });
+        results.push({ id, score, metadata: entry.metadata });
       }
 
       results.sort((a, b) => b.score - a.score);

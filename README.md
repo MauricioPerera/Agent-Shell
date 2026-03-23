@@ -430,6 +430,67 @@ const health = await index.healthCheck();
 - `EmbeddingAdapter` — genera vectores desde texto (OpenAI, Cohere, Ollama, Cloudflare, etc.)
 - `VectorStorageAdapter` — almacena y busca vectores (Pinecone, Qdrant, pgvector, en memoria, etc.)
 
+#### Matryoshka Progressive Search
+
+Modelos entrenados con Matryoshka loss (Gemma Embedding, nomic-embed, OpenAI text-embedding-3-*) producen vectores donde los primeros N dimensiones forman un embedding valido de N dimensiones. Agent Shell aprovecha esto con busqueda progresiva en funnel:
+
+```
+Query → embed a 768d
+  ├─ 64d:  todos los comandos → cosine similarity → top 50
+  ├─ 128d: 50 candidatos → re-score → top 25
+  ├─ 256d: 25 candidatos → re-score → top 10
+  └─ 768d: 10 candidatos → ranking final → top K
+```
+
+```typescript
+import { VectorIndex, defaultMatryoshkaConfig } from 'agent-shell';
+
+const index = new VectorIndex({
+  embeddingAdapter,
+  storageAdapter,
+  defaultTopK: 5,
+  defaultThreshold: 0.3,
+  matryoshka: defaultMatryoshkaConfig(768), // 64→128→256→768 funnel
+});
+
+const results = await index.search('crear usuario');
+// results.matryoshkaStages muestra el narrowing por capa:
+// [{ dimensions: 64, candidatesIn: 100, candidatesOut: 50 },
+//  { dimensions: 128, candidatesIn: 50, candidatesOut: 25 },
+//  { dimensions: 256, candidatesIn: 25, candidatesOut: 10 },
+//  { dimensions: 768, candidatesIn: 10, candidatesOut: 5 }]
+```
+
+**`MatryoshkaEmbeddingAdapter`** — wrapper adapter-agnostico que trunca cualquier embedding:
+
+```typescript
+import { MatryoshkaEmbeddingAdapter } from 'agent-shell';
+
+// Truncar embeddings de 1024d a 768d para storage
+const adapter = new MatryoshkaEmbeddingAdapter(ollamaAdapter, 768);
+```
+
+**Configuracion custom de capas:**
+
+```typescript
+const index = new VectorIndex({
+  embeddingAdapter,
+  storageAdapter,
+  defaultTopK: 5,
+  defaultThreshold: 0.3,
+  matryoshka: {
+    enabled: true,
+    fullDimensions: 768,
+    layers: [
+      { dimensions: 64, candidateTopK: 100 },
+      { dimensions: 256, candidateTopK: 20 },
+    ],
+  },
+});
+```
+
+> **Nota:** Matryoshka search usa el mapa in-memory (`indexed`), no el `storageAdapter.search()`, ya que los storage backends no soportan truncado multi-resolucion. Los comandos deben indexarse via `indexCommand()`/`indexBatch()`.
+
 ### Security
 
 Modulo transversal de seguridad con audit logging, RBAC, deteccion de secretos y encriptacion.

@@ -76,6 +76,12 @@ export interface McpInitializeResult {
   serverInfo: McpServerInfo;
 }
 
+/** Interfaz minima del Core consumida por McpServer. */
+export interface McpCore {
+  help(): string;
+  exec(cmd: string): Promise<{ code: number; data: any; error: string | null; meta: any }>;
+}
+
 /** Configuracion del MCP Server de Agent Shell. */
 export interface McpServerConfig {
   /** Nombre del servidor MCP. */
@@ -83,7 +89,7 @@ export interface McpServerConfig {
   /** Version del servidor. */
   version?: string;
   /** Instancia de Core ya configurada. */
-  core: any;
+  core: McpCore;
 }
 
 // --- HTTP/SSE Transport ---
