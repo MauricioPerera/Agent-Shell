@@ -123,27 +123,11 @@ function createMemoryStorageAdapter() {
 // ---------------------------------------------------------------------------
 
 /**
- * Wraps a CommandRegistry for Core compatibility.
- * Core.get() expects command-or-null, not Result<RegisteredCommand>.
+ * Core now properly unwraps Result from registry.get(),
+ * so we can pass the registry directly.
  */
 function wrapForCore(registry: CommandRegistry) {
-  return {
-    get(namespace: string, name: string) {
-      const result = registry.get(namespace, name);
-      if (result.ok) {
-        return { ...result.value.definition, handler: result.value.handler };
-      }
-      return null;
-    },
-    listAll() { return registry.listAll(); },
-    getNamespaces() { return registry.getNamespaces(); },
-    listByNamespace(ns: string) { return registry.listByNamespace(ns); },
-    resolve(fullName: string) { return registry.resolve(fullName); },
-    toCompactText(def: any) { return registry.toCompactText(def); },
-    toCompactTextBatch(defs: any[]) { return registry.toCompactTextBatch(defs); },
-    register(def: any, handler: any) { return registry.register(def, handler); },
-    _real: registry,
-  };
+  return registry;
 }
 
 function createDomainRegistry() {
@@ -265,8 +249,11 @@ describe('Full System: MCP Server Agent Workflow', () => {
       { ns: 'math', name: 'add' },
     ];
     for (const c of domainCmds) {
-      const cmd = domain.get(c.ns, c.name);
-      if (cmd) realRegistry.register(command(c.ns, c.name).version('1.0.0').description(cmd.description || 'test').example(`${c.ns}:${c.name}`).tags(c.ns).build(), cmd.handler);
+      const cmdResult = domain.get(c.ns, c.name);
+      if (cmdResult.ok) {
+        const def = cmdResult.value.definition;
+        realRegistry.register(command(c.ns, c.name).version('1.0.0').description(def.description || 'test').example(`${c.ns}:${c.name}`).tags(c.ns).build(), cmdResult.value.handler);
+      }
     }
     const registry = wrapForCore(realRegistry);
     const vectorIndex = new VectorIndex({ embeddingAdapter: createEmbeddingAdapter(), storageAdapter: createStorageAdapter(), defaultTopK: 5, defaultThreshold: 0.3 });

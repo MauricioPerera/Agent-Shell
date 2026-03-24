@@ -71,7 +71,9 @@ function createScalableRegistry(commandCount: number) {
 
   return {
     get(namespace: string, name: string) {
-      return commands.get(`${namespace}:${name}`) ?? null;
+      const cmd = commands.get(`${namespace}:${name}`);
+      if (!cmd) return { ok: false, error: { code: 'COMMAND_NOT_FOUND', message: 'Not found' } };
+      return { ok: true, value: { definition: cmd, handler: cmd.handler, registeredAt: new Date().toISOString() } };
     },
     listAll() {
       return Array.from(commands.values());

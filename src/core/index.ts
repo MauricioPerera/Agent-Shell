@@ -270,10 +270,12 @@ class Core {
     }
 
     // Lookup in registry
-    const registeredCmd = this.registry.get(namespace, command);
-    if (!registeredCmd) {
+    const lookupResult = this.registry.get(namespace, command);
+    if (!lookupResult.ok) {
       return { _error: { code: 2, error: `Command not found: ${namespace}:${command}` } };
     }
+    // Flatten: merge definition fields with handler for backward compat
+    const registeredCmd = { ...lookupResult.value.definition, handler: lookupResult.value.handler };
 
     // Check agent permissions
     if (this.agentPermissions && registeredCmd.requiredPermissions?.length) {
@@ -333,10 +335,11 @@ class Core {
         if (!ns || !cmd) {
           return { _error: { code: 1, error: 'Usage: describe namespace:command' } };
         }
-        const definition = this.registry.get(ns, cmd);
-        if (!definition) {
+        const lookupResult = this.registry.get(ns, cmd);
+        if (!lookupResult.ok) {
           return { _error: { code: 2, error: `Command not found: ${target}` } };
         }
+        const definition = lookupResult.value.definition;
         // Check agent permissions before revealing command definition
         if (this.agentPermissions && definition.requiredPermissions?.length) {
           if (!matchPermissions(this.agentPermissions, definition.requiredPermissions)) {
@@ -435,10 +438,11 @@ class Core {
         return { _error: { code: 1, error: `Pipeline command must have namespace` } };
       }
 
-      const registeredCmd = this.registry.get(namespace, command);
-      if (!registeredCmd) {
+      const lookupResult = this.registry.get(namespace, command);
+      if (!lookupResult.ok) {
         return { _error: { code: 2, error: `Command not found: ${namespace}:${command}` } };
       }
+      const registeredCmd = { ...lookupResult.value.definition, handler: lookupResult.value.handler };
 
       // Check agent permissions for each pipeline step
       if (this.agentPermissions && registeredCmd.requiredPermissions?.length) {

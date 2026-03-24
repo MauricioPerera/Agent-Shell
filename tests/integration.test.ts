@@ -125,7 +125,9 @@ function createIntegrationRegistry() {
 
   return {
     get(namespace: string, name: string) {
-      return commands.get(`${namespace}:${name}`) ?? null;
+      const cmd = commands.get(`${namespace}:${name}`);
+      if (!cmd) return { ok: false, error: { code: 'COMMAND_NOT_FOUND', message: `Command ${namespace}:${name} not found` } };
+      return { ok: true, value: { definition: cmd, handler: cmd.handler, registeredAt: new Date().toISOString() } };
     },
     resolve(namespace: string, name: string) {
       return this.get(namespace, name);

@@ -103,8 +103,8 @@ function createMockRegistry() {
     get(namespace: string, name: string) {
       const key = `${namespace}:${name}`;
       const cmd = commands.get(key);
-      if (!cmd) return null;
-      return { ...cmd };
+      if (!cmd) return { ok: false, error: { code: 'COMMAND_NOT_FOUND', message: `Command ${namespace}:${name} not found` } };
+      return { ok: true, value: { definition: cmd, handler: cmd.handler, registeredAt: new Date().toISOString() } };
     },
     resolve(namespace: string, name: string) {
       return this.get(namespace, name);
