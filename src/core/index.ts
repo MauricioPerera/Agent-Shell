@@ -321,9 +321,12 @@ class Core {
         // Filter results by agent permissions — hide commands the agent cannot access
         if (this.agentPermissions && searchResult.results) {
           searchResult.results = searchResult.results.filter((r: any) => {
-            const cmd = this.registry.get(r.namespace, r.command);
-            if (!cmd?.requiredPermissions?.length) return true;
-            return matchPermissions(this.agentPermissions!, cmd.requiredPermissions);
+            const lookupResult = this.registry.get(r.namespace, r.command);
+            // Fail-closed: if the command isn't in the registry, exclude it
+            if (!lookupResult.ok) return false;
+            const { requiredPermissions } = lookupResult.value.definition;
+            if (!requiredPermissions?.length) return true;
+            return matchPermissions(this.agentPermissions!, requiredPermissions);
           });
         }
         return searchResult;
