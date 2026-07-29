@@ -320,6 +320,48 @@ describe('Secret Store Skills', () => {
     const res = await get({ name: 'KEY' });
     expect(res.data.value).toBe('new');
   });
+
+  it('SE07: internal storage uses GCM (has auth tag)', () => {
+    store.set('GCM', 'taggedvalue');
+    const internal = (store as any).secrets.get('GCM');
+    // GCM payload shape: iv (12 bytes / 24 hex), tag, encrypted
+    expect(internal.tag).toBeDefined();
+    expect(typeof internal.tag).toBe('string');
+    expect(internal.iv).toBeDefined();
+    expect(internal.encrypted).not.toContain('taggedvalue');
+    // 12-byte IV -> 24 hex chars
+    expect(internal.iv.length).toBe(24);
+  });
+
+  it('SE08: tampered ciphertext or auth tag fails decryption (integrity verified)', () => {
+    store.set('TAMPER', 'integritymatters');
+    const internal = (store as any).secrets.get('TAMPER') as { iv: string; tag: string; encrypted: string };
+
+    // Flip a bit of the ciphertext
+    const tamperedEnc = internal.encrypted.slice(0, -2) +
+      (internal.encrypted.slice(-2) === '00' ? '01' : '00');
+    (store as any).secrets.set('TAMPER', { ...internal, encrypted: tamperedEnc });
+    expect(() => store.get('TAMPER')).toThrow();
+
+    // Restore and flip a bit of the auth tag instead
+    (store as any).secrets.set('TAMPER', internal);
+    const tamperedTag = internal.tag.slice(0, -2) +
+      (internal.tag.slice(-2) === '00' ? '01' : '00');
+    (store as any).secrets.set('TAMPER', { ...internal, tag: tamperedTag });
+    expect(() => store.get('TAMPER')).toThrow();
+  });
+
+  it('SE09: distinct encryptionKeys cannot read each other secrets', () => {
+    const storeA = new SecretStore('key-for-store-a-aaaaaaaaaa');
+    const storeB = new SecretStore('key-for-store-b-bbbbbbbbbb');
+    storeA.set('SHARED', 'onlyAcanRead');
+    const entry = (storeA as any).secrets.get('SHARED') as { iv: string; tag: string; encrypted: string };
+    // Inject storeA's ciphertext into storeB: must fail to decrypt (different key)
+    (storeB as any).secrets.set('SHARED', { ...entry });
+    expect(() => storeB.get('SHARED')).toThrow();
+    // storeA still roundtrips fine
+    expect(storeA.get('SHARED')).toBe('onlyAcanRead');
+  });
 });
 
 // ===========================================================================

@@ -5,7 +5,7 @@
  */
 
 import { command } from '../command-builder/index.js';
-import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
+import { createCipheriv, createDecipheriv, randomBytes, scryptSync, type CipherGCM, type DecipherGCM } from 'node:crypto';
 import type { SkillEntry } from './scaffold.js';
 
 // ---------------------------------------------------------------------------
@@ -13,28 +13,35 @@ import type { SkillEntry } from './scaffold.js';
 // ---------------------------------------------------------------------------
 
 export class SecretStore {
-  private secrets: Map<string, { iv: string; encrypted: string }> = new Map();
+  private secrets: Map<string, { iv: string; tag: string; encrypted: string }> = new Map();
   private readonly key: Buffer;
 
   constructor(encryptionKey?: string) {
-    // Use provided key or generate random one (session-scoped)
-    this.key = encryptionKey
-      ? Buffer.from(encryptionKey.padEnd(32, '0').slice(0, 32), 'utf-8')
-      : randomBytes(32);
+    // Use provided key or generate random one (session-scoped).
+    // When a passphrase is supplied, derive the key with scrypt (KDF + per-instance
+    // salt) instead of zero-padding the raw UTF-8 bytes. A random key needs no KDF.
+    if (encryptionKey) {
+      const salt = randomBytes(16);
+      this.key = scryptSync(encryptionKey, salt, 32);
+    } else {
+      this.key = randomBytes(32);
+    }
   }
 
   set(name: string, value: string): void {
-    const iv = randomBytes(16);
-    const cipher = createCipheriv('aes-256-cbc', this.key, iv);
+    const iv = randomBytes(12);
+    const cipher = createCipheriv('aes-256-gcm', this.key, iv) as CipherGCM;
     let encrypted = cipher.update(value, 'utf-8', 'hex');
     encrypted += cipher.final('hex');
-    this.secrets.set(name, { iv: iv.toString('hex'), encrypted });
+    const tag = cipher.getAuthTag();
+    this.secrets.set(name, { iv: iv.toString('hex'), tag: tag.toString('hex'), encrypted });
   }
 
   get(name: string): string | null {
     const entry = this.secrets.get(name);
     if (!entry) return null;
-    const decipher = createDecipheriv('aes-256-cbc', this.key, Buffer.from(entry.iv, 'hex'));
+    const decipher = createDecipheriv('aes-256-gcm', this.key, Buffer.from(entry.iv, 'hex')) as DecipherGCM;
+    decipher.setAuthTag(Buffer.from(entry.tag, 'hex'));
     let decrypted = decipher.update(entry.encrypted, 'hex', 'utf-8');
     decrypted += decipher.final('utf-8');
     return decrypted;
