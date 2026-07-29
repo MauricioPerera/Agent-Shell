@@ -109,6 +109,15 @@ export interface HttpTransportConfig {
     /** Paths excluded from auth (default: ['/health']). */
     excludePaths?: string[];
   };
+  /**
+   * Escape hatch explicito para permitir bind a una interfaz no-loopback SIN
+   * autenticacion configurada. Util solo cuando el transporte corre detras de
+   * un reverse proxy / API gateway que ya impone autenticacion a nivel red.
+   * Default: false/undefined. Cuando queda en false y no hay auth.bearerToken,
+   * start() rechaza (fail-closed) si el host NO es loopback, para evitar
+   * arrancar expuesto a la red por accidente.
+   */
+  insecureAllowNoAuth?: boolean;
   /** Intervalo de heartbeat SSE en ms. Default: 30000 */
   heartbeatInterval?: number;
   /** Timeout de request en ms. Default: 30000 */

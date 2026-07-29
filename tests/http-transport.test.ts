@@ -620,4 +620,34 @@ describe('HttpSseTransport', () => {
       expect(body.error.message).toContain('timeout');
     });
   });
+
+  describe('Fail-closed: bind no-loopback sin auth', () => {
+    it('SEC01: start() rechaza con host 0.0.0.0 y sin auth', async () => {
+      transport = new HttpSseTransport({ port: 0, host: '0.0.0.0' });
+      await expect(transport.start()).rejects.toThrow(/Refusing to start/);
+      // No se levanto ningun servidor
+      expect(transport.port).toBe(0);
+    });
+
+    it('SEC02: start() funciona con host 0.0.0.0 y auth configurada', async () => {
+      transport = new HttpSseTransport({ port: 0, host: '0.0.0.0', auth: { bearerToken: 'x' } });
+      await transport.start();
+      expect(transport.port).toBeGreaterThan(0);
+      await transport.stop();
+    });
+
+    it('SEC03: start() funciona con host 0.0.0.0 e insecureAllowNoAuth explicito', async () => {
+      transport = new HttpSseTransport({ port: 0, host: '0.0.0.0', insecureAllowNoAuth: true });
+      await transport.start();
+      expect(transport.port).toBeGreaterThan(0);
+      await transport.stop();
+    });
+
+    it('SEC04: start() sigue funcionando con host loopback sin auth (backward compat)', async () => {
+      transport = new HttpSseTransport({ port: 0, host: '127.0.0.1' });
+      await transport.start();
+      expect(transport.port).toBeGreaterThan(0);
+      await transport.stop();
+    });
+  });
 });

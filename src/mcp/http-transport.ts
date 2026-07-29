@@ -17,6 +17,16 @@ import { PARSE_ERROR, INVALID_REQUEST } from './types.js';
 import type { MessageHandler } from './transport.js';
 
 /**
+ * Retorna true SOLO para hosts de loopback conocidos: '127.0.0.1',
+ * 'localhost', '::1'. Cualquier otro valor (incluyendo '0.0.0.0', '::',
+ * IPs de LAN, hostnames) retorna false. Usado para decidir si start()
+ * debe rechazar cuando no hay auth configurada (fail-closed).
+ */
+function isLoopbackHost(host: string): boolean {
+  return host === '127.0.0.1' || host === 'localhost' || host === '::1';
+}
+
+/**
  * Transporte HTTP/SSE para JSON-RPC 2.0.
  *
  * Recibe requests via HTTP POST y entrega notificaciones via SSE.
@@ -36,6 +46,7 @@ export class HttpSseTransport {
   private readonly maxBodySize: number;
   private readonly authToken: string | null;
   private readonly authExcludePaths: Set<string>;
+  private readonly insecureAllowNoAuth: boolean;
 
   constructor(config?: HttpTransportConfig) {
     this._port = config?.port ?? 3000;
@@ -46,6 +57,7 @@ export class HttpSseTransport {
     this.maxBodySize = config?.maxBodySize ?? 65_536;
     this.authToken = config?.auth?.bearerToken ?? null;
     this.authExcludePaths = new Set(config?.auth?.excludePaths ?? ['/health']);
+    this.insecureAllowNoAuth = config?.insecureAllowNoAuth ?? false;
   }
 
   /** Registra el handler de mensajes (misma interfaz que StdioTransport). */
@@ -56,6 +68,18 @@ export class HttpSseTransport {
   /** Inicia el servidor HTTP. Retorna Promise que resuelve cuando esta escuchando. */
   start(): Promise<void> {
     if (this.server) return Promise.resolve();
+
+    // Fail-closed: rechazar antes de crear/levantar el servidor si se va a
+    // bindear a una interfaz no-loopback sin auth configurada y sin opt-in
+    // explicito. Evita arrancar expuesto a la red por accidente.
+    if (!this.authToken && !isLoopbackHost(this.host) && !this.insecureAllowNoAuth) {
+      return Promise.reject(
+        new Error(
+          `Refusing to start HttpSseTransport bound to '${this.host}' without authentication configured. ` +
+            "Set auth.bearerToken, bind to 127.0.0.1/localhost, or pass insecureAllowNoAuth: true to explicitly opt out (not recommended)."
+        )
+      );
+    }
 
     return new Promise<void>((resolve, reject) => {
       this.server = createServer((req, res) => this.handleRequest(req, res));
