@@ -40,6 +40,7 @@ export class ContextStore {
   private adapter: StorageAdapter;
   private sessionId: string;
   private config: ContextStoreConfig;
+  private queue: Promise<unknown> = Promise.resolve();
 
   constructor(adapter: StorageAdapter, sessionId?: string, config?: ContextStoreConfig) {
     this.adapter = adapter;
@@ -48,10 +49,28 @@ export class ContextStore {
   }
 
   /**
+   * Encola una operacion en una cola FIFO en memoria (mutex simple).
+   * Serializa TODAS las operaciones publicas de una misma instancia que
+   * tocan loadStore()/saveStore(), de forma que dos llamadas concurrentes
+   * sobre la misma instancia SIEMPRE se procesen una despues de la otra,
+   * nunca intercaladas (evita lost update). Un error en una operacion no
+   * tumba la cola para las siguientes.
+   */
+  private enqueue<T>(fn: () => Promise<T>): Promise<T> {
+    const result = this.queue.then(() => fn());
+    this.queue = result.then(() => undefined, () => undefined);
+    return result;
+  }
+
+  /**
    * Establece un par clave-valor en el contexto.
    * El valor se parsea con inferencia de tipo (JSON.parse).
    */
   async set(key: string, value: string): Promise<OperationResult> {
+    return this.enqueue(() => this.setInternal(key, value));
+  }
+
+  private async setInternal(key: string, value: string): Promise<OperationResult> {
     // Validate key
     const keyError = this.validateKey(key);
     if (keyError) return keyError;
@@ -125,6 +144,10 @@ export class ContextStore {
 
   /** Recupera un valor del contexto por clave. */
   async get(key: string): Promise<OperationResult> {
+    return this.enqueue(() => this.getInternal(key));
+  }
+
+  private async getInternal(key: string): Promise<OperationResult> {
     let store: SessionStore;
     try {
       store = await this.loadStore();
@@ -145,6 +168,10 @@ export class ContextStore {
 
   /** Retorna todo el contexto como mapa clave-valor plano. */
   async getAll(): Promise<OperationResult> {
+    return this.enqueue(() => this.getAllInternal());
+  }
+
+  private async getAllInternal(): Promise<OperationResult> {
     let store: SessionStore;
     try {
       store = await this.loadStore();
@@ -166,6 +193,10 @@ export class ContextStore {
 
   /** Elimina una clave del contexto. */
   async delete(key: string): Promise<OperationResult> {
+    return this.enqueue(() => this.deleteInternal(key));
+  }
+
+  private async deleteInternal(key: string): Promise<OperationResult> {
     let store: SessionStore;
     try {
       store = await this.loadStore();
@@ -188,6 +219,10 @@ export class ContextStore {
 
   /** Limpia todo el contexto de la sesion. */
   async clear(): Promise<OperationResult> {
+    return this.enqueue(() => this.clearInternal());
+  }
+
+  private async clearInternal(): Promise<OperationResult> {
     let store: SessionStore;
     try {
       store = await this.loadStore();
@@ -205,6 +240,10 @@ export class ContextStore {
 
   /** Consulta el historial de comandos ejecutados. */
   async getHistory(options?: { limit?: number; offset?: number }): Promise<OperationResult> {
+    return this.enqueue(() => this.getHistoryInternal(options));
+  }
+
+  private async getHistoryInternal(options?: { limit?: number; offset?: number }): Promise<OperationResult> {
     let store: SessionStore;
     try {
       store = await this.loadStore();
@@ -234,11 +273,16 @@ export class ContextStore {
 
   /** Libera recursos del storage adapter. */
   async dispose(): Promise<void> {
+    await this.queue;
     await this.adapter.dispose();
   }
 
   /** Registra un comando ejecutado en el historial. */
   async recordCommand(entry: Partial<HistoryEntry>): Promise<void> {
+    return this.enqueue(() => this.recordCommandInternal(entry));
+  }
+
+  private async recordCommandInternal(entry: Partial<HistoryEntry>): Promise<void> {
     const store = await this.loadStore();
 
     const fullEntry: HistoryEntry = {
@@ -290,6 +334,10 @@ export class ContextStore {
 
   /** Revierte un comando previamente ejecutado usando su snapshot. */
   async undo(commandId: string): Promise<OperationResult> {
+    return this.enqueue(() => this.undoInternal(commandId));
+  }
+
+  private async undoInternal(commandId: string): Promise<OperationResult> {
     let store: SessionStore;
     try {
       store = await this.loadStore();

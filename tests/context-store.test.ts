@@ -697,3 +697,138 @@ describe('Context Store', () => {
     });
   });
 });
+
+// ============================================================
+// TEST SUITE: Concurrencia realista (cola FIFO / mutex)
+//
+// Estos tests usan un adapter mock "realista" que devuelve una
+// copia INDEPENDIENTE del store en cada load() (como lo haria un
+// backend real de disco/SQLite). Con este adapter, el falso
+// positivo de T20 desaparece: sin el enqueue() las escrituras
+// concurrentes se pisarian (lost update) y estos tests fallarian.
+// ============================================================
+
+class RealisticMockAdapter implements StorageAdapter {
+  readonly name = 'realistic-memory';
+  private stores: Map<string, string> = new Map();
+
+  async initialize(session_id: string): Promise<void> {
+    if (!this.stores.has(session_id)) {
+      this.stores.set(
+        session_id,
+        JSON.stringify({ context: { entries: {} }, history: [], undo_snapshots: [] })
+      );
+    }
+  }
+
+  async load(session_id: string): Promise<any | null> {
+    const raw = this.stores.get(session_id);
+    return raw ? JSON.parse(raw) : null; // copia independiente cada vez
+  }
+
+  async save(session_id: string, store: any): Promise<void> {
+    this.stores.set(session_id, JSON.stringify(store)); // serializa, no comparte referencia
+  }
+
+  async destroy(session_id: string): Promise<void> {
+    this.stores.delete(session_id);
+  }
+
+  async healthCheck(): Promise<boolean> {
+    return true;
+  }
+
+  async dispose(): Promise<void> {
+    this.stores.clear();
+  }
+}
+
+describe('Context Store - Concurrencia realista (cola FIFO)', () => {
+  let adapter: RealisticMockAdapter;
+  let store: ContextStore;
+
+  beforeEach(async () => {
+    adapter = new RealisticMockAdapter();
+    store = new ContextStore(adapter, 'test-session-concurrent');
+    await adapter.initialize('test-session-concurrent');
+  });
+
+  it('N sets concurrentes sobreviven sin lost update (realistic adapter)', async () => {
+    const N = 20;
+    const promises = Array.from({ length: N }, (_, i) =>
+      store.set(`key_${i}`, `${i}`)
+    );
+
+    await Promise.all(promises);
+
+    const result = await store.getAll();
+    expect(result.status).toBe(0);
+    expect(result.meta!.count).toBe(N);
+
+    for (let i = 0; i < N; i++) {
+      expect(result.data[`key_${i}`]).toBe(i);
+    }
+  });
+
+  it('mix de set/delete/recordCommand concurrentes deja estado consistente', async () => {
+    // Sembrar algunas claves base
+    await store.set('keep', '"keep-val"');
+    await store.set('toDelete', '"delete-val"');
+
+    const ops: Promise<unknown>[] = [
+      store.set('a', '1'),
+      store.set('b', '2'),
+      store.set('c', '3'),
+      store.delete('toDelete'),
+      store.recordCommand({ id: 'cmd-1', command: 'set', namespace: 'ctx' }),
+      store.recordCommand({ id: 'cmd-2', command: 'delete', namespace: 'ctx' }),
+      store.set('a', 'updated'),
+    ];
+
+    // No debe lanzar excepciones no manejadas
+    await Promise.all(ops);
+
+    const all = await store.getAll();
+    expect(all.status).toBe(0);
+
+    // Claves esperadas presentes y con valor final correcto
+    expect(all.data['keep']).toBe('keep-val');
+    expect(all.data['a']).toBe('updated');
+    expect(all.data['b']).toBe(2);
+    expect(all.data['c']).toBe(3);
+    expect(all.data['toDelete']).toBeUndefined();
+
+    // Historial con los dos comandos registrados
+    const history = await store.getHistory();
+    expect(history.status).toBe(0);
+    expect(history.meta!.total).toBe(2);
+  });
+
+  it('las operaciones se procesan en el orden de llamada (FIFO)', async () => {
+    // Dispara set('x','1') y set('x','2') sin await entre medias.
+    // El valor final debe ser el de la ultima llamada (2).
+    await Promise.all([store.set('x', '1'), store.set('x', '2')]);
+
+    const result = await store.get('x');
+    expect(result.status).toBe(0);
+    expect(result.data.value).toBe(2);
+  });
+
+  it('un error en una operacion de la cola no tumba las siguientes', async () => {
+    // set con clave invalida retorna error (status 1) pero NO lanza.
+    // Eso no debe bloquear la cola; las siguientes escrituras deben
+    // persistir correctamente.
+    const ops = [
+      store.set('bad key!', '"x"'), // clave invalida -> error de resultado
+      store.set('good', '"y"'),
+    ];
+    const results = await Promise.all(ops);
+
+    expect(results[0].status).toBe(1); // error esperado
+    expect(results[1].status).toBe(0);
+
+    const all = await store.getAll();
+    expect(all.status).toBe(0);
+    expect(all.data['good']).toBe('y');
+  });
+});
