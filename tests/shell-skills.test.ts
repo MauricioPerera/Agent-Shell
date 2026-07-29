@@ -8,6 +8,13 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { CommandRegistry } from '../src/command-registry/index.js';
 import { httpCommands } from '../src/skills/shell-http.js';
+
+// Mock node:dns/promises so SSRF validation tests can simulate DNS resolution
+// without touching the network. Default resolves any hostname to a public IP.
+vi.mock('node:dns/promises', () => ({
+  lookup: vi.fn(),
+}));
+import { lookup as dnsLookup } from 'node:dns/promises';
 import { jsonCommands } from '../src/skills/shell-json.js';
 import { createFileCommands } from '../src/skills/shell-file.js';
 import { createShellCommands } from '../src/skills/shell-exec.js';
@@ -112,6 +119,15 @@ describe('HTTP Skills', () => {
     globalThis.fetch = originalFetch;
   });
 
+  // Default: DNS resolves any hostname to a public IP (fail-open preserved for
+  // the existing HT01-HT04 tests, which use fictional hostnames + mocked fetch).
+  beforeEach(() => {
+    vi.mocked(dnsLookup).mockReset();
+    vi.mocked(dnsLookup).mockResolvedValue([
+      { address: '93.184.216.34', family: 4 },
+    ] as any);
+  });
+
   it('HT01: http:get calls fetch with GET', async () => {
     const handler = findHandler(httpCommands, 'http', 'get');
     const result = await handler({ url: 'https://api.test.com/data' });
@@ -148,6 +164,77 @@ describe('HTTP Skills', () => {
 
     expect(result.success).toBe(false);
     expect(result.error).toContain('Network error');
+  });
+
+  // -------------------------------------------------------------------------
+  // SSRF protection tests (HT05+) — blocking is unconditional.
+  // -------------------------------------------------------------------------
+
+  it('HT05: blocks non-http/https scheme (ftp)', async () => {
+    const handler = findHandler(httpCommands, 'http', 'get');
+    const result = await handler({ url: 'ftp://example.com/file' });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('ftp:');
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
+  it('HT06: blocks literal cloud metadata IP (169.254.169.254) without fetch', async () => {
+    const handler = findHandler(httpCommands, 'http', 'get');
+    const result = await handler({ url: 'http://169.254.169.254/latest/meta-data/' });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('Blocked');
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
+  it('HT07: blocks literal loopback IP (127.0.0.1)', async () => {
+    const handler = findHandler(httpCommands, 'http', 'get');
+    const result = await handler({ url: 'http://127.0.0.1:6379/' });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('Blocked');
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
+  it('HT08: blocks when DNS resolves hostname to a private IP', async () => {
+    vi.mocked(dnsLookup).mockResolvedValue([
+      { address: '169.254.169.254', family: 4 },
+    ] as any);
+
+    const handler = findHandler(httpCommands, 'http', 'get');
+    const result = await handler({ url: 'http://internal.evil.example/' });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('Blocked');
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+    expect(dnsLookup).toHaveBeenCalledWith('internal.evil.example', { all: true });
+  });
+
+  it('HT09: allows request when DNS resolves hostname to a public IP', async () => {
+    vi.mocked(dnsLookup).mockResolvedValue([
+      { address: '93.184.216.34', family: 4 },
+    ] as any);
+
+    const handler = findHandler(httpCommands, 'http', 'get');
+    const result = await handler({ url: 'http://public.test.example/' });
+
+    expect(result.success).toBe(true);
+    expect(result.data.status).toBe(200);
+    expect(globalThis.fetch).toHaveBeenCalled();
+  });
+
+  it('HT10: fail-open when DNS does not resolve (ENOTFOUND) -> still reaches fetch', async () => {
+    const dnsErr: NodeJS.ErrnoException = new Error('getaddrinfo ENOTFOUND fail.test.example');
+    dnsErr.code = 'ENOTFOUND';
+    vi.mocked(dnsLookup).mockRejectedValue(dnsErr);
+
+    const handler = findHandler(httpCommands, 'http', 'get');
+    const result = await handler({ url: 'http://fail.test.example/' });
+
+    expect(result.success).toBe(true);
+    expect(result.data.status).toBe(200);
+    expect(globalThis.fetch).toHaveBeenCalled();
   });
 });
 
