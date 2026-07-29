@@ -154,6 +154,22 @@ describe('Git Skills', () => {
       expect(definition.requiredPermissions).toBeDefined();
     }
   });
+
+  it('GI06: git:commit message with command substitution is NOT executed', async () => {
+    writeFileSync(join(tempDir, 'file.txt'), 'new');
+    const proofPath = join(tempDir, 'pwned-proof.txt');
+    expect(existsSync(proofPath)).toBe(false);
+    const handler = findHandler(gitCommands, 'git', 'commit');
+    const res = await handler({
+      message: '$(touch pwned-proof.txt)',
+      'add-all': true,
+      cwd: tempDir,
+    });
+    // Commit must succeed (message is a literal string, no shell involved).
+    expect(res.success).toBe(true);
+    // The injected command substitution must NOT have run — no proof file created.
+    expect(existsSync(proofPath)).toBe(false);
+  });
 });
 
 // ===========================================================================

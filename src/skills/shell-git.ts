@@ -4,7 +4,7 @@
  */
 
 import { command } from '../command-builder/index.js';
-import { execSync } from 'node:child_process';
+import { execSync, execFileSync } from 'node:child_process';
 import type { SkillEntry } from './scaffold.js';
 
 function gitExec(cmd: string, cwd?: string): { stdout: string; stderr: string; exitCode: number } {
@@ -15,6 +15,29 @@ function gitExec(cmd: string, cwd?: string): { stdout: string; stderr: string; e
       timeout: 120_000,
       maxBuffer: 10 * 1024 * 1024,
       stdio: ['pipe', 'pipe', 'pipe'],
+    }) as string;
+    return { stdout: stdout.trimEnd(), stderr: '', exitCode: 0 };
+  } catch (err: any) {
+    return {
+      stdout: (err.stdout || '').toString().trimEnd(),
+      stderr: (err.stderr || '').toString().trimEnd(),
+      exitCode: err.status ?? 1,
+    };
+  }
+}
+
+// Argument-vector git execution. No shell is spawned, so each argument is passed
+// to git verbatim and never re-parsed by a shell — eliminating command injection
+// via interpolation/substitution ($(...), `...`, ;, &&, etc.).
+function gitExecArgs(args: string[], cwd?: string): { stdout: string; stderr: string; exitCode: number } {
+  try {
+    const stdout = execFileSync('git', args, {
+      cwd: cwd || process.cwd(),
+      encoding: 'utf-8',
+      timeout: 120_000,
+      maxBuffer: 10 * 1024 * 1024,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      shell: false,
     }) as string;
     return { stdout: stdout.trimEnd(), stderr: '', exitCode: 0 };
   } catch (err: any) {
@@ -80,8 +103,11 @@ pullDef.requiredPermissions = ['git:write'];
 
 export const gitCommands: SkillEntry[] = [
   { definition: cloneDef, handler: async (args: any) => {
-    const branchFlag = args.branch ? ` -b ${args.branch}` : '';
-    const res = gitExec(`git clone${branchFlag} ${args.url} ${args.path || '.'}`);
+    const branch = args.branch ? String(args.branch) : '';
+    const target = args.path || '.';
+    const res = gitExecArgs(
+      ['clone', ...(branch ? ['-b', branch] : []), String(args.url), String(target)],
+    );
     return { success: res.exitCode === 0, data: res, error: res.exitCode !== 0 ? res.stderr : undefined };
   }},
   { definition: statusDef, handler: async (args: any) => {
@@ -96,18 +122,20 @@ export const gitCommands: SkillEntry[] = [
   }},
   { definition: commitDef, handler: async (args: any) => {
     const cwd = args.cwd || undefined;
-    if (args['add-all']) gitExec('git add -A', cwd);
-    const res = gitExec(`git commit -m "${args.message.replace(/"/g, '\\"')}"`, cwd);
+    if (args['add-all']) gitExecArgs(['add', '-A'], cwd);
+    const res = gitExecArgs(['commit', '-m', String(args.message)], cwd);
     return { success: res.exitCode === 0, data: res, error: res.exitCode !== 0 ? res.stderr : undefined };
   }},
   { definition: pushDef, handler: async (args: any) => {
-    const branch = args.branch ? ` ${args.branch}` : '';
-    const res = gitExec(`git push ${args.remote || 'origin'}${branch}`, args.cwd || undefined);
+    const remote = args.remote || 'origin';
+    const branch = args.branch ? String(args.branch) : '';
+    const res = gitExecArgs(['push', remote, ...(branch ? [branch] : [])], args.cwd || undefined);
     return { success: res.exitCode === 0, data: res, error: res.exitCode !== 0 ? res.stderr : undefined };
   }},
   { definition: pullDef, handler: async (args: any) => {
-    const branch = args.branch ? ` ${args.branch}` : '';
-    const res = gitExec(`git pull ${args.remote || 'origin'}${branch}`, args.cwd || undefined);
+    const remote = args.remote || 'origin';
+    const branch = args.branch ? String(args.branch) : '';
+    const res = gitExecArgs(['pull', remote, ...(branch ? [branch] : [])], args.cwd || undefined);
     return { success: res.exitCode === 0, data: res, error: res.exitCode !== 0 ? res.stderr : undefined };
   }},
 ];
