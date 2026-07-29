@@ -2,7 +2,7 @@
  * Tests for workspace skills — persistent state across commands.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { WorkspaceState, createWorkspaceCommands } from '../src/skills/workspace.js';
 import { CommandRegistry } from '../src/command-registry/index.js';
 import { registerShellSkills } from '../src/skills/index.js';
@@ -10,6 +10,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { SkillEntry } from '../src/skills/scaffold.js';
+import type { ShellAdapter } from '../src/just-bash/types.js';
 
 function findHandler(entries: SkillEntry[], ns: string, name: string): Function {
   const e = entries.find(e => e.definition.namespace === ns && e.definition.name === name);
@@ -280,5 +281,74 @@ describe('Workspace Skills', () => {
       expect(definition.requiredPermissions).toBeDefined();
       expect(definition.requiredPermissions!.length).toBeGreaterThan(0);
     }
+  });
+});
+
+// ===========================================================================
+// Sandbox adapter injection (GLM-FIX-SANDBOX-BYPASS)
+// ===========================================================================
+
+describe('Workspace Sandbox Adapter Injection', () => {
+  let state: WorkspaceState;
+  let tempDir: string;
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), 'ws-sandbox-'));
+    state = new WorkspaceState();
+    state.cwd = tempDir;
+  });
+
+  afterEach(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('WS21: workspace:run routes through injected ShellAdapter (not execSync)', async () => {
+    const execMock = vi.fn().mockResolvedValue({ stdout: 'FAKE_OUTPUT', stderr: '', exitCode: 0 });
+    const fakeAdapter: ShellAdapter = {
+      backend: 'test',
+      exec: execMock,
+      which: vi.fn().mockResolvedValue({ program: '', path: null, found: false }),
+      readFile: vi.fn().mockResolvedValue({ path: '', content: '', size: 0 }),
+      writeFile: vi.fn().mockResolvedValue({ path: '', size: 0, written: true }),
+      listDir: vi.fn().mockResolvedValue({ path: '', entries: [], count: 0 }),
+    };
+
+    const cmds = createWorkspaceCommands(state, fakeAdapter);
+    const run = findHandler(cmds, 'workspace', 'run');
+    const res = await run({ command: 'cualquier cosa' });
+
+    // (a) output came from the fake adapter, not a real execSync
+    expect(res.success).toBe(true);
+    expect(res.data.stdout).toBe('FAKE_OUTPUT');
+    expect(res.data.exitCode).toBe(0);
+
+    // (b) adapter.exec was called with the command and the workspace cwd
+    expect(execMock).toHaveBeenCalledTimes(1);
+    expect(execMock).toHaveBeenCalledWith('cualquier cosa', {
+      cwd: tempDir,
+      env: state.env,
+      timeout: 120_000,
+    });
+  });
+
+  it('WS22: workspace:run propagates non-zero exit code from injected adapter', async () => {
+    const execMock = vi.fn().mockResolvedValue({ stdout: '', stderr: 'boom', exitCode: 7 });
+    const fakeAdapter: ShellAdapter = {
+      backend: 'test',
+      exec: execMock,
+      which: vi.fn().mockResolvedValue({ program: '', path: null, found: false }),
+      readFile: vi.fn().mockResolvedValue({ path: '', content: '', size: 0 }),
+      writeFile: vi.fn().mockResolvedValue({ path: '', size: 0, written: true }),
+      listDir: vi.fn().mockResolvedValue({ path: '', entries: [], count: 0 }),
+    };
+
+    const cmds = createWorkspaceCommands(state, fakeAdapter);
+    const run = findHandler(cmds, 'workspace', 'run');
+    const res = await run({ command: 'failing command' });
+
+    expect(res.success).toBe(true);
+    expect(res.data.exitCode).toBe(7);
+    expect(res.data.stderr).toBe('boom');
+    expect(execMock).toHaveBeenCalledTimes(1);
   });
 });

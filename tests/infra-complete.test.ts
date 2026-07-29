@@ -2,7 +2,7 @@
  * Tests for infrastructure completion: file ops, git, cron, secrets, process manager.
  */
 
-import { describe, it, expect, beforeEach, afterEach, afterAll } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from 'vitest';
 import { mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -16,6 +16,7 @@ import { SecretStore, createSecretCommands } from '../src/skills/secret-store.js
 import { ProcessManager, createProcessCommands } from '../src/skills/process-mgr.js';
 import { NativeShellAdapter } from '../src/just-bash/adapter.js';
 import type { SkillEntry } from '../src/skills/scaffold.js';
+import type { ShellAdapter } from '../src/just-bash/types.js';
 
 function findHandler(entries: SkillEntry[], ns: string, name: string): Function {
   const e = entries.find(e => e.definition.namespace === ns && e.definition.name === name);
@@ -244,6 +245,74 @@ describe('Cron Skills', () => {
     const handler = findHandler(cmds, 'cron', 'history');
     const res = await handler({});
     expect(res.data.count).toBe(0);
+  });
+});
+
+// ===========================================================================
+// CRON SANDBOX ADAPTER INJECTION (GLM-FIX-SANDBOX-BYPASS)
+// ===========================================================================
+
+describe('Cron Sandbox Adapter Injection', () => {
+  let execMock: ReturnType<typeof vi.fn>;
+  let fakeAdapter: ShellAdapter;
+  let scheduler: CronScheduler;
+  let cmds: SkillEntry[];
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    execMock = vi.fn().mockResolvedValue({ stdout: 'CRON_FAKE', stderr: '', exitCode: 0 });
+    fakeAdapter = {
+      backend: 'test',
+      exec: execMock,
+      which: vi.fn().mockResolvedValue({ program: '', path: null, found: false }),
+      readFile: vi.fn().mockResolvedValue({ path: '', content: '', size: 0 }),
+      writeFile: vi.fn().mockResolvedValue({ path: '', size: 0, written: true }),
+      listDir: vi.fn().mockResolvedValue({ path: '', entries: [], count: 0 }),
+    };
+    scheduler = new CronScheduler(fakeAdapter);
+    cmds = createCronCommands(scheduler);
+  });
+
+  afterEach(() => {
+    scheduler.destroy();
+    vi.useRealTimers();
+  });
+
+  it('CR08: CronScheduler uses injected adapter to execute tasks', async () => {
+    const schedule = findHandler(cmds, 'cron', 'schedule');
+    const res = await schedule({ name: 'injected', command: 'echo via-adapter', interval: '1s' });
+    expect(res.success).toBe(true);
+
+    // Fire the interval 3 times. Minimum valid interval is 1000ms ('1s').
+    await vi.advanceTimersByTimeAsync(1000);
+    await vi.advanceTimersByTimeAsync(1000);
+    await vi.advanceTimersByTimeAsync(1000);
+
+    // The task ran through the injected adapter, not a real execSync.
+    expect(execMock).toHaveBeenCalledTimes(3);
+    expect(execMock).toHaveBeenCalledWith('echo via-adapter', { cwd: undefined, timeout: 60_000 });
+
+    // History reflects the (fake) adapter exit code, recorded each run.
+    const history = findHandler(cmds, 'cron', 'history');
+    const histRes = await history({ name: 'injected' });
+    expect(histRes.data.count).toBe(3);
+    for (const entry of histRes.data.history) {
+      expect(entry.exitCode).toBe(0);
+    }
+  });
+
+  it('CR09: CronScheduler records non-zero exit code from injected adapter', async () => {
+    execMock.mockResolvedValue({ stdout: '', stderr: 'failed', exitCode: 99 });
+
+    const schedule = findHandler(cmds, 'cron', 'schedule');
+    await schedule({ name: 'failing', command: 'exit 99', interval: '1s' });
+
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(execMock).toHaveBeenCalledTimes(1);
+    const history = findHandler(cmds, 'cron', 'history');
+    const histRes = await history({ name: 'failing' });
+    expect(histRes.data.history[0].exitCode).toBe(99);
   });
 });
 

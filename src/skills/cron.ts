@@ -4,8 +4,9 @@
  */
 
 import { command } from '../command-builder/index.js';
-import { execSync } from 'node:child_process';
 import type { SkillEntry } from './scaffold.js';
+import type { ShellAdapter } from '../just-bash/types.js';
+import { NativeShellAdapter } from '../just-bash/adapter.js';
 
 // ---------------------------------------------------------------------------
 // CronScheduler
@@ -26,6 +27,11 @@ const MAX_HISTORY_PER_TASK = 20;
 
 export class CronScheduler {
   private tasks: Map<string, CronTask> = new Map();
+  private readonly adapter: ShellAdapter;
+
+  constructor(adapter?: ShellAdapter) {
+    this.adapter = adapter || new NativeShellAdapter();
+  }
 
   schedule(name: string, cmd: string, interval: string, cwd?: string): { success: boolean; error?: string } {
     if (this.tasks.has(name)) {
@@ -40,7 +46,7 @@ export class CronScheduler {
     const task: CronTask = {
       name, command: cmd, interval, intervalMs: ms,
       history: [], createdAt: new Date().toISOString(), runCount: 0,
-      timer: setInterval(() => this.executeTask(task, cwd), ms),
+      timer: setInterval(() => { void this.executeTask(task, cwd); }, ms),
     };
 
     this.tasks.set(name, task);
@@ -81,16 +87,11 @@ export class CronScheduler {
     this.tasks.clear();
   }
 
-  private executeTask(task: CronTask, cwd?: string): void {
+  private async executeTask(task: CronTask, cwd?: string): Promise<void> {
     const start = Date.now();
-    let exitCode = 0;
-    try {
-      execSync(task.command, { cwd, encoding: 'utf-8', timeout: 60_000, stdio: ['pipe', 'pipe', 'pipe'] });
-    } catch (err: any) {
-      exitCode = err.status ?? 1;
-    }
+    const result = await this.adapter.exec(task.command, { cwd, timeout: 60_000 });
     task.runCount++;
-    task.history.push({ exitCode, duration_ms: Date.now() - start, timestamp: new Date().toISOString() });
+    task.history.push({ exitCode: result.exitCode, duration_ms: Date.now() - start, timestamp: new Date().toISOString() });
     while (task.history.length > MAX_HISTORY_PER_TASK) task.history.shift();
   }
 }
@@ -145,8 +146,8 @@ listDef.requiredPermissions = ['cron:read'];
 cancelDef.requiredPermissions = ['cron:write'];
 historyDef.requiredPermissions = ['cron:read'];
 
-export function createCronCommands(scheduler?: CronScheduler): SkillEntry[] {
-  const cron = scheduler || new CronScheduler();
+export function createCronCommands(scheduler?: CronScheduler, adapter?: ShellAdapter): SkillEntry[] {
+  const cron = scheduler || new CronScheduler(adapter);
 
   return [
     { definition: scheduleDef, handler: async (args: any) => {

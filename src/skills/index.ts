@@ -96,13 +96,13 @@ export function registerShellSkills(registry: CommandRegistry, shellAdapter?: Sh
   for (const { definition, handler } of envCommands) {
     registry.register(definition, handler);
   }
-  for (const { definition, handler } of createWorkspaceCommands()) {
+  for (const { definition, handler } of createWorkspaceCommands(undefined, adapter)) {
     registry.register(definition, handler);
   }
   for (const { definition, handler } of gitCommands) {
     registry.register(definition, handler);
   }
-  for (const { definition, handler } of createCronCommands()) {
+  for (const { definition, handler } of createCronCommands(undefined, adapter)) {
     registry.register(definition, handler);
   }
   for (const { definition, handler } of createSecretCommands()) {

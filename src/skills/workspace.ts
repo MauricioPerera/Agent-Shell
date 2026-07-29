@@ -8,10 +8,11 @@
  */
 
 import { command } from '../command-builder/index.js';
-import { execSync } from 'node:child_process';
 import { existsSync, mkdirSync } from 'node:fs';
 import { resolve, isAbsolute } from 'node:path';
 import type { SkillEntry } from './scaffold.js';
+import type { ShellAdapter } from '../just-bash/types.js';
+import { NativeShellAdapter } from '../just-bash/adapter.js';
 
 // ---------------------------------------------------------------------------
 // WorkspaceState — persistent state across commands
@@ -109,8 +110,9 @@ resetDef.requiredPermissions = ['workspace:write'];
  * Creates workspace commands bound to a shared WorkspaceState.
  * The state persists across all workspace:* calls within the same process.
  */
-export function createWorkspaceCommands(state?: WorkspaceState): SkillEntry[] {
+export function createWorkspaceCommands(state?: WorkspaceState, adapter?: ShellAdapter): SkillEntry[] {
   const ws = state || new WorkspaceState();
+  const shellAdapter = adapter || new NativeShellAdapter();
 
   return [
     {
@@ -151,45 +153,25 @@ export function createWorkspaceCommands(state?: WorkspaceState): SkillEntry[] {
         const timeout = args.timeout ?? 120_000;
         const start = Date.now();
 
-        try {
-          const stdout = execSync(cmd, {
+        const result = await shellAdapter.exec(cmd, {
+          cwd: ws.cwd,
+          env: ws.env,
+          timeout,
+        });
+
+        const duration_ms = Date.now() - start;
+        ws.recordHistory(cmd, result.exitCode, duration_ms);
+
+        return {
+          success: true,
+          data: {
+            stdout: result.stdout,
+            stderr: result.stderr,
+            exitCode: result.exitCode,
             cwd: ws.cwd,
-            env: ws.mergedEnv(),
-            timeout,
-            encoding: 'utf-8',
-            maxBuffer: 10 * 1024 * 1024, // 10MB
-            stdio: ['pipe', 'pipe', 'pipe'],
-          }) as string;
-
-          const duration_ms = Date.now() - start;
-          ws.recordHistory(cmd, 0, duration_ms);
-
-          return {
-            success: true,
-            data: {
-              stdout: stdout.trimEnd(),
-              stderr: '',
-              exitCode: 0,
-              cwd: ws.cwd,
-              duration_ms,
-            },
-          };
-        } catch (err: any) {
-          const duration_ms = Date.now() - start;
-          const exitCode = err.status ?? 1;
-          ws.recordHistory(cmd, exitCode, duration_ms);
-
-          return {
-            success: true,
-            data: {
-              stdout: (err.stdout || '').toString().trimEnd(),
-              stderr: (err.stderr || '').toString().trimEnd(),
-              exitCode,
-              cwd: ws.cwd,
-              duration_ms,
-            },
-          };
-        }
+            duration_ms,
+          },
+        };
       },
     },
     {
