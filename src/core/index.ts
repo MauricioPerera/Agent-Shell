@@ -305,8 +305,14 @@ class Core {
       return { dryRun: true, command: `${namespace}:${command}`, args: handlerArgs };
     }
 
-    // Execute handler
+    // Execute handler. Every skill handler follows the { success, data, error }
+    // convention — on failure, propagate it as the same _error shape the caller
+    // (execInternal) already checks for lookup/permission failures, instead of
+    // silently discarding `error` and reporting success with null data.
     const result = await registeredCmd.handler(handlerArgs, null);
+    if (result && typeof result === 'object' && result.success === false) {
+      return { _error: { code: 1, error: result.error || `Command failed: ${namespace}:${command}` } };
+    }
     return result.data;
   }
 
@@ -465,7 +471,8 @@ class Core {
 
       const result = await registeredCmd.handler(handlerArgs, previousData);
       if (!result.success) {
-        return { _error: { code: 1, error: `Pipeline failed at ${namespace}:${command}` } };
+        const detail = result.error ? `: ${result.error}` : '';
+        return { _error: { code: 1, error: `Pipeline failed at ${namespace}:${command}${detail}` } };
       }
 
       previousData = result.data;

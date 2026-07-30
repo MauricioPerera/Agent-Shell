@@ -87,6 +87,18 @@ function createMockRegistry() {
     undoable: false,
   });
 
+  commands.set('users:fail', {
+    namespace: 'users',
+    name: 'fail',
+    version: '1.0.0',
+    description: 'Comando que siempre falla (para tests de propagacion de errores)',
+    params: [],
+    handler: async () => {
+      return { success: false, data: null, error: 'Something specific went wrong' };
+    },
+    undoable: false,
+  });
+
   commands.set('orders:list', {
     namespace: 'orders',
     name: 'list',
@@ -277,6 +289,20 @@ describe('Core', () => {
       expect(response.data.id).toBe(42);
       expect(response.data.name).toBe('Juan');
     });
+
+    /**
+     * Regresion: cuando un handler retorna { success: false, error }, executeCommand
+     * descartaba `error` y devolvia `result.data` (null) con code=0 — un falso exito
+     * que ocultaba por que fallo el comando (encontrado auditando el flujo real via
+     * Core.exec(), el path que usa `agent-shell serve`).
+     */
+    it('exec("users:fail") propaga success:false como error real, no como falso exito', async () => {
+      const response = await core.exec('users:fail');
+
+      expect(response.code).not.toBe(0);
+      expect(response.data).toBeNull();
+      expect(response.error).toContain('Something specific went wrong');
+    });
   });
 
   // ----------------------------------------------------------
@@ -336,6 +362,13 @@ describe('Core', () => {
 
       expect(response.code).not.toBe(0);
       expect(response.error).toBeDefined();
+    });
+
+    it('pipe con paso que falla incluye el motivo real del handler en el error', async () => {
+      const response = await core.exec('users:fail >> users:export');
+
+      expect(response.code).not.toBe(0);
+      expect(response.error).toContain('Something specific went wrong');
     });
   });
 
