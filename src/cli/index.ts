@@ -15,6 +15,7 @@ import { Core } from '../core/index.js';
 import { CommandRegistry } from '../command-registry/index.js';
 import { registerSkills, registerShellSkills } from '../skills/index.js';
 import { createShellAdapter } from '../just-bash/factory.js';
+import { AGENT_PROFILES } from '../core/agent-profiles.js';
 import type { AgentProfile } from '../core/agent-profiles.js';
 import { readFileSync, existsSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -70,6 +71,36 @@ function hasFlag(args: string[], flag: string): boolean {
   return args.includes(flag);
 }
 
+/**
+ * Validates a raw --profile/AGENT_SHELL_PROFILE/config value against the
+ * known profile names. An invalid value (typo, stale config) previously
+ * reached AGENT_PROFILES[config.agentProfile] unchecked inside
+ * resolveAgentPermissions() and crashed with an uncaught
+ * "TypeError: ... is not iterable" — on stdio that's an unhandled
+ * exception writing a raw stack trace to stdout, corrupting the protocol
+ * stream. Exits with a clear message instead.
+ */
+export function validateProfile(raw: string | undefined): AgentProfile | undefined {
+  if (raw === undefined) return undefined;
+  if (!Object.prototype.hasOwnProperty.call(AGENT_PROFILES, raw)) {
+    console.error(`Invalid profile: '${raw}'. Valid values: ${Object.keys(AGENT_PROFILES).join(', ')}`);
+    process.exit(1);
+  }
+  return raw as AgentProfile;
+}
+
+/**
+ * No profile configured means unrestricted access to every registered
+ * command (documented, backward-compatible default) — worth a warning as
+ * loud as the missing-auth one, since it's just as consequential and just
+ * as easy to leave unset by accident.
+ */
+export function warnIfUnrestricted(profile: AgentProfile | undefined): void {
+  if (profile) return;
+  console.error('WARNING: No --profile set. The agent has UNRESTRICTED access to every registered command.');
+  console.error('Use --profile <admin|operator|reader|restricted> or AGENT_SHELL_PROFILE to scope access.');
+}
+
 function loadConfigFile(): Record<string, any> {
   const configPath = resolve(process.cwd(), 'agent-shell.config.json');
   if (!existsSync(configPath)) return {};
@@ -97,7 +128,8 @@ function buildRegistry(args: string[]): CommandRegistry {
 
 function serveStdio(args: string[]): void {
   const fileConfig = loadConfigFile();
-  const profile = (parseFlag(args, '--profile') || process.env.AGENT_SHELL_PROFILE || fileConfig.agentProfile) as AgentProfile | undefined;
+  const profile = validateProfile(parseFlag(args, '--profile') || process.env.AGENT_SHELL_PROFILE || fileConfig.agentProfile);
+  warnIfUnrestricted(profile);
 
   const registry = buildRegistry(args);
   const coreConfig: any = { registry };
@@ -118,7 +150,7 @@ async function serveHttp(args: string[]): Promise<void> {
   const port = parseInt(parseFlag(args, '--port') || process.env.AGENT_SHELL_PORT || fileConfig.port || '3000', 10);
   const host = parseFlag(args, '--host') || process.env.AGENT_SHELL_HOST || fileConfig.host || '0.0.0.0';
   const token = parseFlag(args, '--token') || process.env.AGENT_SHELL_TOKEN || fileConfig.auth?.bearerToken;
-  const profile = (parseFlag(args, '--profile') || process.env.AGENT_SHELL_PROFILE || fileConfig.agentProfile) as AgentProfile | undefined;
+  const profile = validateProfile(parseFlag(args, '--profile') || process.env.AGENT_SHELL_PROFILE || fileConfig.agentProfile);
   const corsOrigin = parseFlag(args, '--cors-origin') || process.env.AGENT_SHELL_CORS_ORIGIN || fileConfig.corsOrigin || '*';
 
   const registry = buildRegistry(args);
@@ -147,6 +179,11 @@ async function serveHttp(args: string[]): Promise<void> {
   if (!token) {
     console.warn('\n  WARNING: No auth token set. Server is open.');
     console.warn('  Use --token <value> or AGENT_SHELL_TOKEN env var.\n');
+  }
+
+  if (!profile) {
+    console.warn('  WARNING: No --profile set. The agent has UNRESTRICTED access to every registered command.');
+    console.warn('  Use --profile <admin|operator|reader|restricted> or AGENT_SHELL_PROFILE to scope access.\n');
   }
 
   process.on('SIGINT', async () => { await transport.stop(); process.exit(0); });

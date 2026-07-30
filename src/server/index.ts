@@ -20,6 +20,7 @@ import { McpServer } from '../mcp/server.js';
 import { HttpSseTransport } from '../mcp/http-transport.js';
 import { registerSkills, registerShellSkills } from '../skills/index.js';
 import { createShellAdapter } from '../just-bash/factory.js';
+import { AGENT_PROFILES } from '../core/agent-profiles.js';
 import type { AgentProfile } from '../core/agent-profiles.js';
 import { readFileSync, existsSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -88,6 +89,16 @@ function loadConfig(): ServerConfig {
 async function main() {
   const config = loadConfig();
 
+  // An invalid agentProfile (typo in config/env) previously reached
+  // AGENT_PROFILES[config.agentProfile] unchecked inside
+  // resolveAgentPermissions() and crashed with an uncaught
+  // "TypeError: ... is not iterable". main().catch() below turns that into
+  // a clean exit(1), but the message was a confusing internal TypeError
+  // rather than something an operator could act on.
+  if (config.agentProfile && !Object.prototype.hasOwnProperty.call(AGENT_PROFILES, config.agentProfile)) {
+    throw new Error(`Invalid agentProfile: '${config.agentProfile}'. Valid values: ${Object.keys(AGENT_PROFILES).join(', ')}`);
+  }
+
   console.log('Agent Shell Server starting...');
   console.log(`  Port: ${config.port}`);
   console.log(`  Host: ${config.host}`);
@@ -98,6 +109,11 @@ async function main() {
   if (!config.auth) {
     console.warn('\n  WARNING: No authentication configured. Server is open to anyone.');
     console.warn('  Set AGENT_SHELL_TOKEN=<token> or add auth.bearerToken to config.\n');
+  }
+
+  if (!config.agentProfile) {
+    console.warn('  WARNING: No agentProfile configured. The agent has UNRESTRICTED access to every registered command.');
+    console.warn('  Set AGENT_SHELL_PROFILE=<admin|operator|reader|restricted> or agentProfile in config.\n');
   }
 
   // Registry
