@@ -11,6 +11,7 @@ import { scaffoldCommands } from '../src/skills/scaffold.js';
 import { wizardCommands } from '../src/skills/wizard.js';
 import { registryAdminCommands } from '../src/skills/registry-admin.js';
 import { registerSkills } from '../src/skills/index.js';
+import { Core } from '../src/core/index.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -350,6 +351,29 @@ describe('Registry Admin Skills', () => {
     for (const def of result.data.definitions) {
       expect(def.namespace).toBe('wizard');
     }
+  });
+
+  /**
+   * Regresion: ninguno de los 4 comandos registry:* declaraba requiredPermissions,
+   * a diferencia de todo el resto de los skills — un agente SIN ningun permiso
+   * concedido podia listar/exportar el registro completo (misma info que
+   * describe/search ya protegen).
+   */
+  it('RA09: los 4 comandos registry:* exigen el permiso registry:read', () => {
+    for (const name of ['list', 'describe', 'stats', 'export']) {
+      const entry = adminEntries.find(e => e.definition.name === name)!;
+      expect(entry.definition.requiredPermissions).toEqual(['registry:read']);
+    }
+  });
+
+  it('RA10: un agente sin registry:read es denegado via Core; con el permiso, funciona', async () => {
+    const coreDenied = new Core({ registry, permissions: ['scaffold:read'] });
+    const denied = await coreDenied.exec('registry:list');
+    expect(denied.code).toBe(3);
+
+    const coreAllowed = new Core({ registry, permissions: ['registry:read'] });
+    const allowed = await coreAllowed.exec('registry:list');
+    expect(allowed.code).toBe(0);
   });
 });
 

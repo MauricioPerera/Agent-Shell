@@ -47,6 +47,11 @@ const exportDef = command('registry', 'export')
   .tags('registry', 'export', 'json')
   .build();
 
+listDef.requiredPermissions = ['registry:read'];
+describeDef.requiredPermissions = ['registry:read'];
+statsDef.requiredPermissions = ['registry:read'];
+exportDef.requiredPermissions = ['registry:read'];
+
 // ---------------------------------------------------------------------------
 // Factory
 // ---------------------------------------------------------------------------
