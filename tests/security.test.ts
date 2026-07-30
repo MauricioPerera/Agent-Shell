@@ -475,6 +475,17 @@ describe('Permission Matcher (Resource-Level)', () => {
     expect(matchPermission(perms, 'users:delete:abc')).toBe(true);
   });
 
+  /**
+   * Regresion: el check de resource wildcard exigia `parts.length === 3`.
+   * Un resourceId que contiene ':' (p.ej. una ruta Windows "C:\foo") produce
+   * mas de 3 partes al hacer split(':'), y el wildcard dejaba de aplicar
+   * silenciosamente (denegaba de mas).
+   */
+  it('T49b: resource wildcard matchea aunque el resourceId contenga ":"', () => {
+    const perms = ['file:read:*'];
+    expect(matchPermission(perms, 'file:read:C:\\Users\\foo\\bar.txt')).toBe(true);
+  });
+
   it('T50: resource wildcard no matchea otro action', () => {
     expect(matchPermission(['users:delete:*'], 'users:create:123')).toBe(false);
   });

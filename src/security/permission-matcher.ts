@@ -44,8 +44,14 @@ export function matchPermission(
   const parts = resolved.split(':');
   const [ns, action] = parts;
 
-  // Resource wildcard: "ns:action:*" matches "ns:action:123"
-  if (parts.length === 3) {
+  // Resource wildcard: "ns:action:*" matches "ns:action:123". `parts.length
+  // === 3` alone missed resourceIds that themselves contain ':' (e.g. a
+  // Windows path like "C:\foo") — split() gives more than 3 parts, and the
+  // wildcard silently stopped applying (fail-closed direction, but still a
+  // functional bug: denies more than intended). The check itself doesn't
+  // need the resourceId's actual value (it's a wildcard), so `>= 3` alone
+  // is the fix.
+  if (parts.length >= 3) {
     if (userPermissions.includes(`${ns}:${action}:*`)) return true;
   }
 
