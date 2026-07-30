@@ -8,6 +8,7 @@ export type {
   JqFilter,
   ParseMeta,
 } from './parser/index.js';
+export { quoteArg } from './parser/tokenizer.js';
 
 export { applyFilter } from './jq-filter/index.js';
 export type {

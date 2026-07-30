@@ -55,7 +55,9 @@ Recibir un string de comando y producir un objeto estructurado (ParsedCommand) q
 <arg_value>      ::= <quoted_string> | <unquoted_value>
 <positional_arg> ::= <quoted_string> | <unquoted_value>
 
-<quoted_string>  ::= '"' <any_char>* '"' | "'" <any_char>* "'"
+<quoted_string>  ::= '"' <dq_char>* '"' | "'" <sq_char>* "'"
+<dq_char>        ::= [^"\\] | '\\"'
+<sq_char>        ::= [^'\\] | "\\'"
 <unquoted_value> ::= [^\s|>\[\],]+
 
 <global_flags>   ::= <flag_dry_run> | <flag_validate> | <flag_confirm>
@@ -76,6 +78,25 @@ Recibir un string de comando y producir un objeto estructurado (ParsedCommand) q
 
 <integer>        ::= [0-9]+
 ```
+
+**Escape dentro de strings entre comillas** (agregado v1.1): un backslash
+inmediatamente seguido de la MISMA comilla que delimita el string (`\"`
+dentro de `"..."`, `\'` dentro de `'...'`) representa esa comilla como
+caracter literal y NO cierra el string. Cualquier OTRO backslash (`\\`,
+`\n`, `\Users`, ...) se deja intacto como caracter comun — esto NO es un
+escape general de backslash (ver 2.3, que sigue prohibiendo eso para
+valores SIN comillas); esta permitido unicamente para la comilla propia
+del delimitador, y solo dentro de valores CON comillas. La razon de no
+generalizarlo: rutas de Windows (`C:\Users\name`) y UNC (`\\server\share`)
+son el uso mas comun de comillas en este dominio y dependen de que un
+backslash comun se preserve tal cual.
+
+Limitacion conocida: un valor que deba terminar en un backslash literal
+justo antes de la comilla de cierre no se puede representar sin
+ambiguedad (el mismo problema que tienen shells reales como cmd.exe).
+
+Ver `src/parser/tokenizer.ts` (`scanQuoteChar`, `quoteArg`) para la
+implementacion y el helper de embebido seguro.
 
 ### 1.4 Estructura del AST (ParsedCommand)
 
@@ -307,7 +328,10 @@ Output: {
 
 - No depender de librerias externas de parsing (implementar parser propio y liviano)
 - No soportar sintaxis jq avanzada (pipes dentro del jq, funciones jq, etc.)
-- No soportar escape de caracteres con backslash dentro de strings sin comillas
+- No soportar escape de caracteres con backslash dentro de strings SIN comillas
+  (dentro de strings CON comillas si se soporta un escape acotado — ver 1.3,
+  "Escape dentro de strings entre comillas": solo `\"`/`\'` para la propia
+  comilla delimitadora, no un escape general)
 - No soportar anidamiento de batch (batch dentro de batch)
 - No soportar composicion dentro de batch (>> dentro de batch)
 

@@ -83,7 +83,7 @@ import {
   pipelineInBatchError,
   controlCharacterError,
 } from './errors.js';
-import { tokenize, type Token } from './tokenizer.js';
+import { tokenize, scanQuoteChar, type Token } from './tokenizer.js';
 
 export type { ParseResult, ParsedCommand, ParseError, CommandArgs, GlobalFlags, JqFilter, ParseMeta };
 
@@ -155,15 +155,13 @@ export function parse(input: string): ParseResult | ParseError {
  */
 function containsPipelineOutsideQuotes(input: string): boolean {
   let inQuote: string | null = null;
-  for (let i = 0; i < input.length - 1; i++) {
-    const ch = input[i];
-    if ((ch === '"' || ch === "'") && inQuote === null) {
-      inQuote = ch;
-    } else if (ch === inQuote) {
-      inQuote = null;
-    } else if (inQuote === null && ch === '>' && input[i + 1] === '>') {
+  for (let i = 0; i < input.length - 1; ) {
+    if (inQuote === null && input[i] === '>' && input[i + 1] === '>') {
       return true;
     }
+    const step = scanQuoteChar(input, i, inQuote);
+    inQuote = step.inQuote;
+    i += step.length;
   }
   return false;
 }
@@ -229,15 +227,13 @@ function parseBatch(trimmed: string, raw: string): ParseResult | ParseError {
 /** Encuentra el `]` de cierre correspondiente, respetando comillas. */
 function findClosingBracket(input: string, openPos: number): number {
   let inQuote: string | null = null;
-  for (let i = openPos + 1; i < input.length; i++) {
-    const ch = input[i];
-    if ((ch === '"' || ch === "'") && inQuote === null) {
-      inQuote = ch;
-    } else if (ch === inQuote) {
-      inQuote = null;
-    } else if (inQuote === null && ch === ']') {
+  for (let i = openPos + 1; i < input.length; ) {
+    if (inQuote === null && input[i] === ']') {
       return i;
     }
+    const step = scanQuoteChar(input, i, inQuote);
+    inQuote = step.inQuote;
+    i += step.length;
   }
   return -1;
 }
@@ -248,20 +244,17 @@ function splitByCommaRespectingQuotes(input: string): string[] {
   let current = '';
   let inQuote: string | null = null;
 
-  for (let i = 0; i < input.length; i++) {
-    const ch = input[i];
-    if ((ch === '"' || ch === "'") && inQuote === null) {
-      inQuote = ch;
-      current += ch;
-    } else if (ch === inQuote) {
-      inQuote = null;
-      current += ch;
-    } else if (inQuote === null && ch === ',') {
+  for (let i = 0; i < input.length; ) {
+    if (inQuote === null && input[i] === ',') {
       segments.push(current);
       current = '';
-    } else {
-      current += ch;
+      i++;
+      continue;
     }
+    const step = scanQuoteChar(input, i, inQuote);
+    current += input.slice(i, i + step.length);
+    inQuote = step.inQuote;
+    i += step.length;
   }
 
   if (current.length > 0) {
@@ -309,21 +302,17 @@ function splitByPipelineRespectingQuotes(input: string): string[] {
   let current = '';
   let inQuote: string | null = null;
 
-  for (let i = 0; i < input.length; i++) {
-    const ch = input[i];
-    if ((ch === '"' || ch === "'") && inQuote === null) {
-      inQuote = ch;
-      current += ch;
-    } else if (ch === inQuote) {
-      inQuote = null;
-      current += ch;
-    } else if (inQuote === null && ch === '>' && i + 1 < input.length && input[i + 1] === '>') {
+  for (let i = 0; i < input.length; ) {
+    if (inQuote === null && input[i] === '>' && i + 1 < input.length && input[i + 1] === '>') {
       segments.push(current);
       current = '';
-      i++; // skip second >
-    } else {
-      current += ch;
+      i += 2; // skip both >
+      continue;
     }
+    const step = scanQuoteChar(input, i, inQuote);
+    current += input.slice(i, i + step.length);
+    inQuote = step.inQuote;
+    i += step.length;
   }
 
   if (current.length > 0) {
@@ -409,13 +398,8 @@ function parseSingleCommand(input: string, raw: string, startPos: number): Parse
 function splitJqFilter(input: string): { commandPart: string; jqPart: string | null } {
   let inQuote: string | null = null;
 
-  for (let i = 0; i < input.length; i++) {
-    const ch = input[i];
-    if ((ch === '"' || ch === "'") && inQuote === null) {
-      inQuote = ch;
-    } else if (ch === inQuote) {
-      inQuote = null;
-    } else if (inQuote === null && ch === '|') {
+  for (let i = 0; i < input.length; ) {
+    if (inQuote === null && input[i] === '|') {
       const afterPipe = input.substring(i + 1).trimStart();
       if (afterPipe.startsWith('.') || afterPipe.startsWith('[.')) {
         return {
@@ -424,6 +408,9 @@ function splitJqFilter(input: string): { commandPart: string; jqPart: string | n
         };
       }
     }
+    const step = scanQuoteChar(input, i, inQuote);
+    inQuote = step.inQuote;
+    i += step.length;
   }
 
   return { commandPart: input, jqPart: null };
