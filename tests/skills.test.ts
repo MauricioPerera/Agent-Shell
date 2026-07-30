@@ -452,6 +452,32 @@ describe('Registry Admin Skills', () => {
       expect(result.data.definition.name).toBe('list');
     });
 
+    /**
+     * Regresion: el campo `namespaces` de registry:list/stats venia de
+     * registry.getNamespaces() sin filtrar — un namespace con CERO comandos
+     * visibles para este caller (ej. 'scaffold', 'wizard') igual aparecia
+     * nombrado en la respuesta, filtrando mas superficie de la que
+     * filterByPermissions pretende ocultar.
+     */
+    it('RA13b: registry:list solo lista namespaces con al menos un comando visible', async () => {
+      const entries = buildFilteredEntries();
+      const handler = findHandler(entries, 'registry', 'list');
+      const result = await handler({ format: 'full' });
+
+      expect(result.data.namespaces).toEqual(['registry']);
+      expect(result.data.namespaces).not.toContain('scaffold');
+      expect(result.data.namespaces).not.toContain('wizard');
+    });
+
+    it('RA13c: registry:stats cuenta solo namespaces visibles en totalNamespaces', async () => {
+      const entries = buildFilteredEntries();
+      const handler = findHandler(entries, 'registry', 'stats');
+      const result = await handler({});
+
+      expect(result.data.totalNamespaces).toBe(1);
+      expect(Object.keys(result.data.namespaces)).toEqual(['registry']);
+    });
+
     it('RA14: registry:export tambien filtra las definiciones exportadas', async () => {
       const entries = buildFilteredEntries();
       const handler = findHandler(entries, 'registry', 'export');
@@ -462,6 +488,21 @@ describe('Registry Admin Skills', () => {
       for (const def of result.data.definitions) {
         expect(def.namespace).toBe('registry');
       }
+    });
+
+    it('RA14b: un namespace con AL MENOS un comando visible sigue apareciendo (no todo-o-nada)', async () => {
+      const reg = new CommandRegistry();
+      for (const { definition, handler } of scaffoldCommands) reg.register(definition, handler);
+      for (const { definition, handler } of wizardCommands) reg.register(definition, handler);
+      // registry:read + scaffold:write: ve scaffold entero, wizard sigue oculto.
+      const entries = registryAdminCommands(reg, ['registry:read', 'scaffold:write']);
+      for (const { definition, handler } of entries) reg.register(definition, handler);
+
+      const handler = findHandler(entries, 'registry', 'list');
+      const result = await handler({ format: 'full' });
+
+      expect(result.data.namespaces).toContain('scaffold');
+      expect(result.data.namespaces).not.toContain('wizard');
     });
 
     it('RA15: sin agentPermissions (undefined), el comportamiento es el de siempre (sin filtrar)', async () => {

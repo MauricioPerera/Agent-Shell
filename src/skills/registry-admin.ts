@@ -73,6 +73,21 @@ function filterByPermissions(defs: CommandDefinition[], agentPermissions?: strin
   return defs.filter(def => !def.requiredPermissions?.length || matchPermissions(agentPermissions, def.requiredPermissions));
 }
 
+/**
+ * registry:list/stats return the full namespace list independent of any
+ * --namespace query filter (by design, for discovery) — but that list came
+ * straight from registry.getNamespaces(), unfiltered by the caller's own
+ * permissions. A namespace entirely gated behind permissions the caller
+ * doesn't have (0 visible commands in it) still named itself, disclosing
+ * more of the command surface than filterByPermissions intends to reveal.
+ * Drops namespaces with zero commands visible to this caller.
+ */
+function visibleNamespaces(registry: CommandRegistry, agentPermissions?: string[] | null): string[] {
+  if (!agentPermissions) return registry.getNamespaces();
+  const visible = new Set(filterByPermissions(registry.listAll(), agentPermissions).map(def => def.namespace));
+  return registry.getNamespaces().filter(ns => visible.has(ns));
+}
+
 export function registryAdminCommands(registry: CommandRegistry, agentPermissions?: string[] | null): SkillEntry[] {
   return [
     {
@@ -86,7 +101,7 @@ export function registryAdminCommands(registry: CommandRegistry, agentPermission
           : registry.listAll();
         const defs = filterByPermissions(allDefs, agentPermissions);
 
-        const namespaces = registry.getNamespaces();
+        const namespaces = visibleNamespaces(registry, agentPermissions);
 
         let commands: any;
         if (format === 'compact') {
@@ -131,7 +146,7 @@ export function registryAdminCommands(registry: CommandRegistry, agentPermission
       definition: statsDef,
       handler: async () => {
         const allDefs = filterByPermissions(registry.listAll(), agentPermissions);
-        const namespaces = registry.getNamespaces();
+        const namespaces = visibleNamespaces(registry, agentPermissions);
 
         const namespaceCounts: Record<string, number> = {};
         const allTags = new Set<string>();
