@@ -86,6 +86,7 @@ export class CommandBuilder {
   private _deprecated = false;
   private _deprecatedMessage?: string;
   private _requiredPermissions: string[] = [];
+  private _paramNames = new Set<string>();
 
   constructor(namespace: string, name: string) {
     this._namespace = namespace;
@@ -111,12 +112,24 @@ export class CommandBuilder {
   }
 
   /**
+   * Throws on a duplicate param name instead of letting the last
+   * definition silently win over an earlier one with no warning.
+   */
+  private _claimParamName(name: string): void {
+    if (this._paramNames.has(name)) {
+      throw new Error(`CommandBuilder: duplicate parameter name '${name}' for ${this._namespace}:${this._name}`);
+    }
+    this._paramNames.add(name);
+  }
+
+  /**
    * Add a parameter.
    * @param name - Parameter name
    * @param type - Type: 'string' | 'int' | 'float' | 'bool' | 'date' | 'json' | 'enum(...)' | 'array<...>'
    * @param configure - Optional callback to configure required/default/constraints
    */
   param(name: string, type: string, configure?: (p: ParamBuilder) => void): this {
+    this._claimParamName(name);
     const p = new ParamBuilder(name, type);
     if (configure) configure(p);
     this._params.push(p);
@@ -125,6 +138,7 @@ export class CommandBuilder {
 
   /** Add a required string parameter (shorthand). */
   requiredParam(name: string, type: string, description?: string): this {
+    this._claimParamName(name);
     const p = new ParamBuilder(name, type);
     p.required();
     if (description) p.description(description);
@@ -134,6 +148,7 @@ export class CommandBuilder {
 
   /** Add an optional parameter with default (shorthand). */
   optionalParam(name: string, type: string, defaultValue: any, description?: string): this {
+    this._claimParamName(name);
     const p = new ParamBuilder(name, type);
     p.default(defaultValue);
     if (description) p.description(description);

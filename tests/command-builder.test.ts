@@ -190,6 +190,29 @@ describe('CommandBuilder', () => {
     }).toThrow('description');
   });
 
+  /**
+   * Regresion: no habia validacion de nombres de parametro duplicados —
+   * dos param() con el mismo nombre se agregaban ambos al array sin
+   * avisar, en vez de fallar en el momento del error.
+   */
+  it('T19b: param() con nombre duplicado lanza inmediatamente', () => {
+    expect(() => {
+      command('ns', 'cmd')
+        .description('test')
+        .requiredParam('id', 'int')
+        .requiredParam('id', 'string');
+    }).toThrow(/duplicate parameter name 'id'/);
+  });
+
+  it('T19c: duplicado entre param/requiredParam/optionalParam tambien se detecta', () => {
+    expect(() => {
+      command('ns', 'cmd')
+        .description('test')
+        .param('name', 'string')
+        .optionalParam('name', 'string', 'default');
+    }).toThrow(/duplicate parameter name 'name'/);
+  });
+
   it('T20: fluent chain completo produce definicion correcta', () => {
     const def = command('users', 'create')
       .version('2.0.0')
