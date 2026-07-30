@@ -11,7 +11,7 @@
  */
 
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'node:http';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, timingSafeEqual, createHash } from 'node:crypto';
 import type { JsonRpcRequest, JsonRpcResponse, HttpTransportConfig, SseClient, HealthResponse } from './types.js';
 import { PARSE_ERROR, INVALID_REQUEST } from './types.js';
 import type { MessageHandler } from './transport.js';
@@ -24,6 +24,20 @@ import type { MessageHandler } from './transport.js';
  */
 function isLoopbackHost(host: string): boolean {
   return host === '127.0.0.1' || host === 'localhost' || host === '::1';
+}
+
+/**
+ * Compara dos strings en tiempo constante (protege contra timing attacks).
+ * Hashea ambos valores primero para que timingSafeEqual siempre reciba
+ * buffers del MISMO largo (32 bytes, SHA-256) sin importar el largo real
+ * de los strings de entrada -- evita el caso borde de timingSafeEqual
+ * lanzando una excepcion cuando los buffers tienen largos distintos, y
+ * de paso evita filtrar el largo real del token por timing.
+ */
+export function timingSafeStringEqual(a: string, b: string): boolean {
+  const bufA = createHash('sha256').update(a, 'utf-8').digest();
+  const bufB = createHash('sha256').update(b, 'utf-8').digest();
+  return timingSafeEqual(bufA, bufB);
 }
 
 /**
@@ -159,7 +173,7 @@ export class HttpSseTransport {
     // Bearer token authentication
     if (this.authToken && !this.authExcludePaths.has(url)) {
       const authHeader = req.headers.authorization;
-      if (!authHeader || authHeader !== `Bearer ${this.authToken}`) {
+      if (!authHeader || !timingSafeStringEqual(authHeader, `Bearer ${this.authToken}`)) {
         this.sendJson(res, 401, { error: 'Unauthorized', message: 'Valid Bearer token required in Authorization header' });
         return;
       }

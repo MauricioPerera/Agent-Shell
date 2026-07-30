@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { HttpSseTransport } from '../src/mcp/http-transport.js';
+import { HttpSseTransport, timingSafeStringEqual } from '../src/mcp/http-transport.js';
 import type { JsonRpcRequest, JsonRpcResponse } from '../src/mcp/types.js';
 
 const TEST_TOKEN = 'test-secret-token-12345';
@@ -171,5 +171,32 @@ describe('HTTP Auth: No Auth Configured', () => {
   it('AUTH10: /health works without auth', async () => {
     const res = await httpRequest(port, '/health');
     expect(res.status).toBe(200);
+  });
+});
+
+// ===========================================================================
+// Constant-time comparison helper (edge cases not covered by AUTH01-AUTH10)
+// ===========================================================================
+
+describe('HTTP Auth: timingSafeStringEqual', () => {
+  it('AUTH11: accepts an exactly equal header string', () => {
+    const expected = `Bearer ${TEST_TOKEN}`;
+    expect(timingSafeStringEqual(expected, expected)).toBe(true);
+  });
+
+  it('AUTH12: rejects a token that differs by a single trailing character', () => {
+    // Last char differs ('6' vs '5') -- confirms strict full-string equality,
+    // not just a prefix match.
+    const tampered = `Bearer ${TEST_TOKEN.slice(0, -1)}6`;
+    const expected = `Bearer ${TEST_TOKEN}`;
+    expect(tampered).not.toBe(expected); // sanity: genuinely different
+    expect(timingSafeStringEqual(tampered, expected)).toBe(false);
+  });
+
+  it('AUTH13: rejects an empty string header', () => {
+    const expected = `Bearer ${TEST_TOKEN}`;
+    expect(timingSafeStringEqual('', expected)).toBe(false);
+    expect(timingSafeStringEqual(expected, '')).toBe(false);
+    expect(timingSafeStringEqual('', '')).toBe(true); // empty == empty
   });
 });
