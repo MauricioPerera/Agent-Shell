@@ -412,6 +412,33 @@ describe('Env Skills', () => {
     delete process.env.ASHELL_API_KEY;
     delete process.env.ASHELL_NORMAL;
   });
+
+  /**
+   * Regresion: el enmascarado solo miraba el NOMBRE de la variable. Una
+   * variable con nombre "inocente" (DATABASE_URL, SENTRY_DSN) pero con una
+   * credencial embebida en el VALOR (user:pass@host, DSN con key@host) se
+   * devolvia en texto plano.
+   */
+  it('EV06: env:get enmascara por CONTENIDO aunque el nombre sea inocente', async () => {
+    process.env.ASHELL_DATABASE_URL = 'postgres://admin:hunter2@db.internal:5432/prod';
+    const handler = findHandler(envCommands, 'env', 'get');
+    const result = await handler({ name: 'ASHELL_DATABASE_URL' });
+
+    expect(result.data.value).toBe('***MASKED***');
+    delete process.env.ASHELL_DATABASE_URL;
+  });
+
+  it('EV07: env:list enmascara por contenido y deja pasar valores inocentes', async () => {
+    process.env.ASHELL_SENTRY_DSN = 'https://abc123key@o12345.ingest.sentry.io/6789';
+    process.env.ASHELL_NODE_ENV = 'production';
+    const handler = findHandler(envCommands, 'env', 'list');
+    const result = await handler({ prefix: 'ASHELL_' });
+
+    expect(result.data.variables.ASHELL_SENTRY_DSN).toBe('***MASKED***');
+    expect(result.data.variables.ASHELL_NODE_ENV).toBe('production');
+    delete process.env.ASHELL_SENTRY_DSN;
+    delete process.env.ASHELL_NODE_ENV;
+  });
 });
 
 // ===========================================================================

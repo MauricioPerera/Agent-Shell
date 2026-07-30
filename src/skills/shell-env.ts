@@ -5,8 +5,19 @@
  */
 
 import { command } from '../command-builder/index.js';
-import { isSensitiveEnvKey } from '../security/secret-patterns.js';
+import { isSensitiveEnvKey, containsSecret } from '../security/secret-patterns.js';
 import type { SkillEntry } from './scaffold.js';
+
+/**
+ * A key like DATABASE_URL, SENTRY_DSN, or CONNECTION_STRING doesn't match
+ * any sensitive-*name* pattern, but its *value* can still carry a credential
+ * (postgres://user:pass@host, a Sentry DSN's embedded key). Masking only by
+ * key name let those leak in plaintext through env:get/env:list.
+ */
+function isSensitiveValue(name: string, value: string | undefined): boolean {
+  if (value === undefined) return false;
+  return isSensitiveEnvKey(name) || containsSecret(value);
+}
 
 const getDef = command('env', 'get')
   .version('1.0.0')
@@ -36,7 +47,7 @@ export const envCommands: SkillEntry[] = [
       const exists = value !== undefined;
 
       // Mask sensitive values
-      const masked = exists && isSensitiveEnvKey(name) ? '***MASKED***' : value;
+      const masked = exists && isSensitiveValue(name, value) ? '***MASKED***' : value;
 
       return {
         success: true,
@@ -55,7 +66,7 @@ export const envCommands: SkillEntry[] = [
         if (value === undefined) continue;
 
         // Mask sensitive values
-        variables[key] = isSensitiveEnvKey(key) ? '***MASKED***' : value;
+        variables[key] = isSensitiveValue(key, value) ? '***MASKED***' : value;
       }
 
       return {

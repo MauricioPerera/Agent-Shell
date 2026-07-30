@@ -45,6 +45,15 @@ export const DEFAULT_SECRET_PATTERNS: SecretPattern[] = [
     pattern: /(?:secret|token)\s*[:=]\s*['"]?([0-9a-f]{32,})['"]?/gi,
     replacement: '[REDACTED:secret]',
   },
+  {
+    // Credentials embedded in a connection URL: postgres://user:pass@host,
+    // https://<key>@o123.ingest.sentry.io/... (Sentry DSN), redis://:pass@host,
+    // amqp://user:pass@host. Catches values whose secret isn't behind a
+    // `key=value`-shaped prefix like the patterns above expect.
+    name: 'url-credentials',
+    pattern: /[a-z][a-z0-9+.-]*:\/\/[^/\s@]+@[^\s'"]+/gi,
+    replacement: '[REDACTED:url-credentials]',
+  },
 ];
 
 /**
