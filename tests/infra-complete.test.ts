@@ -105,6 +105,112 @@ describe('File CRUD Operations', () => {
 });
 
 // ===========================================================================
+// FILE JAIL (optional path containment via createFileCommands(adapter, jailRoot))
+// ===========================================================================
+
+describe('File Jail (opt-in path containment)', () => {
+  const adapter = new NativeShellAdapter();
+  let jailDir: string;
+  let jailed: SkillEntry[];
+
+  beforeEach(() => {
+    jailDir = mkdtempSync(join(tmpdir(), 'filejail-'));
+    jailed = createFileCommands(adapter, jailDir);
+  });
+  afterEach(() => { rmSync(jailDir, { recursive: true, force: true }); });
+
+  it('FJ01: ops inside the jail work normally (write + read)', async () => {
+    const writeH = findHandler(jailed, 'file', 'write');
+    const readH = findHandler(jailed, 'file', 'read');
+    const target = join(jailDir, 'inside.txt');
+    const w = await writeH({ path: target, content: 'hello-jail' });
+    expect(w.success).toBe(true);
+    const r = await readH({ path: target });
+    expect(r.success).toBe(true);
+    expect(r.data.content).toBe('hello-jail');
+  });
+
+  it('FJ02: relative traversal outside jail is blocked (file:read)', async () => {
+    const readH = findHandler(jailed, 'file', 'read');
+    const res = await readH({ path: '../../../../etc/passwd' });
+    expect(res.success).toBe(false);
+    expect(res.error).toMatch(/jail|outside/i);
+  });
+
+  it('FJ03: absolute path outside jail is blocked for read/write/delete', async () => {
+    const outsidePath = join(tmpdir(), 'outside-secret-' + Date.now() + '.txt');
+    writeFileSync(outsidePath, 'secret');
+    try {
+      const readH = findHandler(jailed, 'file', 'read');
+      const writeH = findHandler(jailed, 'file', 'write');
+      const deleteH = findHandler(jailed, 'file', 'delete');
+
+      const r = await readH({ path: outsidePath });
+      expect(r.success).toBe(false);
+      expect(r.error).toMatch(/jail|outside/i);
+      // Must not have leaked the contents.
+      expect(r.data).toBeNull();
+
+      const w = await writeH({ path: outsidePath, content: 'pwn' });
+      expect(w.success).toBe(false);
+      expect(w.error).toMatch(/jail|outside/i);
+
+      const d = await deleteH({ path: outsidePath });
+      expect(d.success).toBe(false);
+      expect(d.error).toMatch(/jail|outside/i);
+      // File must still exist (delete was blocked before touching fs).
+      expect(existsSync(outsidePath)).toBe(true);
+    } finally {
+      rmSync(outsidePath, { recursive: true, force: true });
+    }
+  });
+
+  it('FJ04: file:rename blocked when to is outside jail', async () => {
+    const renameH = findHandler(jailed, 'file', 'rename');
+    const from = join(jailDir, 'inner.txt');
+    writeFileSync(from, 'data');
+    const to = join(tmpdir(), 'escaped-' + Date.now() + '.txt');
+    try {
+      const res = await renameH({ from, to });
+      expect(res.success).toBe(false);
+      expect(res.error).toMatch(/jail|outside/i);
+      // Source must remain untouched.
+      expect(existsSync(from)).toBe(true);
+      expect(existsSync(to)).toBe(false);
+    } finally {
+      rmSync(to, { recursive: true, force: true });
+    }
+  });
+
+  it('FJ05: file:rename blocked when from is outside jail', async () => {
+    const renameH = findHandler(jailed, 'file', 'rename');
+    const outside = join(tmpdir(), 'outside-src-' + Date.now() + '.txt');
+    writeFileSync(outside, 'data');
+    const to = join(jailDir, 'smuggled.txt');
+    try {
+      const res = await renameH({ from: outside, to });
+      expect(res.success).toBe(false);
+      expect(res.error).toMatch(/jail|outside/i);
+      expect(existsSync(outside)).toBe(true);
+      expect(existsSync(to)).toBe(false);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('FJ06: without jailRoot, behavior is unrestricted (no blocking)', async () => {
+    const free = createFileCommands(adapter);
+    const readH = findHandler(free, 'file', 'read');
+    // An absolute outside path is NOT blocked when no jail is configured.
+    // We use a path that does not exist; the handler should attempt the read
+    // and fail with the underlying fs error (not a jail error).
+    const res = await readH({ path: join(tmpdir(), 'no-containment-here-' + Date.now() + '.txt') });
+    expect(res.success).toBe(false);
+    expect(res.error).not.toMatch(/jail|outside/i);
+  });
+});
+
+// ===========================================================================
 // GIT
 // ===========================================================================
 
