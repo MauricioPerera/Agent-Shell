@@ -227,6 +227,25 @@ export class HttpSseTransport {
 
       const body = Buffer.concat(chunks).toString('utf-8');
 
+      // Verify Content-Type is application/json (contract step 2). A cross-site
+      // HTML form can only ever submit application/x-www-form-urlencoded,
+      // multipart/form-data, or text/plain — none of those satisfy this check,
+      // and application/json isn't CORS-safelisted, so a genuine cross-origin
+      // JSON request would trigger a preflight the browser enforces. Without
+      // this check, a "simple" form POST (no preflight at all) reaches the
+      // handler on any deployment that isn't already gated by another layer —
+      // most concretely, one bound to loopback with no auth token configured.
+      const contentType = req.headers['content-type'] || '';
+      if (!contentType.toLowerCase().startsWith('application/json')) {
+        clearTimeout(timeout);
+        this.sendJson(res, 400, {
+          jsonrpc: '2.0',
+          id: null,
+          error: { code: INVALID_REQUEST, message: `Invalid Request: Content-Type must be application/json (got '${contentType || 'none'}')` },
+        });
+        return;
+      }
+
       // Parse JSON
       let request: JsonRpcRequest;
       try {

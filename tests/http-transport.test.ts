@@ -251,6 +251,70 @@ describe('HttpSseTransport', () => {
       expect(body.error.code).toBe(-32700);
     });
 
+    /**
+     * Regresion: el contrato exige verificar Content-Type antes de parsear
+     * (paso 2 del flujo), pero handleRpc nunca lo chequeaba. Una pagina
+     * cross-origin puede mandar un POST "simple" (sin preflight CORS) con
+     * Content-Type text/plain o application/x-www-form-urlencoded — esos
+     * SI puede emitirlos un <form> HTML real, a diferencia de application/json.
+     */
+    it('T08b: retorna 400 si Content-Type no es application/json (CSRF via form POST)', async () => {
+      const { status, body } = await new Promise<{ status: number; body: any }>((resolve, reject) => {
+        const data = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' });
+        const req = httpRequest(
+          {
+            hostname: '127.0.0.1',
+            port: transport.port,
+            path: '/rpc',
+            method: 'POST',
+            headers: { 'Content-Type': 'text/plain', 'Content-Length': Buffer.byteLength(data) },
+          },
+          (res) => {
+            const chunks: Buffer[] = [];
+            res.on('data', (chunk) => chunks.push(chunk));
+            res.on('end', () => {
+              resolve({ status: res.statusCode!, body: JSON.parse(Buffer.concat(chunks).toString()) });
+            });
+          }
+        );
+        req.on('error', reject);
+        req.write(data);
+        req.end();
+      });
+
+      expect(status).toBe(400);
+      expect(body.error.code).toBe(-32600);
+      expect(body.error.message).toContain('Content-Type');
+    });
+
+    it('T08c: acepta application/json con charset (application/json; charset=utf-8)', async () => {
+      const { status, body } = await new Promise<{ status: number; body: any }>((resolve, reject) => {
+        const data = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' });
+        const req = httpRequest(
+          {
+            hostname: '127.0.0.1',
+            port: transport.port,
+            path: '/rpc',
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(data) },
+          },
+          (res) => {
+            const chunks: Buffer[] = [];
+            res.on('data', (chunk) => chunks.push(chunk));
+            res.on('end', () => {
+              resolve({ status: res.statusCode!, body: JSON.parse(Buffer.concat(chunks).toString()) });
+            });
+          }
+        );
+        req.on('error', reject);
+        req.write(data);
+        req.end();
+      });
+
+      expect(status).toBe(200);
+      expect(body.result).toEqual({ echo: 'ping' });
+    });
+
     it('T08: retorna 400 si falta jsonrpc o method', async () => {
       const { status, body } = await rpcRequest(transport.port, {
         id: 1,
