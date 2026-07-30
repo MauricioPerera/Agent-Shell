@@ -53,11 +53,11 @@ export class EncryptedStorageAdapter implements StorageAdapter {
     // Backward compat: unencrypted data passes through
     if (!('_encrypted' in (raw as object))) return raw;
 
-    return this.decrypt(raw as unknown as EncryptedPayload);
+    return this.decrypt(raw as unknown as EncryptedPayload, session_id);
   }
 
   async save(session_id: string, store: SessionStore): Promise<void> {
-    const encrypted = this.encrypt(store);
+    const encrypted = this.encrypt(store, session_id);
     await this.inner.save(session_id, encrypted as unknown as SessionStore);
   }
 
@@ -73,9 +73,16 @@ export class EncryptedStorageAdapter implements StorageAdapter {
     return this.inner.dispose();
   }
 
-  private encrypt(data: SessionStore): EncryptedPayload {
+  private encrypt(data: SessionStore, session_id: string): EncryptedPayload {
     const iv = randomBytes(12);
     const cipher = createCipheriv(this.algorithm, this.key, iv) as CipherGCM;
+    // Bind the ciphertext to the session it belongs to. GCM's auth tag alone
+    // only proves "this blob wasn't tampered with" — it says nothing about
+    // WHICH session it was encrypted for. Without AAD, a storage-layer bug
+    // or race that stored session A's blob under session B's id would still
+    // decrypt "successfully" (silently returning the wrong session's data)
+    // instead of failing the auth-tag check.
+    cipher.setAAD(Buffer.from(session_id, 'utf-8'));
     const plaintext = JSON.stringify(data);
     let encrypted = cipher.update(plaintext, 'utf8', 'base64');
     encrypted += cipher.final('base64');
@@ -88,10 +95,11 @@ export class EncryptedStorageAdapter implements StorageAdapter {
     };
   }
 
-  private decrypt(payload: EncryptedPayload): SessionStore {
+  private decrypt(payload: EncryptedPayload, session_id: string): SessionStore {
     const iv = Buffer.from(payload.iv, 'base64');
     const tag = Buffer.from(payload.tag, 'base64');
     const decipher = createDecipheriv(this.algorithm, this.key, iv) as DecipherGCM;
+    decipher.setAAD(Buffer.from(session_id, 'utf-8'));
     decipher.setAuthTag(tag);
     let decrypted = decipher.update(payload.data, 'base64', 'utf8');
     decrypted += decipher.final('utf8');

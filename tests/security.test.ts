@@ -426,6 +426,30 @@ describe('EncryptedStorageAdapter', () => {
 
     await expect(adapter.load('corrupt')).rejects.toThrow();
   });
+
+  /**
+   * Regresion: encrypt()/decrypt() no ligaban el ciphertext a session_id via
+   * AAD. Un blob guardado bajo "sess-a" y luego leido bajo "sess-b" (p.ej.
+   * por un bug de la capa de storage que mezcla filas entre sesiones)
+   * desencriptaba "con exito" en vez de fallar la verificacion del auth tag.
+   */
+  it('T45b: un blob leido bajo OTRO session_id falla el auth tag (AAD)', async () => {
+    const data: SessionStore = {
+      context: { entries: { x: { value: 'secret', version: 1, updatedAt: '' } } },
+      history: [],
+      undo_snapshots: [],
+    };
+
+    await adapter.save('sess-a', data);
+    const raw = mockStorage.store.get('sess-a');
+
+    // Simula el blob de sess-a terminando guardado bajo sess-b.
+    mockStorage.store.set('sess-b', raw);
+
+    await expect(adapter.load('sess-b')).rejects.toThrow();
+    // El session_id correcto sigue funcionando normalmente.
+    await expect(adapter.load('sess-a')).resolves.toEqual(data);
+  });
 });
 
 // =====================================================================
