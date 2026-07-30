@@ -133,6 +133,18 @@ describe('Scaffold Skills', () => {
     expect(file).toContain("'id'");
     expect(file).toContain("'int'");
   });
+
+  /**
+   * Regresion: ningun comando scaffold:* declaraba requiredPermissions,
+   * a diferencia del resto de los skills — cualquier agente sin ningun
+   * permiso concedido podia usarlos.
+   */
+  it('SC01: los 3 comandos scaffold:* exigen el permiso scaffold:write', () => {
+    for (const name of ['init', 'add-namespace', 'add-command']) {
+      const entry = scaffoldCommands.find(e => e.definition.name === name)!;
+      expect(entry.definition.requiredPermissions).toEqual(['scaffold:write']);
+    }
+  });
 });
 
 // ===========================================================================
@@ -241,6 +253,16 @@ describe('Wizard Skills', () => {
 
     expect(result.success).toBe(false);
     expect(result.error).toContain('Invalid command name');
+  });
+
+  /**
+   * Regresion: ningun comando wizard:* declaraba requiredPermissions.
+   */
+  it('WZ09: los 2 comandos wizard:* exigen el permiso wizard:write', () => {
+    for (const name of ['create-command', 'create-namespace']) {
+      const entry = wizardCommands.find(e => e.definition.name === name)!;
+      expect(entry.definition.requiredPermissions).toEqual(['wizard:write']);
+    }
   });
 });
 

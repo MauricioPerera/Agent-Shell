@@ -96,6 +96,9 @@ const createNamespaceDef = command('wizard', 'create-namespace')
   .tags('wizard', 'namespace', 'creation')
   .build();
 
+createCommandDef.requiredPermissions = ['wizard:write'];
+createNamespaceDef.requiredPermissions = ['wizard:write'];
+
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------

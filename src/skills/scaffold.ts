@@ -191,6 +191,10 @@ const addCommandDef = command('scaffold', 'add-command')
   .tags('scaffold', 'command', 'generator')
   .build();
 
+initDef.requiredPermissions = ['scaffold:write'];
+addNamespaceDef.requiredPermissions = ['scaffold:write'];
+addCommandDef.requiredPermissions = ['scaffold:write'];
+
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
