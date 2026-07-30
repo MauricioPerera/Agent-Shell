@@ -10,6 +10,7 @@
 import { parse } from '../parser/index.js';
 import { applyFilter } from '../jq-filter/index.js';
 import { matchPermissions } from '../security/permission-matcher.js';
+import { maskSecrets } from '../security/secret-patterns.js';
 import { resolveAgentPermissions } from './agent-profiles.js';
 import type { ParseResult, ParsedCommand, ParseError } from '../parser/index.js';
 import type { CoreResponse, CoreConfig, CoreRegistry, CoreVectorIndex, CoreContextStore, LogEntry } from './types.js';
@@ -261,11 +262,24 @@ class Core {
 
     // Builtin commands (namespace is null)
     if (namespace === null) {
+      // 'history' and 'context' expose everything unconditionally (unlike
+      // 'search'/'describe', which already filter their own results
+      // per-item by agentPermissions) — gate them the same way a
+      // registered command's requiredPermissions would, using the exact
+      // permission strings AGENT_PROFILES already lists for them.
+      if ((command === 'history' || command === 'context') && this.agentPermissions) {
+        if (!matchPermissions(this.agentPermissions, [command])) {
+          return { _error: { code: 3, error: `Permission denied: ${command}` } };
+        }
+      }
       return this.executeBuiltin(command, args);
     }
 
     // Context namespace special handling
     if (namespace === 'context') {
+      if (this.agentPermissions && !matchPermissions(this.agentPermissions, ['context'])) {
+        return { _error: { code: 3, error: `Permission denied: context:${command}` } };
+      }
       return this.executeContext(command, args);
     }
 
@@ -571,8 +585,18 @@ class Core {
   }
 
   private recordHistory(command: string, code: number): void {
+    // Stores the RAW command string an agent typed (e.g. `secret:set --name
+    // DB_PASSWORD --value hunter2`), which the 'history' builtin above now
+    // gates behind the 'history' permission — but that only stops OTHER
+    // agents/callers from reading it. maskSecrets() catches known secret
+    // shapes (Bearer tokens, JWTs, password=/token=/secret= pairs, AWS
+    // keys, ...) as defense-in-depth for whatever ends up persisting or
+    // exporting this array beyond the agent that typed it. It won't catch
+    // an arbitrary value under an unrecognized flag name (e.g. --value)
+    // that doesn't itself look like a known secret shape — that's a
+    // limitation shared with Executor's identical args masking.
     this.history.push({
-      command,
+      command: maskSecrets(command),
       code,
       timestamp: new Date().toISOString(),
     });

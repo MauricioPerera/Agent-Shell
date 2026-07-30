@@ -62,6 +62,13 @@ export function resolveAgentPermissions(config: PermissionConfig): string[] | nu
   }
 
   if (config.rbac && config.permissions) {
+    // An explicit empty array is the same deny-all signal handled below —
+    // RBAC.resolvePermissions() falls back to its configured defaultRole
+    // when given an empty roles list, which would silently upgrade an
+    // explicit "no permissions" into whatever defaultRole grants instead
+    // of denying, exactly the bug the !== undefined check below exists to
+    // prevent for the no-rbac case.
+    if (config.permissions.length === 0) return [];
     return config.rbac.resolvePermissions({
       roles: config.permissions,
       permissions: [],

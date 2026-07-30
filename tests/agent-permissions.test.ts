@@ -13,6 +13,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { Core } from '../src/core/index.js';
 import { resolveAgentPermissions, AGENT_PROFILES } from '../src/core/agent-profiles.js';
 import type { AgentProfile } from '../src/core/agent-profiles.js';
+import { RBAC } from '../src/security/rbac.js';
 
 // ---------------------------------------------------------------------------
 // Mock Registry
@@ -162,6 +163,33 @@ describe('Agent Profiles', () => {
     const perms = resolveAgentPermissions({ rbac: undefined });
     expect(perms).toBeNull();
   });
+
+  /**
+   * Regresion: la rama rbac+permissions tenia el MISMO bug que AP06 arriba
+   * (ya arreglado ahi), pero sin el fix — permissions:[] con rbac configurado
+   * pasaba roles:[] a RBAC.resolvePermissions(), que cae a su defaultRole en
+   * vez de deny-all. Un defaultRole permisivo convertia un "sin permisos"
+   * explicito en escalada de privilegios silenciosa.
+   */
+  it('AP08: permissions:[] con rbac configurado sigue siendo deny-all, no cae al defaultRole', () => {
+    const rbac = new RBAC({
+      roles: [{ name: 'default-user', permissions: ['*:read', '*:list'] }],
+      defaultRole: 'default-user',
+    });
+
+    const perms = resolveAgentPermissions({ rbac, permissions: [] });
+    expect(perms).toEqual([]);
+  });
+
+  it('AP09: permissions no vacio con rbac sigue resolviendo roles normalmente', () => {
+    const rbac = new RBAC({
+      roles: [{ name: 'editor', permissions: ['users:read', 'users:update'] }],
+      defaultRole: 'default-user',
+    });
+
+    const perms = resolveAgentPermissions({ rbac, permissions: ['editor'] });
+    expect(perms).toEqual(['users:read', 'users:update']);
+  });
 });
 
 // ===========================================================================
@@ -236,6 +264,66 @@ describe('Core Permission Enforcement', () => {
     // But not admin namespace
     const r4 = await core.exec('admin:reset');
     expect(r4.code).toBe(3);
+  });
+
+  /**
+   * Regresion: executeCommand() nunca chequeaba agentPermissions para los
+   * builtins 'history'/'context' (namespace===null) ni para context:*
+   * (namespace==='context') — a diferencia de 'search'/'describe', que ya
+   * filtran sus propios resultados por-item, 'history'/'context' devolvian
+   * todo sin ninguna verificacion, alcanzables incluso por un agente
+   * 'restricted' (permissions:[]). AGENT_PROFILES ya listaba 'history' y
+   * 'context' como strings de permiso propios, confirmando que el gateo
+   * era el diseño intencional, solo nunca se aplicaba.
+   */
+  it('PE08: el builtin history requiere el permiso "history" (restricted/reader lo tienen denegado)', async () => {
+    const restricted = new Core({ registry, vectorIndex, agentProfile: 'restricted' });
+    const denied = await restricted.exec('history');
+    expect(denied.code).toBe(3);
+
+    const reader = new Core({ registry, vectorIndex, agentProfile: 'reader' });
+    const readerDenied = await reader.exec('history');
+    expect(readerDenied.code).toBe(3); // reader profile no incluye 'history'
+
+    const operator = new Core({ registry, vectorIndex, agentProfile: 'operator' });
+    const allowed = await operator.exec('history');
+    expect(allowed.code).toBe(0);
+  });
+
+  it('PE09: el builtin context y context:set/get/delete requieren el permiso "context"', async () => {
+    const restricted = new Core({ registry, vectorIndex, agentProfile: 'restricted' });
+    const deniedView = await restricted.exec('context');
+    expect(deniedView.code).toBe(3);
+    const deniedSet = await restricted.exec('context:set foo bar');
+    expect(deniedSet.code).toBe(3);
+
+    // This suite's Core has no contextStore wired, so a reader (who DOES
+    // have 'context') still gets code 1 "Context store not available" —
+    // the point here is it's not a permission denial (code 3).
+    const reader = new Core({ registry, vectorIndex, agentProfile: 'reader' });
+    const allowed = await reader.exec('context:set foo bar');
+    expect(allowed.code).not.toBe(3);
+  });
+
+  it('PE10: sin agentPermissions configurado, history/context siguen sin restricciones (legado)', async () => {
+    const core = new Core({ registry, vectorIndex });
+    const res = await core.exec('history');
+    expect(res.code).toBe(0);
+  });
+
+  /**
+   * Regresion: this.history guardaba el comando crudo tal cual lo tipeo el
+   * agente — un secret:set --value <token real> quedaba en texto plano en
+   * el historial retornado por el builtin history.
+   */
+  it('PE11: el comando guardado en history enmascara secretos con forma reconocible', async () => {
+    const core = new Core({ registry, vectorIndex, agentProfile: 'operator' });
+    await core.exec('users:list --token "Bearer abc123def456ghi789jkl0123456789"');
+
+    const res = await core.exec('history');
+    expect(res.code).toBe(0);
+    const raw = JSON.stringify(res.data);
+    expect(raw).not.toContain('abc123def456ghi789jkl0123456789');
   });
 });
 
