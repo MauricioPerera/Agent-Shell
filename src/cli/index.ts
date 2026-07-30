@@ -101,12 +101,49 @@ export function warnIfUnrestricted(profile: AgentProfile | undefined): void {
   console.error('Use --profile <admin|operator|reader|restricted> or AGENT_SHELL_PROFILE to scope access.');
 }
 
+/**
+ * Validates the parsed config file against expected types, dropping (with a
+ * warning) any field that doesn't match instead of letting it propagate
+ * unchecked — e.g. a non-numeric `port` used to reach `parseInt()` and
+ * silently become NaN instead of failing with a clear message.
+ */
+export function validateConfigFile(raw: Record<string, any>, configPath: string): Record<string, any> {
+  const config: Record<string, any> = {};
+  const warn = (field: string, expected: string) =>
+    console.error(`Warning: ${configPath} field '${field}' should be ${expected}, ignoring it.`);
+
+  if (raw.port !== undefined) {
+    if (typeof raw.port === 'number' && Number.isInteger(raw.port)) config.port = raw.port;
+    else warn('port', 'an integer');
+  }
+  if (raw.host !== undefined) {
+    if (typeof raw.host === 'string') config.host = raw.host;
+    else warn('host', 'a string');
+  }
+  if (raw.corsOrigin !== undefined) {
+    if (typeof raw.corsOrigin === 'string' || (Array.isArray(raw.corsOrigin) && raw.corsOrigin.every((o: any) => typeof o === 'string'))) {
+      config.corsOrigin = raw.corsOrigin;
+    } else warn('corsOrigin', 'a string or array of strings');
+  }
+  if (raw.agentProfile !== undefined) {
+    if (typeof raw.agentProfile === 'string') config.agentProfile = raw.agentProfile;
+    else warn('agentProfile', 'a string');
+  }
+  if (raw.auth?.bearerToken !== undefined) {
+    if (typeof raw.auth.bearerToken === 'string') config.auth = { bearerToken: raw.auth.bearerToken };
+    else warn('auth.bearerToken', 'a string');
+  }
+  return config;
+}
+
 function loadConfigFile(): Record<string, any> {
   const configPath = resolve(process.cwd(), 'agent-shell.config.json');
   if (!existsSync(configPath)) return {};
   try {
-    return JSON.parse(readFileSync(configPath, 'utf-8'));
-  } catch {
+    const raw = JSON.parse(readFileSync(configPath, 'utf-8'));
+    return validateConfigFile(raw, configPath);
+  } catch (err) {
+    console.error(`Warning: Failed to parse ${configPath}:`, (err as Error).message);
     return {};
   }
 }
@@ -208,7 +245,14 @@ export function main(args: string[] = process.argv.slice(2)): void {
     const transport = parseFlag(args, '--transport') || 'stdio';
 
     if (transport === 'http') {
-      serveHttp(args);
+      // Not awaited (main() is sync), but must still be caught: an
+      // unhandled rejection here (bad port, EADDRINUSE, the fail-closed
+      // no-auth-on-non-loopback check) used to print a raw stack trace
+      // and crash instead of a clean exit(1).
+      serveHttp(args).catch((err) => {
+        console.error('Failed to start:', err.message);
+        process.exit(1);
+      });
       return;
     }
 

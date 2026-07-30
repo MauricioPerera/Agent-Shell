@@ -14,7 +14,7 @@
  */
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { validateProfile, warnIfUnrestricted } from '../src/cli/index.js';
+import { validateProfile, warnIfUnrestricted, validateConfigFile } from '../src/cli/index.js';
 
 describe('CLI profile validation', () => {
   afterEach(() => {
@@ -52,6 +52,54 @@ describe('CLI profile validation', () => {
   it('CLI05: warnIfUnrestricted no avisa cuando hay un profile', () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     warnIfUnrestricted('restricted' as any);
+    expect(errorSpy).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Regresion: agent-shell.config.json se usaba sin validar tipo/forma —
+ * un port no-numerico llegaba sin avisar a parseInt() y se volvia NaN
+ * silenciosamente en vez de fallar con un mensaje claro.
+ */
+describe('CLI config file validation', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('CLI06: acepta un config bien tipado tal cual', () => {
+    const raw = { port: 3000, host: '127.0.0.1', corsOrigin: '*', agentProfile: 'reader', auth: { bearerToken: 'secret' } };
+    expect(validateConfigFile(raw, 'x.json')).toEqual(raw);
+  });
+
+  it('CLI07: descarta port no-numerico con warning, no lo deja pasar como NaN', () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const result = validateConfigFile({ port: 'not-a-number' }, 'x.json');
+    expect(result.port).toBeUndefined();
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("field 'port' should be an integer"));
+  });
+
+  it('CLI08: descarta agentProfile no-string con warning', () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const result = validateConfigFile({ agentProfile: 123 }, 'x.json');
+    expect(result.agentProfile).toBeUndefined();
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("field 'agentProfile' should be a string"));
+  });
+
+  it('CLI09: acepta corsOrigin como array de strings', () => {
+    const result = validateConfigFile({ corsOrigin: ['https://a.com', 'https://b.com'] }, 'x.json');
+    expect(result.corsOrigin).toEqual(['https://a.com', 'https://b.com']);
+  });
+
+  it('CLI10: descarta corsOrigin con elementos no-string', () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const result = validateConfigFile({ corsOrigin: ['ok', 42] }, 'x.json');
+    expect(result.corsOrigin).toBeUndefined();
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("field 'corsOrigin'"));
+  });
+
+  it('CLI11: config vacio no genera warnings ni campos', () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    expect(validateConfigFile({}, 'x.json')).toEqual({});
     expect(errorSpy).not.toHaveBeenCalled();
   });
 });
