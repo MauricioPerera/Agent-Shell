@@ -5,16 +5,8 @@
  */
 
 import { command } from '../command-builder/index.js';
+import { isSensitiveEnvKey } from '../security/secret-patterns.js';
 import type { SkillEntry } from './scaffold.js';
-
-const SENSITIVE_PATTERNS = [
-  /password/i, /secret/i, /token/i, /key/i, /auth/i,
-  /credential/i, /private/i, /api_key/i, /apikey/i,
-];
-
-function isSensitiveKey(key: string): boolean {
-  return SENSITIVE_PATTERNS.some(p => p.test(key));
-}
 
 const getDef = command('env', 'get')
   .version('1.0.0')
@@ -44,7 +36,7 @@ export const envCommands: SkillEntry[] = [
       const exists = value !== undefined;
 
       // Mask sensitive values
-      const masked = exists && isSensitiveKey(name) ? '***MASKED***' : value;
+      const masked = exists && isSensitiveEnvKey(name) ? '***MASKED***' : value;
 
       return {
         success: true,
@@ -63,7 +55,7 @@ export const envCommands: SkillEntry[] = [
         if (value === undefined) continue;
 
         // Mask sensitive values
-        variables[key] = isSensitiveKey(key) ? '***MASKED***' : value;
+        variables[key] = isSensitiveEnvKey(key) ? '***MASKED***' : value;
       }
 
       return {

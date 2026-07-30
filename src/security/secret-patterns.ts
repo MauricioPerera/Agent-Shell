@@ -91,3 +91,29 @@ export function containsSecret(value: any, patterns?: SecretPattern[]): boolean 
   }
   return false;
 }
+
+/** Patrones de nombre de variable de entorno que se consideran sensibles. */
+export const SENSITIVE_ENV_KEY_PATTERNS: RegExp[] = [
+  /password/i, /secret/i, /token/i, /key/i, /auth/i,
+  /credential/i, /private/i, /api_key/i, /apikey/i,
+];
+
+/** True si el nombre de una env var matchea algun patron sensible. */
+export function isSensitiveEnvKey(key: string): boolean {
+  return SENSITIVE_ENV_KEY_PATTERNS.some(p => p.test(key));
+}
+
+/**
+ * Filtra un objeto de variables de entorno, quitando las que matchean un
+ * nombre sensible. Usado para no heredar credenciales del proceso host hacia
+ * un child process que un agente puede invocar (shell:exec).
+ */
+export function filterSensitiveEnv(env: NodeJS.ProcessEnv): Record<string, string> {
+  const filtered: Record<string, string> = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (value === undefined) continue;
+    if (isSensitiveEnvKey(key)) continue;
+    filtered[key] = value;
+  }
+  return filtered;
+}

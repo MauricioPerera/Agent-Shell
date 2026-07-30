@@ -311,6 +311,10 @@ describe('Workspace Sandbox Adapter Injection', () => {
       readFile: vi.fn().mockResolvedValue({ path: '', content: '', size: 0 }),
       writeFile: vi.fn().mockResolvedValue({ path: '', size: 0, written: true }),
       listDir: vi.fn().mockResolvedValue({ path: '', entries: [], count: 0 }),
+      mkdir: vi.fn().mockResolvedValue({ path: '', created: true }),
+      remove: vi.fn().mockResolvedValue({ path: '', deleted: true }),
+      rename: vi.fn().mockResolvedValue({ from: '', to: '', renamed: true }),
+      chmod: vi.fn().mockResolvedValue({ path: '', mode: 0 }),
     };
 
     const cmds = createWorkspaceCommands(state, fakeAdapter);
@@ -340,6 +344,10 @@ describe('Workspace Sandbox Adapter Injection', () => {
       readFile: vi.fn().mockResolvedValue({ path: '', content: '', size: 0 }),
       writeFile: vi.fn().mockResolvedValue({ path: '', size: 0, written: true }),
       listDir: vi.fn().mockResolvedValue({ path: '', entries: [], count: 0 }),
+      mkdir: vi.fn().mockResolvedValue({ path: '', created: true }),
+      remove: vi.fn().mockResolvedValue({ path: '', deleted: true }),
+      rename: vi.fn().mockResolvedValue({ from: '', to: '', renamed: true }),
+      chmod: vi.fn().mockResolvedValue({ path: '', mode: 0 }),
     };
 
     const cmds = createWorkspaceCommands(state, fakeAdapter);

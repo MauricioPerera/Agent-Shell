@@ -50,6 +50,18 @@ export interface ShellAdapter {
 
   /** List entries in a directory. */
   listDir(path: string, pattern?: string): Promise<{ path: string; entries: DirEntry[]; count: number }>;
+
+  /** Create a directory. */
+  mkdir(path: string, opts?: { recursive?: boolean }): Promise<{ path: string; created: boolean }>;
+
+  /** Delete a file or directory. */
+  remove(path: string, opts?: { recursive?: boolean }): Promise<{ path: string; deleted: boolean }>;
+
+  /** Rename or move a file/directory. */
+  rename(from: string, to: string): Promise<{ from: string; to: string; renamed: boolean }>;
+
+  /** Change file permissions (POSIX numeric mode, e.g. 0o755). */
+  chmod(path: string, mode: number): Promise<{ path: string; mode: number }>;
 }
 
 /** Configuration for the shell adapter factory. */
