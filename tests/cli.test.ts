@@ -78,10 +78,21 @@ describe('CLI config file validation', () => {
     expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("field 'port' should be an integer"));
   });
 
-  it('CLI08: descarta agentProfile no-string con warning', () => {
+  /**
+   * Regresion: un agentProfile mal tipado (ej. un array o un numero) se
+   * descartaba con solo un warning, y config.agentProfile quedaba undefined
+   * — que loadConfig()/serveStdio() interpretan como "sin perfil = acceso
+   * SIN RESTRICCIONES". Un campo de control de acceso mal tipado debe
+   * fallar cerrado (exit 1), no caer al default mas permisivo.
+   */
+  it('CLI08: agentProfile no-string aborta el proceso (exit 1), no cae a undefined', () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    const result = validateConfigFile({ agentProfile: 123 }, 'x.json');
-    expect(result.agentProfile).toBeUndefined();
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+      throw new Error(`__process_exit_${code}__`);
+    }) as any);
+
+    expect(() => validateConfigFile({ agentProfile: 123 }, 'x.json')).toThrow('__process_exit_1__');
+    expect(exitSpy).toHaveBeenCalledWith(1);
     expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("field 'agentProfile' should be a string"));
   });
 

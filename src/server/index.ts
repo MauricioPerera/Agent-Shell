@@ -20,7 +20,7 @@ import { McpServer } from '../mcp/server.js';
 import { HttpSseTransport } from '../mcp/http-transport.js';
 import { registerSkills, registerShellSkills } from '../skills/index.js';
 import { createShellAdapter } from '../just-bash/factory.js';
-import { AGENT_PROFILES } from '../core/agent-profiles.js';
+import { AGENT_PROFILES, resolveAgentPermissions } from '../core/agent-profiles.js';
 import type { AgentProfile } from '../core/agent-profiles.js';
 import { readFileSync, existsSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -35,7 +35,7 @@ interface ServerConfig {
   auth: { bearerToken: string } | null;
   agentProfile: AgentProfile | null;
   permissions: string[] | null;
-  corsOrigin: string | string[];
+  corsOrigin: string | string[] | undefined;
   skills: { cli: boolean; shell: boolean };
   shellAdapter: 'native' | 'just-bash' | 'auto';
 }
@@ -53,7 +53,20 @@ interface ServerConfig {
  * later as Node's cryptic "options.port should be >= 0 and < 65536" error
  * from server.listen() instead of a message pointing at the actual cause.
  */
-function validatePort(raw: string): number {
+/**
+ * Masks a bearer token for the startup log, revealing only a short suffix
+ * scaled to the token's length instead of a fixed first-4/last-4 window —
+ * for a short/medium token (e.g. a hand-typed 9-12 char value) first-4+last-4
+ * reveals most or all of it, leaving little to brute-force. Never reveals a
+ * prefix, matching common key-preview conventions (Stripe/AWS-style).
+ */
+export function maskToken(token: string): string {
+  if (token.length <= 8) return '***';
+  const visibleChars = Math.min(4, Math.floor(token.length / 4));
+  return `${'*'.repeat(token.length - visibleChars)}${token.slice(-visibleChars)}`;
+}
+
+export function validatePort(raw: string): number {
   const port = parseInt(raw, 10);
   if (!Number.isInteger(port) || String(port) !== raw.trim() || port < 0 || port > 65535) {
     throw new Error(`Invalid port: '${raw}'. Must be an integer between 0 and 65535.`);
@@ -61,7 +74,7 @@ function validatePort(raw: string): number {
   return port;
 }
 
-function validateConfigFile(raw: Record<string, any>, configPath: string): Record<string, any> {
+export function validateConfigFile(raw: Record<string, any>, configPath: string): Record<string, any> {
   const config: Record<string, any> = {};
   const warn = (field: string, expected: string) =>
     console.error(`Warning: ${configPath} field '${field}' should be ${expected}, ignoring it.`);
@@ -78,13 +91,18 @@ function validateConfigFile(raw: Record<string, any>, configPath: string): Recor
     if (typeof raw.auth.bearerToken === 'string') config.auth = { bearerToken: raw.auth.bearerToken };
     else warn('auth.bearerToken', 'a string');
   }
+  // agentProfile/permissions scope what the agent can do: dropping a
+  // wrong-typed value here (like the warn-and-ignore fields above) would
+  // silently fall through to loadConfig()'s "no profile = unrestricted"
+  // default — the opposite of what a bad config author intended. Fail
+  // closed instead.
   if (raw.agentProfile !== undefined) {
     if (typeof raw.agentProfile === 'string') config.agentProfile = raw.agentProfile;
-    else warn('agentProfile', 'a string');
+    else throw new Error(`${configPath} field 'agentProfile' should be a string, refusing to start with an ambiguous access-control config.`);
   }
   if (raw.permissions !== undefined) {
     if (Array.isArray(raw.permissions) && raw.permissions.every((p: any) => typeof p === 'string')) config.permissions = raw.permissions;
-    else warn('permissions', 'an array of strings');
+    else throw new Error(`${configPath} field 'permissions' should be an array of strings, refusing to start with an ambiguous access-control config.`);
   }
   if (raw.corsOrigin !== undefined) {
     if (typeof raw.corsOrigin === 'string' || (Array.isArray(raw.corsOrigin) && raw.corsOrigin.every((o: any) => typeof o === 'string'))) {
@@ -110,7 +128,13 @@ function loadConfig(): ServerConfig {
     auth: null,
     agentProfile: null,
     permissions: null,
-    corsOrigin: '*',
+    // No cross-origin access by default. A wildcard here would let ANY
+    // website the operator's browser visits call this server directly
+    // (browsers happily send a real request once a '*' preflight succeeds),
+    // which is exactly the loopback-with-no-auth deployment the fail-closed
+    // auth check above intentionally still allows. Cross-origin browser
+    // clients must opt in explicitly via corsOrigin / AGENT_SHELL_CORS_ORIGIN.
+    corsOrigin: undefined,
     skills: { cli: true, shell: true },
     shellAdapter: 'auto',
   };
@@ -118,8 +142,18 @@ function loadConfig(): ServerConfig {
   // Try config file
   const configPath = resolve(process.cwd(), 'agent-shell.config.json');
   if (existsSync(configPath)) {
+    let raw: Record<string, any>;
     try {
-      const fileConfig = validateConfigFile(JSON.parse(readFileSync(configPath, 'utf-8')), configPath);
+      raw = JSON.parse(readFileSync(configPath, 'utf-8'));
+    } catch (err) {
+      console.error(`Warning: Failed to parse ${configPath}:`, (err as Error).message);
+      raw = null as any;
+    }
+    if (raw) {
+      // Not wrapped in the try/catch above: a malformed agentProfile/permissions
+      // value is a security-relevant config error and must abort startup, not
+      // be swallowed into the same warn-and-continue path as a JSON syntax typo.
+      const fileConfig = validateConfigFile(raw, configPath);
       if (fileConfig.port) config.port = fileConfig.port;
       if (fileConfig.host) config.host = fileConfig.host;
       if (fileConfig.auth?.bearerToken) config.auth = { bearerToken: fileConfig.auth.bearerToken };
@@ -128,8 +162,6 @@ function loadConfig(): ServerConfig {
       if (fileConfig.corsOrigin) config.corsOrigin = fileConfig.corsOrigin;
       if (fileConfig.skills) config.skills = { ...config.skills, ...fileConfig.skills };
       if (fileConfig.shellAdapter) config.shellAdapter = fileConfig.shellAdapter;
-    } catch (err) {
-      console.error(`Warning: Failed to parse ${configPath}:`, (err as Error).message);
     }
   }
 
@@ -181,9 +213,18 @@ async function main() {
   // Registry
   const registry = new CommandRegistry();
 
+  // Resolved ahead of Core (which computes the same thing internally from
+  // the same two fields) so registry:list/describe/export can filter what
+  // they reveal by the caller's own permissions, not just gate on
+  // registry:read for the whole command — see registryAdminCommands.
+  const agentPermissions = resolveAgentPermissions({
+    agentProfile: config.agentProfile ?? undefined,
+    permissions: config.permissions ?? undefined,
+  });
+
   // Skills
   if (config.skills.cli) {
-    registerSkills(registry);
+    registerSkills(registry, agentPermissions);
     console.log('  CLI skills: 9 commands registered');
   }
   if (config.skills.shell) {
@@ -231,9 +272,7 @@ async function main() {
     // a bearer token shouldn't land in plaintext. The operator already has
     // the real value (they set it via AGENT_SHELL_TOKEN or the config file);
     // substitute it back into the snippet below manually.
-    const maskedToken = config.auth.bearerToken.length > 8
-      ? `${config.auth.bearerToken.slice(0, 4)}...${config.auth.bearerToken.slice(-4)}`
-      : '***';
+    const maskedToken = maskToken(config.auth.bearerToken);
     console.log(`\nClaude Desktop config (replace <TOKEN> with the value you configured):`);
     console.log(JSON.stringify({
       mcpServers: {

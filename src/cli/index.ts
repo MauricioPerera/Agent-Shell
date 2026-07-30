@@ -15,7 +15,7 @@ import { Core } from '../core/index.js';
 import { CommandRegistry } from '../command-registry/index.js';
 import { registerSkills, registerShellSkills } from '../skills/index.js';
 import { createShellAdapter } from '../just-bash/factory.js';
-import { AGENT_PROFILES } from '../core/agent-profiles.js';
+import { AGENT_PROFILES, resolveAgentPermissions } from '../core/agent-profiles.js';
 import type { AgentProfile } from '../core/agent-profiles.js';
 import { readFileSync, existsSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -125,9 +125,16 @@ export function validateConfigFile(raw: Record<string, any>, configPath: string)
       config.corsOrigin = raw.corsOrigin;
     } else warn('corsOrigin', 'a string or array of strings');
   }
+  // agentProfile scopes what the agent can do: warn-and-drop (like the
+  // fields above) would silently fall through to "no profile configured" =
+  // unrestricted access — the opposite of what a bad config author
+  // intended. Fail closed instead, matching validateProfile/validatePort.
   if (raw.agentProfile !== undefined) {
     if (typeof raw.agentProfile === 'string') config.agentProfile = raw.agentProfile;
-    else warn('agentProfile', 'a string');
+    else {
+      console.error(`${configPath} field 'agentProfile' should be a string, refusing to start with an ambiguous access-control config.`);
+      process.exit(1);
+    }
   }
   if (raw.auth?.bearerToken !== undefined) {
     if (typeof raw.auth.bearerToken === 'string') config.auth = { bearerToken: raw.auth.bearerToken };
@@ -163,11 +170,11 @@ function loadConfigFile(): Record<string, any> {
   }
 }
 
-function buildRegistry(args: string[]): CommandRegistry {
+function buildRegistry(args: string[], agentPermissions?: string[] | null): CommandRegistry {
   const registry = new CommandRegistry();
 
   if (!hasFlag(args, '--no-cli-skills')) {
-    registerSkills(registry);
+    registerSkills(registry, agentPermissions);
   }
 
   if (!hasFlag(args, '--no-shell-skills')) {
@@ -183,7 +190,11 @@ function serveStdio(args: string[]): void {
   const profile = validateProfile(parseFlag(args, '--profile') || process.env.AGENT_SHELL_PROFILE || fileConfig.agentProfile);
   warnIfUnrestricted(profile);
 
-  const registry = buildRegistry(args);
+  // Resolved ahead of Core (which computes the same thing internally) so
+  // registry:list/describe/export can filter what they reveal by the
+  // caller's own permissions — see registryAdminCommands.
+  const agentPermissions = resolveAgentPermissions({ agentProfile: profile });
+  const registry = buildRegistry(args, agentPermissions);
   const coreConfig: any = { registry };
   if (profile) coreConfig.agentProfile = profile;
 
@@ -203,9 +214,14 @@ async function serveHttp(args: string[]): Promise<void> {
   const host = parseFlag(args, '--host') || process.env.AGENT_SHELL_HOST || fileConfig.host || '0.0.0.0';
   const token = parseFlag(args, '--token') || process.env.AGENT_SHELL_TOKEN || fileConfig.auth?.bearerToken;
   const profile = validateProfile(parseFlag(args, '--profile') || process.env.AGENT_SHELL_PROFILE || fileConfig.agentProfile);
-  const corsOrigin = parseFlag(args, '--cors-origin') || process.env.AGENT_SHELL_CORS_ORIGIN || fileConfig.corsOrigin || '*';
+  // No cross-origin default: a wildcard would let any website the operator's
+  // browser visits reach this server directly once its CORS preflight
+  // succeeds, defeating the Content-Type CSRF check on the common
+  // loopback-with-no-auth deployment. Opt in explicitly via --cors-origin.
+  const corsOrigin = parseFlag(args, '--cors-origin') || process.env.AGENT_SHELL_CORS_ORIGIN || fileConfig.corsOrigin;
 
-  const registry = buildRegistry(args);
+  const agentPermissions = resolveAgentPermissions({ agentProfile: profile });
+  const registry = buildRegistry(args, agentPermissions);
   const totalCommands = registry.listAll().length;
 
   const coreConfig: any = { registry };
