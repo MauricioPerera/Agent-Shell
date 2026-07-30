@@ -70,7 +70,7 @@ The LLM agent interacts with the system using exactly 2 tools:
   cmd1 >> cmd2                     Pipeline: output of cmd1 as input of cmd2
 
 == Batch ==
-  batch [cmd1, cmd2, cmd3]         Execute multiple commands in parallel
+  batch [cmd1, cmd2, cmd3]         Execute multiple commands sequentially
 
 == State ==
   context                          View current context
@@ -480,21 +480,21 @@ class Core {
       return [{ code: 1, data: null, error: `Batch exceeds maximum size of ${maxBatchSize} commands` }];
     }
 
-    // Execute all commands in parallel
-    const settled = await Promise.allSettled(
-      commands.map(cmd => this.executeCommand(cmd))
-    );
-
-    return settled.map((outcome) => {
-      if (outcome.status === 'rejected') {
-        return { code: 1, data: null, error: (outcome.reason as Error)?.message || 'Unknown error' };
+    // Execute commands sequentially, in order (index 0, 1, 2...) — per contract v1
+    const results: any[] = [];
+    for (const cmd of commands) {
+      try {
+        const data = await this.executeCommand(cmd);
+        if (data && typeof data === 'object' && '_error' in data) {
+          results.push({ code: data._error.code, data: null, error: data._error.error });
+        } else {
+          results.push({ code: 0, data, error: null });
+        }
+      } catch (err) {
+        results.push({ code: 1, data: null, error: (err as Error)?.message || 'Unknown error' });
       }
-      const data = outcome.value;
-      if (data && typeof data === 'object' && '_error' in data) {
-        return { code: data._error.code, data: null, error: data._error.error };
-      }
-      return { code: 0, data, error: null };
-    });
+    }
+    return results;
   }
 
   private applyJqFilter(data: any, expression: string): any {

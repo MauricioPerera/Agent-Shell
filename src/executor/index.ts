@@ -342,17 +342,15 @@ export class Executor {
       };
     }
 
-    // Execute all commands in parallel
-    const settled = await Promise.allSettled(
-      commands.map((cmd: any) => this.executeSingle(cmd))
-    );
-
-    const results: ExecutionResult[] = settled.map((outcome) => {
-      if (outcome.status === 'fulfilled') {
-        return outcome.value;
+    // Execute commands sequentially, in order (index 0, 1, 2...) — per contract v1
+    const results: ExecutionResult[] = [];
+    for (const cmd of commands) {
+      try {
+        results.push(await this.executeSingle(cmd));
+      } catch (err) {
+        results.push(this.errorResult(1, 'E_HANDLER_ERROR', (err as Error)?.message || 'Unknown error', 'normal', ''));
       }
-      return this.errorResult(1, 'E_HANDLER_ERROR', (outcome.reason as Error)?.message || 'Unknown error', 'normal', '');
-    });
+    }
 
     const succeeded = results.filter(r => r.code === 0).length;
     const failed = results.length - succeeded;
@@ -542,10 +540,18 @@ export class Executor {
   private async executeWithTimeout(handler: Function, args: any, input?: any): Promise<any> {
     const timeout = this.context.config.timeout_ms;
 
+    // Handlers that accept a 3rd (signal) arg can cooperatively stop work once
+    // the timeout fires; handlers that ignore it behave exactly as before.
+    // This does not force-kill non-cooperative handlers (JS has no such primitive),
+    // but it gives the executor a real cancellation channel instead of none at all.
+    const controller = new AbortController();
     let timerId: ReturnType<typeof setTimeout>;
-    const handlerPromise = handler(args, input);
+    const handlerPromise = Promise.resolve(handler(args, input, { signal: controller.signal }));
     const timeoutPromise = new Promise((_, reject) => {
-      timerId = setTimeout(() => reject(new Error('E_TIMEOUT')), timeout);
+      timerId = setTimeout(() => {
+        controller.abort();
+        reject(new Error('E_TIMEOUT'));
+      }, timeout);
     });
 
     return Promise.race([handlerPromise, timeoutPromise]).finally(() => {
