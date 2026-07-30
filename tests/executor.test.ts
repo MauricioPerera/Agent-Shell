@@ -907,6 +907,35 @@ describe('Executor', () => {
 
       expect(context.history.entries).toHaveLength(0);
     });
+
+    /**
+     * Regresion: recordHistory() enmascaraba `args` via maskSecrets() pero
+     * guardaba `result` sin tocar — el valor plano de un secret:get quedaba
+     * en el historial en texto plano pese a que secret-store.ts documenta
+     * "Values are ... never appear in logs or history".
+     */
+    it('enmascara valores tipo-secreto en el `result` guardado, no solo en `args`', async () => {
+      registry = createMockRegistry({
+        'secret:get': {
+          definition: {
+            namespace: 'secret', command: 'get',
+            args: [{ name: 'name', type: 'string', required: true }],
+            description: 'Obtiene un secreto', effect: 'Lee un secreto',
+            reversible: false, requiredPermissions: [],
+          },
+          handler: async (args: any) => ({ name: args.name, value: `password=hunter2Secret!` }),
+        },
+      });
+      executor = new Executor(registry, context);
+
+      const parsed = createSingleParseResult('secret', 'get', { name: 'DB_PASSWORD' });
+      const result = await executor.execute(parsed);
+
+      expect(result.code).toBe(0);
+      expect(context.history.entries).toHaveLength(1);
+      const stored = JSON.stringify(context.history.entries[0].result);
+      expect(stored).not.toContain('hunter2Secret');
+    });
   });
 
   // ----------------------------------------------------------

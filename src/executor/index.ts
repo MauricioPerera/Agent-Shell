@@ -586,7 +586,7 @@ export class Executor {
       id,
       command,
       args: maskSecrets(args),
-      result,
+      result: maskSecrets(result),
       reversible,
       executedAt: new Date().toISOString(),
     });
