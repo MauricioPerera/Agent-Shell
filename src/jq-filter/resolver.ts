@@ -8,6 +8,7 @@
  */
 
 import type { PathSegment, ParsedExpression, FilterResult, FilterSuccess, FilterError } from './types.js';
+import { MAX_ITERATION_ELEMENTS } from './types.js';
 
 /**
  * Resuelve una expresion parseada sobre datos JSON.
@@ -120,6 +121,10 @@ function resolvePath(data: any, segments: PathSegment[], originalExpression: str
         return { success: true, result: [], expression: originalExpression, input_type: getInputType(data) };
       }
 
+      if (current.length > MAX_ITERATION_ELEMENTS) {
+        return iterationLimitError(originalExpression, resolvedPath, current.length);
+      }
+
       // Apply remaining segments to each element
       const remainingSegments = segments.slice(i + 1);
       if (remainingSegments.length === 0) {
@@ -169,6 +174,18 @@ function pathNotFoundError(
       path_resolved: pathResolved || '.',
       path_failed: pathFailed,
       available_keys: availableKeys,
+    },
+  };
+}
+
+function iterationLimitError(expression: string, pathResolved: string, count: number): FilterError {
+  return {
+    success: false,
+    error: {
+      code: 'E005',
+      message: `Iteration exceeds maximum of ${MAX_ITERATION_ELEMENTS} elements (got ${count}) at path '${pathResolved || '.'}'.`,
+      expression,
+      path_resolved: pathResolved || '.',
     },
   };
 }

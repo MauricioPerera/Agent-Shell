@@ -65,8 +65,8 @@ function parseMultiSelect(expr: string): ParsedExpression | FilterError {
     return expressionError('E001', expr, 'Empty multi-select expression');
   }
 
-  // Split by comma (simple split - no nested brackets in our subset)
-  const parts = inner.split(',').map(p => p.trim());
+  // Split by top-level comma, respecting nested brackets (e.g. `.a, [.b, .c]`)
+  const parts = splitTopLevel(inner).map(p => p.trim());
 
   if (parts.length > MAX_MULTI_SELECT_FIELDS) {
     return expressionError('E001', expr, `Multi-select exceeds maximum of ${MAX_MULTI_SELECT_FIELDS} fields`);
@@ -151,6 +151,26 @@ function parsePath(expr: string): ParsedExpression | FilterError {
   }
 
   return { type: 'path', segments, subExpressions: [] };
+}
+
+/** Divide por comas de nivel superior, sin partir dentro de corchetes anidados. */
+function splitTopLevel(inner: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let start = 0;
+
+  for (let i = 0; i < inner.length; i++) {
+    const ch = inner[i];
+    if (ch === '[') depth++;
+    else if (ch === ']') depth--;
+    else if (ch === ',' && depth === 0) {
+      parts.push(inner.substring(start, i));
+      start = i + 1;
+    }
+  }
+  parts.push(inner.substring(start));
+
+  return parts;
 }
 
 function expressionError(code: string, expression: string, detail: string): FilterError {

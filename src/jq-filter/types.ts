@@ -70,3 +70,6 @@ export const MAX_MULTI_SELECT_FIELDS = 20;
 
 /** Tamano maximo de input JSON en bytes (10MB). */
 export const MAX_INPUT_SIZE_BYTES = 10 * 1024 * 1024;
+
+/** Elementos maximos que una iteracion (`.[]`) puede procesar, para prevenir respuestas excesivamente grandes. */
+export const MAX_ITERATION_ELEMENTS = 10000;
