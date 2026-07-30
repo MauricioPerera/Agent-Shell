@@ -25,6 +25,7 @@ import type { PgClient, PgVectorConfig } from './pgvector-types.js';
 export class PgVectorStorageAdapter implements VectorStorageAdapter {
   private readonly client: PgClient;
   private readonly tableName: string;
+  private readonly tableIdent: string;
   private readonly dimensions: number;
   private readonly distanceType: 'cosine' | 'l2' | 'inner_product';
   private readonly autoMigrate: boolean;
@@ -35,6 +36,11 @@ export class PgVectorStorageAdapter implements VectorStorageAdapter {
   constructor(config: PgVectorConfig) {
     this.client = config.client;
     this.tableName = config.tableName ?? 'vector_entries';
+    if (!/^[a-zA-Z_][a-zA-Z0-9_]{0,62}$/.test(this.tableName)) {
+      throw new Error(
+        `Invalid tableName '${this.tableName}': must match ^[a-zA-Z_][a-zA-Z0-9_]{0,62}$ to be safely used as a SQL identifier`
+      );
+    }
     this.dimensions = config.dimensions;
     this.distanceType = config.distanceType ?? 'cosine';
     this.autoMigrate = config.autoMigrate ?? true;
@@ -43,6 +49,8 @@ export class PgVectorStorageAdapter implements VectorStorageAdapter {
       m: config.hnswOptions?.m ?? 16,
       efConstruction: config.hnswOptions?.efConstruction ?? 64,
     };
+    // Validated above against a strict identifier regex; double-quoted for reserved-word safety.
+    this.tableIdent = `"${this.tableName}"`;
   }
 
   /** Inicializa el adapter: crea extension, tabla e indices si autoMigrate=true. */
@@ -55,7 +63,7 @@ export class PgVectorStorageAdapter implements VectorStorageAdapter {
     await this.client.query('CREATE EXTENSION IF NOT EXISTS vector');
 
     await this.client.query(`
-      CREATE TABLE IF NOT EXISTS ${this.tableName} (
+      CREATE TABLE IF NOT EXISTS ${this.tableIdent} (
         id TEXT PRIMARY KEY,
         embedding vector(${this.dimensions}),
         metadata JSONB NOT NULL DEFAULT '{}',
@@ -68,7 +76,7 @@ export class PgVectorStorageAdapter implements VectorStorageAdapter {
       const opClass = this.getOpClass();
       await this.client.query(`
         CREATE INDEX IF NOT EXISTS idx_${this.tableName}_embedding
-        ON ${this.tableName}
+        ON ${this.tableIdent}
         USING hnsw (embedding ${opClass})
         WITH (m = ${this.hnswOptions.m}, ef_construction = ${this.hnswOptions.efConstruction})
       `);
@@ -82,7 +90,7 @@ export class PgVectorStorageAdapter implements VectorStorageAdapter {
     const vectorStr = this.vectorToString(entry.vector);
 
     await this.client.query(
-      `INSERT INTO ${this.tableName} (id, embedding, metadata, updated_at)
+      `INSERT INTO ${this.tableIdent} (id, embedding, metadata, updated_at)
        VALUES ($1, $2, $3, NOW())
        ON CONFLICT (id) DO UPDATE SET
          embedding = EXCLUDED.embedding,
@@ -112,7 +120,7 @@ export class PgVectorStorageAdapter implements VectorStorageAdapter {
   async delete(id: string): Promise<void> {
     this.ensureInitialized();
     await this.client.query(
-      `DELETE FROM ${this.tableName} WHERE id = $1`,
+      `DELETE FROM ${this.tableIdent} WHERE id = $1`,
       [id]
     );
   }
@@ -122,7 +130,7 @@ export class PgVectorStorageAdapter implements VectorStorageAdapter {
     if (ids.length === 0) return { success: 0, failed: 0 };
 
     const result = await this.client.query(
-      `DELETE FROM ${this.tableName} WHERE id = ANY($1)`,
+      `DELETE FROM ${this.tableIdent} WHERE id = ANY($1)`,
       [ids]
     );
 
@@ -138,7 +146,7 @@ export class PgVectorStorageAdapter implements VectorStorageAdapter {
 
     let sql = `
       SELECT id, metadata, ${similarityExpr} AS score
-      FROM ${this.tableName}
+      FROM ${this.tableIdent}
     `;
 
     const values: any[] = [vectorStr];
@@ -190,7 +198,7 @@ export class PgVectorStorageAdapter implements VectorStorageAdapter {
   async listIds(): Promise<string[]> {
     this.ensureInitialized();
     const result = await this.client.query(
-      `SELECT id FROM ${this.tableName} ORDER BY id`
+      `SELECT id FROM ${this.tableIdent} ORDER BY id`
     );
     return result.rows.map(r => r.id);
   }
@@ -198,14 +206,14 @@ export class PgVectorStorageAdapter implements VectorStorageAdapter {
   async count(): Promise<number> {
     this.ensureInitialized();
     const result = await this.client.query(
-      `SELECT COUNT(*) AS cnt FROM ${this.tableName}`
+      `SELECT COUNT(*) AS cnt FROM ${this.tableIdent}`
     );
     return parseInt(result.rows[0].cnt);
   }
 
   async clear(): Promise<void> {
     this.ensureInitialized();
-    await this.client.query(`TRUNCATE ${this.tableName}`);
+    await this.client.query(`TRUNCATE ${this.tableIdent}`);
   }
 
   async healthCheck(): Promise<HealthStatus> {
