@@ -40,6 +40,54 @@ interface ServerConfig {
   shellAdapter: 'native' | 'just-bash' | 'auto';
 }
 
+/**
+ * Validates the parsed config file against expected types, dropping (with a
+ * warning) any field that doesn't match instead of letting it propagate
+ * unchecked — e.g. a non-numeric `port` used to reach parseInt() territory
+ * indirectly via HttpSseTransport and fail with a confusing internal error
+ * instead of a clear one here.
+ */
+function validateConfigFile(raw: Record<string, any>, configPath: string): Record<string, any> {
+  const config: Record<string, any> = {};
+  const warn = (field: string, expected: string) =>
+    console.error(`Warning: ${configPath} field '${field}' should be ${expected}, ignoring it.`);
+
+  if (raw.port !== undefined) {
+    if (typeof raw.port === 'number' && Number.isInteger(raw.port)) config.port = raw.port;
+    else warn('port', 'an integer');
+  }
+  if (raw.host !== undefined) {
+    if (typeof raw.host === 'string') config.host = raw.host;
+    else warn('host', 'a string');
+  }
+  if (raw.auth?.bearerToken !== undefined) {
+    if (typeof raw.auth.bearerToken === 'string') config.auth = { bearerToken: raw.auth.bearerToken };
+    else warn('auth.bearerToken', 'a string');
+  }
+  if (raw.agentProfile !== undefined) {
+    if (typeof raw.agentProfile === 'string') config.agentProfile = raw.agentProfile;
+    else warn('agentProfile', 'a string');
+  }
+  if (raw.permissions !== undefined) {
+    if (Array.isArray(raw.permissions) && raw.permissions.every((p: any) => typeof p === 'string')) config.permissions = raw.permissions;
+    else warn('permissions', 'an array of strings');
+  }
+  if (raw.corsOrigin !== undefined) {
+    if (typeof raw.corsOrigin === 'string' || (Array.isArray(raw.corsOrigin) && raw.corsOrigin.every((o: any) => typeof o === 'string'))) {
+      config.corsOrigin = raw.corsOrigin;
+    } else warn('corsOrigin', 'a string or array of strings');
+  }
+  if (raw.skills !== undefined) {
+    if (typeof raw.skills === 'object' && raw.skills !== null) config.skills = raw.skills;
+    else warn('skills', 'an object');
+  }
+  if (raw.shellAdapter !== undefined) {
+    if (typeof raw.shellAdapter === 'string') config.shellAdapter = raw.shellAdapter;
+    else warn('shellAdapter', 'a string');
+  }
+  return config;
+}
+
 function loadConfig(): ServerConfig {
   // Defaults
   const config: ServerConfig = {
@@ -57,7 +105,7 @@ function loadConfig(): ServerConfig {
   const configPath = resolve(process.cwd(), 'agent-shell.config.json');
   if (existsSync(configPath)) {
     try {
-      const fileConfig = JSON.parse(readFileSync(configPath, 'utf-8'));
+      const fileConfig = validateConfigFile(JSON.parse(readFileSync(configPath, 'utf-8')), configPath);
       if (fileConfig.port) config.port = fileConfig.port;
       if (fileConfig.host) config.host = fileConfig.host;
       if (fileConfig.auth?.bearerToken) config.auth = { bearerToken: fileConfig.auth.bearerToken };
@@ -163,15 +211,25 @@ async function main() {
   console.log(`  Health check: GET  http://${config.host}:${config.port}/health`);
 
   if (config.auth) {
-    console.log(`\nClaude Desktop config:`);
+    // The real token is deliberately NOT printed here: this block goes to
+    // stdout, which on a typical deployment ends up in a systemd journal,
+    // docker logs, a process manager's log file, or CI output — all places
+    // a bearer token shouldn't land in plaintext. The operator already has
+    // the real value (they set it via AGENT_SHELL_TOKEN or the config file);
+    // substitute it back into the snippet below manually.
+    const maskedToken = config.auth.bearerToken.length > 8
+      ? `${config.auth.bearerToken.slice(0, 4)}...${config.auth.bearerToken.slice(-4)}`
+      : '***';
+    console.log(`\nClaude Desktop config (replace <TOKEN> with the value you configured):`);
     console.log(JSON.stringify({
       mcpServers: {
         'agent-shell': {
           url: `http://${config.host === '0.0.0.0' ? 'YOUR-VPS-IP' : config.host}:${config.port}/sse`,
-          headers: { Authorization: `Bearer ${config.auth.bearerToken}` },
+          headers: { Authorization: `Bearer <TOKEN>` },
         },
       },
     }, null, 2));
+    console.log(`(configured token: ${maskedToken})`);
   }
 
   // Graceful shutdown
