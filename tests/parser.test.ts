@@ -271,6 +271,28 @@ describe('Parser', () => {
       expect(result.commands[0].jqFilter).not.toBeNull();
       expect(result.commands[0].jqFilter!.fields).toEqual(['name']);
     });
+
+    /**
+     * Regresion: un multi-select sin cerrar ("[." sin "]") no matcheaba ni
+     * la rama de multi-campo ni la de campo simple, y caia a un fallback
+     * que devolvia un JqFilter sintetico sin validar (fields con comas y
+     * corchetes imposibles segun la gramatica) en vez de E_INVALID_JQ.
+     */
+    it('rechaza multi-select sin cerrar con E_INVALID_JQ', () => {
+      const result = parse('x:y --id 1 | [.a, .b');
+
+      expect(isParseResult(result)).toBe(false);
+      if (isParseResult(result)) return;
+      expect(result.errorType).toBe('E_INVALID_JQ');
+    });
+
+    it('rechaza "[." vacio y sin cerrar con E_INVALID_JQ', () => {
+      const result = parse('x:y | [.');
+
+      expect(isParseResult(result)).toBe(false);
+      if (isParseResult(result)) return;
+      expect(result.errorType).toBe('E_INVALID_JQ');
+    });
   });
 
   // ----------------------------------------------------------

@@ -78,6 +78,7 @@ import {
   jqTooDeepError,
   jqTooManyFieldsError,
   invalidJqFieldError,
+  invalidJqError,
   nestedBatchError,
   pipelineInBatchError,
   controlCharacterError,
@@ -494,12 +495,12 @@ function parseJqExpression(expr: string, raw?: string): JqFilter | ParseError {
     };
   }
 
-  // Fallback (no deberia alcanzarse si splitJqFilter funciona correctamente)
-  return {
-    raw: trimmed,
-    type: 'field',
-    fields: [trimmed],
-  };
+  // Ni ".field" ni "[.field, ...]" bien formado (p.ej. "[." sin cerrar) —
+  // splitJqFilter solo garantiza que EMPIEZA con "." o "[.", no que la
+  // gramatica completa sea valida. Rechazar en vez de aceptar un JqFilter
+  // sintetico sin validar (fields con comas/espacios/corchetes imposibles
+  // segun la gramatica, que luego llegaba sin sanitizar al Executor).
+  return invalidJqError(trimmed, 0, errorRaw);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
