@@ -397,6 +397,86 @@ describe('Registry Admin Skills', () => {
     const allowed = await coreAllowed.exec('registry:list');
     expect(allowed.code).toBe(0);
   });
+
+  /**
+   * Regresion: una vez que un agente tenia registry:read (gate a nivel del
+   * comando entero, RA09), list/describe/export devolvian TODAS las
+   * definiciones sin filtrar por lo que ese agente puede ejecutar — a
+   * diferencia de core:search/describe, que si filtran por-item. Un agente
+   * 'reader' (con registry:read pero SIN scaffold:write/wizard:write) podia
+   * usar registry:describe para reconocer comandos que search/describe le
+   * niegan, incluyendo su requiredPermissions exacto.
+   */
+  describe('Filtrado por permisos del caller (registry:read no implica ver todo)', () => {
+    // Solo registry:read — sin scaffold:write ni wizard:write.
+    const readerPerms = ['registry:read'];
+
+    function buildFilteredEntries() {
+      const reg = new CommandRegistry();
+      for (const { definition, handler } of scaffoldCommands) reg.register(definition, handler);
+      for (const { definition, handler } of wizardCommands) reg.register(definition, handler);
+      const entries = registryAdminCommands(reg, readerPerms);
+      for (const { definition, handler } of entries) reg.register(definition, handler);
+      return entries;
+    }
+
+    it('RA11: registry:list solo devuelve comandos que el caller puede ejecutar', async () => {
+      const entries = buildFilteredEntries();
+      const handler = findHandler(entries, 'registry', 'list');
+      const result = await handler({ format: 'full' });
+
+      expect(result.success).toBe(true);
+      // scaffold:* y wizard:* requieren permisos que readerPerms no tiene;
+      // solo quedan los propios registry:* commands (requieren registry:read).
+      expect(result.data.commandCount).toBe(4);
+      for (const def of result.data.commands) {
+        expect(def.namespace).toBe('registry');
+      }
+    });
+
+    it('RA12: registry:describe niega describir un comando fuera del alcance del caller', async () => {
+      const entries = buildFilteredEntries();
+      const handler = findHandler(entries, 'registry', 'describe');
+      const result = await handler({ command: 'scaffold:init' });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('Permission denied');
+    });
+
+    it('RA13: registry:describe permite describir un comando dentro del alcance del caller', async () => {
+      const entries = buildFilteredEntries();
+      const handler = findHandler(entries, 'registry', 'describe');
+      const result = await handler({ command: 'registry:list' });
+
+      expect(result.success).toBe(true);
+      expect(result.data.definition.name).toBe('list');
+    });
+
+    it('RA14: registry:export tambien filtra las definiciones exportadas', async () => {
+      const entries = buildFilteredEntries();
+      const handler = findHandler(entries, 'registry', 'export');
+      const result = await handler({});
+
+      expect(result.success).toBe(true);
+      expect(result.data.count).toBe(4);
+      for (const def of result.data.definitions) {
+        expect(def.namespace).toBe('registry');
+      }
+    });
+
+    it('RA15: sin agentPermissions (undefined), el comportamiento es el de siempre (sin filtrar)', async () => {
+      // Ya cubierto implicitamente por RA01/RA07 (registryAdminCommands(registry)
+      // sin 2do arg), pero se deja explicito el contrato de retrocompatibilidad.
+      const reg = new CommandRegistry();
+      for (const { definition, handler } of scaffoldCommands) reg.register(definition, handler);
+      const entries = registryAdminCommands(reg, undefined);
+      for (const { definition, handler } of entries) reg.register(definition, handler);
+
+      const handler = findHandler(entries, 'registry', 'list');
+      const result = await handler({ format: 'full' });
+      expect(result.data.commandCount).toBe(7); // 3 scaffold + 4 registry
+    });
+  });
 });
 
 // ===========================================================================

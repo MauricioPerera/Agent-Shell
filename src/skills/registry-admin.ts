@@ -8,7 +8,9 @@
 
 import { command } from '../command-builder/index.js';
 import type { CommandRegistry } from '../command-registry/index.js';
+import type { CommandDefinition } from '../command-registry/types.js';
 import type { SkillEntry } from './scaffold.js';
+import { matchPermissions } from '../security/permission-matcher.js';
 
 // ---------------------------------------------------------------------------
 // Skill Definitions
@@ -56,7 +58,22 @@ exportDef.requiredPermissions = ['registry:read'];
 // Factory
 // ---------------------------------------------------------------------------
 
-export function registryAdminCommands(registry: CommandRegistry): SkillEntry[] {
+/**
+ * Drops any definition the caller's own permissions don't satisfy, mirroring
+ * the per-item filter Core.executeBuiltin('search'/'describe') already
+ * applies. Without this, registry:list/describe/export exposed every
+ * command's full definition (including requiredPermissions) regardless of
+ * whether the caller could actually invoke it — a lower-privileged agent
+ * (e.g. 'reader') could use registry:describe to recon commands it's denied
+ * from running via search/describe. null/undefined means "no enforcement
+ * configured", matching Core's own convention.
+ */
+function filterByPermissions(defs: CommandDefinition[], agentPermissions?: string[] | null): CommandDefinition[] {
+  if (!agentPermissions) return defs;
+  return defs.filter(def => !def.requiredPermissions?.length || matchPermissions(agentPermissions, def.requiredPermissions));
+}
+
+export function registryAdminCommands(registry: CommandRegistry, agentPermissions?: string[] | null): SkillEntry[] {
   return [
     {
       definition: listDef,
@@ -64,9 +81,10 @@ export function registryAdminCommands(registry: CommandRegistry): SkillEntry[] {
         const namespace = args.namespace as string | undefined;
         const format = (args.format as string) || 'compact';
 
-        const defs = namespace
+        const allDefs = namespace
           ? registry.listByNamespace(namespace)
           : registry.listAll();
+        const defs = filterByPermissions(allDefs, agentPermissions);
 
         const namespaces = registry.getNamespaces();
 
@@ -98,6 +116,9 @@ export function registryAdminCommands(registry: CommandRegistry): SkillEntry[] {
         }
 
         const definition = result.value.definition;
+        if (filterByPermissions([definition], agentPermissions).length === 0) {
+          return { success: false, data: null, error: `Permission denied: cannot describe ${fullName}` };
+        }
         const compact = registry.toCompactText(definition);
 
         return {
@@ -109,7 +130,7 @@ export function registryAdminCommands(registry: CommandRegistry): SkillEntry[] {
     {
       definition: statsDef,
       handler: async () => {
-        const allDefs = registry.listAll();
+        const allDefs = filterByPermissions(registry.listAll(), agentPermissions);
         const namespaces = registry.getNamespaces();
 
         const namespaceCounts: Record<string, number> = {};
@@ -142,9 +163,10 @@ export function registryAdminCommands(registry: CommandRegistry): SkillEntry[] {
       handler: async (args: Record<string, any>) => {
         const namespace = args.namespace as string | undefined;
 
-        const defs = namespace
+        const allDefs = namespace
           ? registry.listByNamespace(namespace)
           : registry.listAll();
+        const defs = filterByPermissions(allDefs, agentPermissions);
 
         return {
           success: true,

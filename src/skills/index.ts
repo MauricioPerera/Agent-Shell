@@ -58,15 +58,25 @@ export { cronCommands, createCronCommands, CronScheduler } from './cron.js';
 export { secretCommands, createSecretCommands, SecretStore } from './secret-store.js';
 export { processCommands, createProcessCommands, ProcessManager } from './process-mgr.js';
 
-/** Registers all CLI creation skills (9 commands). */
-export function registerSkills(registry: CommandRegistry): void {
+/**
+ * Registers all CLI creation skills (9 commands).
+ *
+ * @param agentPermissions - The caller's resolved permission set (same shape
+ *   Core computes via resolveAgentPermissions), used only to filter what
+ *   registry:list/describe/export reveal. null/undefined = no enforcement,
+ *   matching Core's own convention. Passing it here (at registration time)
+ *   rather than per-call is deliberate: this codebase scopes one Core/agent
+ *   per process for its whole lifetime, there's no per-request caller
+ *   identity to thread through handlers.
+ */
+export function registerSkills(registry: CommandRegistry, agentPermissions?: string[] | null): void {
   for (const { definition, handler } of scaffoldCommands) {
     registry.register(definition, handler);
   }
   for (const { definition, handler } of wizardCommands) {
     registry.register(definition, handler);
   }
-  for (const { definition, handler } of registryAdminCommands(registry)) {
+  for (const { definition, handler } of registryAdminCommands(registry, agentPermissions)) {
     registry.register(definition, handler);
   }
 }
@@ -114,7 +124,7 @@ export function registerShellSkills(registry: CommandRegistry, shellAdapter?: Sh
 }
 
 /** Registers ALL skills (CLI creation + shell). */
-export function registerAllSkills(registry: CommandRegistry, shellAdapter?: ShellAdapter): void {
-  registerSkills(registry);
+export function registerAllSkills(registry: CommandRegistry, shellAdapter?: ShellAdapter, agentPermissions?: string[] | null): void {
+  registerSkills(registry, agentPermissions);
   registerShellSkills(registry, shellAdapter);
 }
