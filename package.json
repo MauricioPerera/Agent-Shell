@@ -62,8 +62,8 @@
     "prepublishOnly": "npm run build"
   },
   "peerDependencies": {
-    "minimemory": ">=0.1.0",
-    "just-bash": ">=2.0.0"
+    "just-bash": ">=2.0.0",
+    "minimemory": ">=0.1.0"
   },
   "peerDependenciesMeta": {
     "minimemory": {
@@ -77,6 +77,6 @@
     "bun-types": "^1.3.6",
     "tsup": "^8.0.0",
     "typescript": "^5.4.0",
-    "vitest": "^2.0.0"
+    "vitest": "^4.1.10"
   }
 }

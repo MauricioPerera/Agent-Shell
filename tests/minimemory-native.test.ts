@@ -13,7 +13,7 @@ function createMockBinding(): MiniMemoryBinding {
   const store = new Map<string, { vector: number[]; meta: Record<string, unknown> }>();
 
   return {
-    VectorDB: vi.fn().mockImplementation(() => ({
+    VectorDB: vi.fn().mockImplementation(function () { return {
       insert: vi.fn((id: string, vector: number[], meta: Record<string, unknown>) => {
         store.set(id, { vector, meta });
       }),
@@ -38,7 +38,7 @@ function createMockBinding(): MiniMemoryBinding {
       has_fulltext: vi.fn(() => false),
       save: vi.fn(),
       load: vi.fn(),
-    })),
+    }; }),
   };
 }
 

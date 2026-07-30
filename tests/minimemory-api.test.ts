@@ -26,12 +26,12 @@ const mockState = {
 
 // Mock binding injected via the adapter's optional `binding` parameter.
 // The VectorDB mock is a constructor function with a static `withFulltext` method.
-const MockVectorDB = vi.fn((...args: any[]) => mockState.vectorDBConstructor?.(...args));
+const MockVectorDB = vi.fn(function (...args: any[]) { return mockState.vectorDBConstructor?.(...args); });
 (MockVectorDB as any).withFulltext = vi.fn((...args: any[]) => mockState.withFulltext?.(...args));
 
 const mockBinding = {
   VectorDB: MockVectorDB,
-  AgentMemory: vi.fn((...args: any[]) => mockState.agentMemoryConstructor?.(...args)),
+  AgentMemory: vi.fn(function (...args: any[]) { return mockState.agentMemoryConstructor?.(...args); }),
 };
 
 // Setup function to initialize mock state before each test

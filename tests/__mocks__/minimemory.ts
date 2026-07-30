@@ -51,7 +51,7 @@ function createInstance(config: any) {
   return instance;
 }
 
-export const VectorDB = vi.fn((config: any) => createInstance(config));
+export const VectorDB = vi.fn(function (config: any) { return createInstance(config); });
 
 /** Access the current mock instance for assertions in tests */
 export function _getMockInstance(): any {

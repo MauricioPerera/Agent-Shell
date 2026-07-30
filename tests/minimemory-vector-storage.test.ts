@@ -64,7 +64,7 @@ function createMockInstance(config: any) {
   return instance;
 }
 
-const MockVectorDB = vi.fn((config: any) => createMockInstance(config));
+const MockVectorDB = vi.fn(function (config: any) { return createMockInstance(config); });
 
 function _getMockInstance(): any {
   return _currentInstance;
@@ -251,7 +251,7 @@ describe('MiniMemoryVectorStorage', () => {
       // The createMockInstance will be called by VectorDB constructor,
       // so we need to override what MockVectorDB returns
       const originalImpl = MockVectorDB.getMockImplementation();
-      MockVectorDB.mockImplementation((config: any) => {
+      MockVectorDB.mockImplementation(function (config: any) {
         const instance = createMockInstance(config);
         instance.load.mockImplementation(() => {
           throw new Error('File not found');
@@ -269,7 +269,7 @@ describe('MiniMemoryVectorStorage', () => {
       if (originalImpl) {
         MockVectorDB.mockImplementation(originalImpl);
       } else {
-        MockVectorDB.mockImplementation((config: any) => createMockInstance(config));
+        MockVectorDB.mockImplementation(function (config: any) { return createMockInstance(config); });
       }
     });
 
