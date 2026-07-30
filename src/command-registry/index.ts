@@ -26,6 +26,15 @@ export class CommandRegistry {
   /** Mapa interno: key = "namespace:name:version" -> RegisteredCommand */
   private commands: Map<string, RegisteredCommand> = new Map();
 
+  /** Indice secundario: "namespace:name" -> (version -> RegisteredCommand), para deregistro/lookup sin version en O(versiones-del-comando) */
+  private byNsName: Map<string, Map<string, RegisteredCommand>> = new Map();
+
+  /** Cache de la version mas reciente por "namespace:name", para get()/resolve() sin version en O(1) */
+  private latestByNsName: Map<string, RegisteredCommand> = new Map();
+
+  /** Indice secundario: namespace -> (fullKey -> RegisteredCommand), para listByNamespace() en O(k) */
+  private byNamespace: Map<string, Map<string, RegisteredCommand>> = new Map();
+
   /**
    * Registra un comando con su handler.
    * Valida la definicion y rechaza duplicados.
@@ -52,11 +61,33 @@ export class CommandRegistry {
     // Deep-copy definition to prevent external mutation
     const defCopy = structuredClone(definition);
 
-    this.commands.set(key, {
+    const registered: RegisteredCommand = {
       definition: defCopy,
       handler,
       registeredAt: new Date().toISOString(),
-    });
+    };
+
+    this.commands.set(key, registered);
+
+    const nsNameKey = this.makeNsNameKey(definition.namespace, definition.name);
+    let versions = this.byNsName.get(nsNameKey);
+    if (!versions) {
+      versions = new Map();
+      this.byNsName.set(nsNameKey, versions);
+    }
+    versions.set(definition.version, registered);
+
+    const currentLatest = this.latestByNsName.get(nsNameKey);
+    if (!currentLatest || compareSemver(definition.version, currentLatest.definition.version) > 0) {
+      this.latestByNsName.set(nsNameKey, registered);
+    }
+
+    let nsCommands = this.byNamespace.get(definition.namespace);
+    if (!nsCommands) {
+      nsCommands = new Map();
+      this.byNamespace.set(definition.namespace, nsCommands);
+    }
+    nsCommands.set(key, registered);
 
     return { ok: true, value: undefined };
   }
@@ -66,9 +97,12 @@ export class CommandRegistry {
    * Sin version, elimina todas las versiones.
    */
   unregister(namespace: string, name: string, version?: string): Result<void> {
+    const nsNameKey = this.makeNsNameKey(namespace, name);
+    const versions = this.byNsName.get(nsNameKey);
+
     if (version) {
       const key = this.makeKey(namespace, name, version);
-      if (!this.commands.has(key)) {
+      if (!versions || !versions.has(version)) {
         return {
           ok: false,
           error: {
@@ -77,21 +111,30 @@ export class CommandRegistry {
           },
         };
       }
+
       this.commands.delete(key);
+      versions.delete(version);
+      this.byNamespace.get(namespace)?.delete(key);
+
+      if (versions.size === 0) {
+        this.byNsName.delete(nsNameKey);
+        this.latestByNsName.delete(nsNameKey);
+      } else if (this.latestByNsName.get(nsNameKey)?.definition.version === version) {
+        // Recompute latest among the remaining versions of this command only
+        let newLatest: RegisteredCommand | null = null;
+        for (const cmd of versions.values()) {
+          if (!newLatest || compareSemver(cmd.definition.version, newLatest.definition.version) > 0) {
+            newLatest = cmd;
+          }
+        }
+        this.latestByNsName.set(nsNameKey, newLatest!);
+      }
+
       return { ok: true, value: undefined };
     }
 
     // Without version: delete all versions
-    const prefix = `${namespace}:${name}:`;
-    let found = false;
-    for (const key of [...this.commands.keys()]) {
-      if (key.startsWith(prefix)) {
-        this.commands.delete(key);
-        found = true;
-      }
-    }
-
-    if (!found) {
+    if (!versions || versions.size === 0) {
       return {
         ok: false,
         error: {
@@ -100,6 +143,15 @@ export class CommandRegistry {
         },
       };
     }
+
+    const nsCommands = this.byNamespace.get(namespace);
+    for (const [ver] of versions) {
+      const key = this.makeKey(namespace, name, ver);
+      this.commands.delete(key);
+      nsCommands?.delete(key);
+    }
+    this.byNsName.delete(nsNameKey);
+    this.latestByNsName.delete(nsNameKey);
 
     return { ok: true, value: undefined };
   }
@@ -124,17 +176,7 @@ export class CommandRegistry {
       return { ok: true, value: cmd };
     }
 
-    // Find the most recent version
-    const prefix = `${namespace}:${name}:`;
-    let latest: RegisteredCommand | null = null;
-
-    for (const [key, cmd] of this.commands) {
-      if (key.startsWith(prefix)) {
-        if (!latest || compareSemver(cmd.definition.version, latest.definition.version) > 0) {
-          latest = cmd;
-        }
-      }
-    }
+    const latest = this.latestByNsName.get(this.makeNsNameKey(namespace, name));
 
     if (!latest) {
       return {
@@ -193,13 +235,9 @@ export class CommandRegistry {
 
   /** Retorna todas las definiciones de un namespace. */
   listByNamespace(namespace: string): CommandDefinition[] {
-    const results: CommandDefinition[] = [];
-    for (const cmd of this.commands.values()) {
-      if (cmd.definition.namespace === namespace) {
-        results.push(cmd.definition);
-      }
-    }
-    return results;
+    const nsCommands = this.byNamespace.get(namespace);
+    if (!nsCommands) return [];
+    return [...nsCommands.values()].map(cmd => cmd.definition);
   }
 
   /** Retorna todas las definiciones registradas. */
@@ -209,11 +247,7 @@ export class CommandRegistry {
 
   /** Retorna todos los namespaces con al menos un comando, ordenados alfabeticamente. */
   getNamespaces(): string[] {
-    const namespaces = new Set<string>();
-    for (const cmd of this.commands.values()) {
-      namespaces.add(cmd.definition.namespace);
-    }
-    return [...namespaces].sort();
+    return [...this.byNamespace.keys()].sort();
   }
 
   /** Genera la representacion compacta AI-optimizada de un comando. */
@@ -253,6 +287,10 @@ export class CommandRegistry {
 
   private makeKey(namespace: string, name: string, version: string): string {
     return `${namespace}:${name}:${version}`;
+  }
+
+  private makeNsNameKey(namespace: string, name: string): string {
+    return `${namespace}:${name}`;
   }
 
   private validateDefinition(def: CommandDefinition, handler: Function): RegistryError | null {
