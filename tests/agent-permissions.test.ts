@@ -146,6 +146,22 @@ describe('Agent Profiles', () => {
     });
     expect(perms).toEqual([]); // restricted wins
   });
+
+  /**
+   * Regresion: permissions:[] explicito caia por un truthy/length check
+   * ({} && length>0) hasta el "return null" de "sin configurar" — deny-all
+   * pedido explicitamente se convertia en allow-all (fail-open).
+   */
+  it('AP06: permissions:[] explicito es deny-all, no "sin configurar"', () => {
+    const perms = resolveAgentPermissions({ permissions: [] });
+    expect(perms).toEqual([]);
+    expect(perms).not.toBeNull();
+  });
+
+  it('AP07: sin agentProfile ni permissions sigue siendo null (unrestricted legado)', () => {
+    const perms = resolveAgentPermissions({ rbac: undefined });
+    expect(perms).toBeNull();
+  });
 });
 
 // ===========================================================================

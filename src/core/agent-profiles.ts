@@ -66,9 +66,15 @@ export function resolveAgentPermissions(config: PermissionConfig): string[] | nu
     });
   }
 
-  if (config.permissions && config.permissions.length > 0) {
+  // `!== undefined` (not a truthy/length check) is deliberate: permissions:[]
+  // must mean "explicitly no permissions" (deny-all, same as agentProfile:
+  // 'restricted'), not fall through to the unrestricted default below. A
+  // truthy/length check treated an explicit empty array the same as "not
+  // configured", silently granting full access to a caller that asked for
+  // the opposite.
+  if (config.permissions !== undefined) {
     return [...config.permissions];
   }
 
-  return null; // No enforcement
+  return null; // No enforcement (permissions genuinely not configured)
 }
