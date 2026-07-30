@@ -58,6 +58,7 @@ export class HttpSseTransport {
   private readonly heartbeatInterval: number;
   private readonly requestTimeout: number;
   private readonly maxBodySize: number;
+  private readonly maxSseClients: number;
   private readonly authToken: string | null;
   private readonly authExcludePaths: Set<string>;
   private readonly insecureAllowNoAuth: boolean;
@@ -69,6 +70,7 @@ export class HttpSseTransport {
     this.heartbeatInterval = config?.heartbeatInterval ?? 30_000;
     this.requestTimeout = config?.requestTimeout ?? 30_000;
     this.maxBodySize = config?.maxBodySize ?? 65_536;
+    this.maxSseClients = config?.maxSseClients ?? 100;
     this.authToken = config?.auth?.bearerToken ?? null;
     this.authExcludePaths = new Set(config?.auth?.excludePaths ?? ['/health']);
     this.insecureAllowNoAuth = config?.insecureAllowNoAuth ?? false;
@@ -313,6 +315,15 @@ export class HttpSseTransport {
   }
 
   private handleSse(req: IncomingMessage, res: ServerResponse): void {
+    // No limit meant any client (or a single attacker) could open unbounded
+    // SSE connections and exhaust the process's file descriptors/memory —
+    // a trivial DoS since GET /sse doesn't require a CORS preflight to open,
+    // only to have its response read cross-origin.
+    if (this.clients.size >= this.maxSseClients) {
+      this.sendJson(res, 503, { error: 'Too many concurrent SSE connections' });
+      return;
+    }
+
     const clientId = randomUUID();
 
     res.writeHead(200, {

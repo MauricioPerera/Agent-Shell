@@ -432,6 +432,32 @@ describe('HttpSseTransport', () => {
       expect(transport.connectedClients).toBe(0);
     });
 
+    /**
+     * Regresion: GET /sse no tenia limite de conexiones concurrentes — un
+     * cliente (o atacante) podia abrir conexiones SSE sin cota y agotar
+     * file descriptors/memoria del proceso, DoS trivial sin necesitar
+     * preflight CORS (GET simple).
+     */
+    it('T17b: rechaza con 503 al superar maxSseClients', async () => {
+      await transport.stop();
+      transport = new HttpSseTransport({ port: 0, maxSseClients: 2 });
+      transport.onMessage(createMockHandler());
+      await transport.start();
+
+      const c1 = await connectSse(transport.port);
+      const c2 = await connectSse(transport.port);
+      expect(transport.connectedClients).toBe(2);
+
+      const c3 = await connectSse(transport.port);
+      expect(c3.response.statusCode).toBe(503);
+      // El tercero no cuenta como cliente SSE conectado.
+      expect(transport.connectedClients).toBe(2);
+
+      c1.close();
+      c2.close();
+      c3.close();
+    });
+
     it('T17: multiples clientes SSE simultaneos', async () => {
       const c1 = await connectSse(transport.port);
       const c2 = await connectSse(transport.port);

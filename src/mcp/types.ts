@@ -124,6 +124,8 @@ export interface HttpTransportConfig {
   requestTimeout?: number;
   /** Tamano maximo del body en bytes. Default: 65536 (64KB) */
   maxBodySize?: number;
+  /** Clientes SSE concurrentes maximos. Default: 100. Conexiones adicionales reciben 503. */
+  maxSseClients?: number;
 }
 
 export interface SseClient {
