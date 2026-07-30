@@ -215,6 +215,12 @@ export class SQLiteStorageAdapter implements StorageAdapter {
         ON CONFLICT(session_id) DO UPDATE SET last_access_at = ?
       `).run(session_id, store.createdAt ?? now, now, now);
 
+      // Clear any stale encrypted_blob left over from a prior blob-mode save
+      // of this session — load() checks encrypted_blob truthiness first, so
+      // leaving it set here would make it keep serving stale ciphertext
+      // forever after this plaintext save reports success.
+      this.db.prepare('UPDATE sessions SET encrypted_blob = ? WHERE session_id = ?').run(null, session_id);
+
       // Replace context entries
       this.db.prepare('DELETE FROM session_context WHERE session_id = ?').run(session_id);
       const insertContext = this.db.prepare(`

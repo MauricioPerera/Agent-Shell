@@ -747,6 +747,36 @@ describe('SQLiteStorageAdapter', () => {
       const reader = new EncryptedStorageAdapter(adapter, { key: keyB });
       await expect(reader.load('sess-wrongkey')).rejects.toThrow();
     });
+
+    /**
+     * Regresion: la rama plaintext (normal-mode) de save() nunca limpiaba
+     * encrypted_blob a NULL. Como load() chequea encrypted_blob primero,
+     * una sesion que alguna vez se guardo en modo blob seguia devolviendo
+     * el ciphertext STALE para siempre despues de un save() plaintext
+     * posterior exitoso, aunque este ultimo reporte exito.
+     */
+    it('T19: un save() plaintext posterior a un save() cifrado limpia encrypted_blob y load() ya no devuelve el ciphertext viejo', async () => {
+      const { EncryptedStorageAdapter } = await import('../src/context-store/encrypted-storage-adapter.js');
+      const key = Buffer.alloc(32, 7);
+      const encrypted = new EncryptedStorageAdapter(adapter, { key });
+
+      await encrypted.save('sess-transition', createSampleStore());
+      let row = db.prepare('SELECT * FROM sessions WHERE session_id = ?').get('sess-transition');
+      expect(row.encrypted_blob).toBeTruthy();
+
+      const plainStore: SessionStore = {
+        context: { entries: { theme: { value: 'light', type: 'string', version: 1 } } },
+        history: [],
+        undo_snapshots: [],
+      };
+      await adapter.save('sess-transition', plainStore);
+
+      row = db.prepare('SELECT * FROM sessions WHERE session_id = ?').get('sess-transition');
+      expect(row.encrypted_blob).toBeNull();
+
+      const loaded = await adapter.load('sess-transition');
+      expect(loaded!.context.entries.theme.value).toBe('light');
+    });
   });
 });
 
