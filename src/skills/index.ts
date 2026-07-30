@@ -53,7 +53,7 @@ export { fileCommands, createFileCommands } from './shell-file.js';
 export { shellCommands, createShellCommands } from './shell-exec.js';
 export { envCommands } from './shell-env.js';
 export { workspaceCommands, createWorkspaceCommands, WorkspaceState } from './workspace.js';
-export { gitCommands } from './shell-git.js';
+export { gitCommands, createGitCommands } from './shell-git.js';
 export { cronCommands, createCronCommands, CronScheduler } from './cron.js';
 export { secretCommands, createSecretCommands, SecretStore } from './secret-store.js';
 export { processCommands, createProcessCommands, ProcessManager } from './process-mgr.js';

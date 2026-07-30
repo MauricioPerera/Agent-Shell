@@ -8,11 +8,12 @@
  */
 
 import { command } from '../command-builder/index.js';
-import { existsSync, mkdirSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { resolve, isAbsolute } from 'node:path';
 import type { SkillEntry } from './scaffold.js';
 import type { ShellAdapter } from '../just-bash/types.js';
 import { NativeShellAdapter } from '../just-bash/adapter.js';
+import { createPathJail } from '../security/path-jail.js';
 
 // ---------------------------------------------------------------------------
 // WorkspaceState — persistent state across commands
@@ -109,10 +110,18 @@ resetDef.requiredPermissions = ['workspace:write'];
 /**
  * Creates workspace commands bound to a shared WorkspaceState.
  * The state persists across all workspace:* calls within the same process.
+ *
+ * An optional `jailRoot` may be provided to constrain workspace:init/cd to a
+ * single subtree, the same containment createFileCommands() offers for
+ * file:* — without it, workspace:init could set ws.cwd to anywhere on disk
+ * (bypassing any file:* jail entirely) and workspace:run would then execute
+ * with that unjailed directory as cwd.
  */
-export function createWorkspaceCommands(state?: WorkspaceState, adapter?: ShellAdapter): SkillEntry[] {
+export function createWorkspaceCommands(state?: WorkspaceState, adapter?: ShellAdapter, jailRoot?: string): SkillEntry[] {
   const ws = state || new WorkspaceState();
   const shellAdapter = adapter || new NativeShellAdapter();
+  const assertInsideJail = createPathJail(jailRoot);
+  const jailRootAbs = jailRoot ? resolve(jailRoot) : null;
 
   return [
     {
@@ -123,16 +132,19 @@ export function createWorkspaceCommands(state?: WorkspaceState, adapter?: ShellA
         const envVars = typeof args.env === 'string' ? JSON.parse(args.env) : (args.env || {});
 
         const absPath = isAbsolute(path) ? path : resolve(process.cwd(), path);
+        const check = assertInsideJail(absPath);
+        if (!check.ok) return { success: false, data: null, error: check.error };
+        const resolvedPath = check.resolved;
 
-        if (shouldCreate && !existsSync(absPath)) {
-          mkdirSync(absPath, { recursive: true });
+        if (shouldCreate && !existsSync(resolvedPath)) {
+          await shellAdapter.mkdir(resolvedPath, { recursive: true });
         }
 
-        if (!existsSync(absPath)) {
-          return { success: false, data: null, error: `Directory does not exist: ${absPath}. Use --create true to create it.` };
+        if (!existsSync(resolvedPath)) {
+          return { success: false, data: null, error: `Directory does not exist: ${resolvedPath}. Use --create true to create it.` };
         }
 
-        ws.cwd = absPath;
+        ws.cwd = resolvedPath;
         ws.env = { ...ws.env, ...envVars };
         ws.initialized = true;
 
@@ -205,13 +217,16 @@ export function createWorkspaceCommands(state?: WorkspaceState, adapter?: ShellA
       definition: cdDef,
       handler: async (args: any) => {
         const target = ws.resolvePath(args.path as string);
+        const check = assertInsideJail(target);
+        if (!check.ok) return { success: false, data: null, error: check.error };
+        const resolvedTarget = check.resolved;
 
-        if (!existsSync(target)) {
-          return { success: false, data: null, error: `Directory does not exist: ${target}` };
+        if (!existsSync(resolvedTarget)) {
+          return { success: false, data: null, error: `Directory does not exist: ${resolvedTarget}` };
         }
 
         const previous = ws.cwd;
-        ws.cwd = target;
+        ws.cwd = resolvedTarget;
 
         return {
           success: true,
@@ -239,7 +254,10 @@ export function createWorkspaceCommands(state?: WorkspaceState, adapter?: ShellA
       definition: resetDef,
       handler: async () => {
         const previousCwd = ws.cwd;
-        ws.cwd = process.cwd();
+        // Reset inside the jail when one is configured — resetting to
+        // process.cwd() unconditionally could put ws.cwd right back
+        // outside the jail init/cd just finished enforcing.
+        ws.cwd = jailRootAbs || process.cwd();
         ws.env = {};
         ws.history = [];
         ws.initialized = false;

@@ -5,7 +5,9 @@
 
 import { command } from '../command-builder/index.js';
 import { execSync, execFileSync } from 'node:child_process';
+import { resolve, isAbsolute } from 'node:path';
 import type { SkillEntry } from './scaffold.js';
+import { createPathJail } from '../security/path-jail.js';
 
 function gitExec(cmd: string, cwd?: string): { stdout: string; stderr: string; exitCode: number } {
   try {
@@ -101,41 +103,84 @@ commitDef.requiredPermissions = ['git:write'];
 pushDef.requiredPermissions = ['git:write'];
 pullDef.requiredPermissions = ['git:write'];
 
-export const gitCommands: SkillEntry[] = [
-  { definition: cloneDef, handler: async (args: any) => {
-    const branch = args.branch ? String(args.branch) : '';
-    const target = args.path || '.';
-    const res = gitExecArgs(
-      ['clone', ...(branch ? ['-b', branch] : []), String(args.url), String(target)],
-    );
-    return { success: res.exitCode === 0, data: res, error: res.exitCode !== 0 ? res.stderr : undefined };
-  }},
-  { definition: statusDef, handler: async (args: any) => {
-    const res = gitExec('git status --porcelain', args.cwd || undefined);
-    const clean = res.stdout.trim() === '';
-    return { success: true, data: { ...res, clean, cwd: args.cwd || process.cwd() } };
-  }},
-  { definition: diffDef, handler: async (args: any) => {
-    const cmd = args.staged ? 'git diff --staged' : 'git diff';
-    const res = gitExec(cmd, args.cwd || undefined);
-    return { success: true, data: res };
-  }},
-  { definition: commitDef, handler: async (args: any) => {
-    const cwd = args.cwd || undefined;
-    if (args['add-all']) gitExecArgs(['add', '-A'], cwd);
-    const res = gitExecArgs(['commit', '-m', String(args.message)], cwd);
-    return { success: res.exitCode === 0, data: res, error: res.exitCode !== 0 ? res.stderr : undefined };
-  }},
-  { definition: pushDef, handler: async (args: any) => {
-    const remote = args.remote || 'origin';
-    const branch = args.branch ? String(args.branch) : '';
-    const res = gitExecArgs(['push', remote, ...(branch ? [branch] : [])], args.cwd || undefined);
-    return { success: res.exitCode === 0, data: res, error: res.exitCode !== 0 ? res.stderr : undefined };
-  }},
-  { definition: pullDef, handler: async (args: any) => {
-    const remote = args.remote || 'origin';
-    const branch = args.branch ? String(args.branch) : '';
-    const res = gitExecArgs(['pull', remote, ...(branch ? [branch] : [])], args.cwd || undefined);
-    return { success: res.exitCode === 0, data: res, error: res.exitCode !== 0 ? res.stderr : undefined };
-  }},
-];
+/**
+ * Creates git command entries. An optional `jailRoot` constrains every
+ * command's `--cwd` (and clone's `--path`) to a single subtree, the same
+ * containment createFileCommands() offers for file:* — without it, `--cwd`
+ * accepted any path on the host, letting a `git:write` grant intended for
+ * one project operate on any other git repository the process can reach.
+ *
+ * Without jailRoot, every handler behaves byte-identical to before this
+ * option existed (unresolved `args.cwd`, natural child_process cwd default).
+ */
+export function createGitCommands(jailRoot?: string): SkillEntry[] {
+  const assertInsideJail = createPathJail(jailRoot);
+  const jailRootAbs = jailRoot ? resolve(jailRoot) : null;
+
+  function resolveCwd(rawCwd: string | undefined): { ok: true; cwd: string | undefined } | { ok: false; error: string } {
+    if (!jailRootAbs) return { ok: true, cwd: rawCwd || undefined };
+    const base = rawCwd ? (isAbsolute(rawCwd) ? rawCwd : resolve(jailRootAbs, rawCwd)) : jailRootAbs;
+    const check = assertInsideJail(base);
+    if (!check.ok) return { ok: false, error: check.error };
+    return { ok: true, cwd: check.resolved };
+  }
+
+  return [
+    { definition: cloneDef, handler: async (args: any) => {
+      const branch = args.branch ? String(args.branch) : '';
+      let target = String(args.path || '.');
+      if (jailRootAbs) {
+        const abs = isAbsolute(target) ? target : resolve(jailRootAbs, target);
+        const check = assertInsideJail(abs);
+        if (!check.ok) return { success: false, data: null, error: check.error };
+        target = check.resolved;
+      }
+      const res = gitExecArgs(
+        ['clone', ...(branch ? ['-b', branch] : []), String(args.url), target],
+      );
+      return { success: res.exitCode === 0, data: res, error: res.exitCode !== 0 ? res.stderr : undefined };
+    }},
+    { definition: statusDef, handler: async (args: any) => {
+      const cwdCheck = resolveCwd(args.cwd || undefined);
+      if (!cwdCheck.ok) return { success: false, data: null, error: cwdCheck.error };
+      const res = gitExec('git status --porcelain', cwdCheck.cwd);
+      const clean = res.stdout.trim() === '';
+      return { success: true, data: { ...res, clean, cwd: cwdCheck.cwd || process.cwd() } };
+    }},
+    { definition: diffDef, handler: async (args: any) => {
+      const cwdCheck = resolveCwd(args.cwd || undefined);
+      if (!cwdCheck.ok) return { success: false, data: null, error: cwdCheck.error };
+      const cmd = args.staged ? 'git diff --staged' : 'git diff';
+      const res = gitExec(cmd, cwdCheck.cwd);
+      return { success: true, data: res };
+    }},
+    { definition: commitDef, handler: async (args: any) => {
+      const cwdCheck = resolveCwd(args.cwd || undefined);
+      if (!cwdCheck.ok) return { success: false, data: null, error: cwdCheck.error };
+      const cwd = cwdCheck.cwd;
+      if (args['add-all']) gitExecArgs(['add', '-A'], cwd);
+      const res = gitExecArgs(['commit', '-m', String(args.message)], cwd);
+      return { success: res.exitCode === 0, data: res, error: res.exitCode !== 0 ? res.stderr : undefined };
+    }},
+    { definition: pushDef, handler: async (args: any) => {
+      const cwdCheck = resolveCwd(args.cwd || undefined);
+      if (!cwdCheck.ok) return { success: false, data: null, error: cwdCheck.error };
+      const remote = args.remote || 'origin';
+      const branch = args.branch ? String(args.branch) : '';
+      const res = gitExecArgs(['push', remote, ...(branch ? [branch] : [])], cwdCheck.cwd);
+      return { success: res.exitCode === 0, data: res, error: res.exitCode !== 0 ? res.stderr : undefined };
+    }},
+    { definition: pullDef, handler: async (args: any) => {
+      const cwdCheck = resolveCwd(args.cwd || undefined);
+      if (!cwdCheck.ok) return { success: false, data: null, error: cwdCheck.error };
+      const remote = args.remote || 'origin';
+      const branch = args.branch ? String(args.branch) : '';
+      const res = gitExecArgs(['pull', remote, ...(branch ? [branch] : [])], cwdCheck.cwd);
+      return { success: res.exitCode === 0, data: res, error: res.exitCode !== 0 ? res.stderr : undefined };
+    }},
+  ];
+}
+
+// Legacy export for backward compatibility (no jail — identical to this
+// module's behavior before jailRoot support existed).
+export const gitCommands: SkillEntry[] = createGitCommands();

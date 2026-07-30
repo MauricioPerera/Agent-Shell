@@ -4,10 +4,10 @@
  */
 
 import { command } from '../command-builder/index.js';
-import { resolve, sep } from 'node:path';
 import { NativeShellAdapter } from '../just-bash/adapter.js';
 import type { ShellAdapter } from '../just-bash/types.js';
 import type { SkillEntry } from './scaffold.js';
+import { createPathJail } from '../security/path-jail.js';
 
 const readDef = command('file', 'read')
   .version('1.0.0')
@@ -90,28 +90,7 @@ chmodDef.requiredPermissions = ['file:write'];
  * identical to the historical default. See `assertInsideJail` for limitations.
  */
 export function createFileCommands(adapter: ShellAdapter, jailRoot?: string): SkillEntry[] {
-  const jailRootAbs = jailRoot ? resolve(jailRoot) : null;
-
-  /**
-   * Validate that `inputPath` resolves inside the jail root. Returns the resolved
-   * path on success so callers operate on exactly what was validated.
-   *
-   * NOTE: this is a SYNTACTIC containment check. It does not resolve symlinks, so
-   * a symlink that lives inside the jail but points outside it would still pass.
-   * Hardening that with `fs.realpath` is a separate, known limitation.
-   */
-  function assertInsideJail(inputPath: string): { ok: true; resolved: string } | { ok: false; error: string } {
-    if (!jailRootAbs) return { ok: true, resolved: inputPath };
-    // resolve(jailRootAbs, inputPath): relative inputPath is resolved inside the
-    // jail; an absolute inputPath is returned as-is (resolve ignores the first
-    // arg in that case), which the startsWith check below then blocks.
-    const resolved = resolve(jailRootAbs, inputPath);
-    const withinJail = resolved === jailRootAbs || resolved.startsWith(jailRootAbs + sep);
-    if (!withinJail) {
-      return { ok: false, error: `Blocked: path '${inputPath}' resolves outside jail root '${jailRootAbs}'` };
-    }
-    return { ok: true, resolved };
-  }
+  const assertInsideJail = createPathJail(jailRoot);
 
   return [
     {

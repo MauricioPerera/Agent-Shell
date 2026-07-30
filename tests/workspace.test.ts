@@ -6,7 +6,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { WorkspaceState, createWorkspaceCommands } from '../src/skills/workspace.js';
 import { CommandRegistry } from '../src/command-registry/index.js';
 import { registerShellSkills } from '../src/skills/index.js';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { SkillEntry } from '../src/skills/scaffold.js';
@@ -281,6 +281,101 @@ describe('Workspace Skills', () => {
       expect(definition.requiredPermissions).toBeDefined();
       expect(definition.requiredPermissions!.length).toBeGreaterThan(0);
     }
+  });
+});
+
+/**
+ * Regresion: workspace:init/cd no tenian ningun concepto de jail — a
+ * diferencia de file:*, que ya soporta un jailRoot opcional via
+ * createFileCommands(adapter, jailRoot). workspace:init llamaba
+ * mkdirSync directo (bypaseando el adapter) y workspace:cd aceptaba
+ * cualquier path absoluto o con ../, dejando que workspace:run ejecutara
+ * luego con ese cwd fuera de cualquier jail configurado.
+ */
+describe('Workspace jailRoot containment', () => {
+  let jailDir: string;
+  let outsideDir: string;
+  let state: WorkspaceState;
+  let cmds: SkillEntry[];
+
+  beforeEach(() => {
+    jailDir = mkdtempSync(join(tmpdir(), 'ws-jail-'));
+    outsideDir = mkdtempSync(join(tmpdir(), 'ws-outside-'));
+    state = new WorkspaceState();
+    cmds = createWorkspaceCommands(state, undefined, jailDir);
+  });
+
+  afterEach(() => {
+    rmSync(jailDir, { recursive: true, force: true });
+    rmSync(outsideDir, { recursive: true, force: true });
+  });
+
+  it('WSJ01: init dentro del jail funciona', async () => {
+    const init = findHandler(cmds, 'workspace', 'init');
+    const res = await init({ path: jailDir });
+
+    expect(res.success).toBe(true);
+    expect(state.cwd).toBe(jailDir);
+  });
+
+  it('WSJ02: init fuera del jail es bloqueado', async () => {
+    const init = findHandler(cmds, 'workspace', 'init');
+    const res = await init({ path: outsideDir });
+
+    expect(res.success).toBe(false);
+    expect(res.error).toContain('outside jail root');
+    expect(state.initialized).toBe(false);
+  });
+
+  it('WSJ03: init --create true no crea directorios fuera del jail', async () => {
+    const init = findHandler(cmds, 'workspace', 'init');
+    const escapedPath = join(outsideDir, 'should-not-exist');
+    const res = await init({ path: escapedPath, create: true });
+
+    expect(res.success).toBe(false);
+    expect(existsSync(escapedPath)).toBe(false);
+  });
+
+  it('WSJ04: cd con ../ que escapa del jail es bloqueado', async () => {
+    const init = findHandler(cmds, 'workspace', 'init');
+    await init({ path: jailDir });
+
+    const cd = findHandler(cmds, 'workspace', 'cd');
+    const res = await cd({ path: '../../../' });
+
+    expect(res.success).toBe(false);
+    expect(res.error).toContain('outside jail root');
+    expect(state.cwd).toBe(jailDir); // unchanged
+  });
+
+  it('WSJ05: cd a un path absoluto fuera del jail es bloqueado', async () => {
+    const init = findHandler(cmds, 'workspace', 'init');
+    await init({ path: jailDir });
+
+    const cd = findHandler(cmds, 'workspace', 'cd');
+    const res = await cd({ path: outsideDir });
+
+    expect(res.success).toBe(false);
+    expect(state.cwd).toBe(jailDir);
+  });
+
+  it('WSJ06: reset vuelve al jailRoot, no a process.cwd()', async () => {
+    const init = findHandler(cmds, 'workspace', 'init');
+    await init({ path: jailDir });
+
+    const reset = findHandler(cmds, 'workspace', 'reset');
+    const res = await reset({});
+
+    expect(res.data.newCwd).toBe(jailDir);
+    expect(state.cwd).toBe(jailDir);
+  });
+
+  it('WSJ07: sin jailRoot, el comportamiento es el de siempre (sin restriccion)', async () => {
+    const unjailed = createWorkspaceCommands(new WorkspaceState());
+    const init = findHandler(unjailed, 'workspace', 'init');
+    const res = await init({ path: outsideDir });
+
+    expect(res.success).toBe(true);
   });
 });
 

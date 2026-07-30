@@ -10,7 +10,7 @@ import { execSync } from 'node:child_process';
 import { CommandRegistry } from '../src/command-registry/index.js';
 import { registerShellSkills } from '../src/skills/index.js';
 import { createFileCommands } from '../src/skills/shell-file.js';
-import { gitCommands } from '../src/skills/shell-git.js';
+import { gitCommands, createGitCommands } from '../src/skills/shell-git.js';
 import { CronScheduler, createCronCommands } from '../src/skills/cron.js';
 import { SecretStore, createSecretCommands } from '../src/skills/secret-store.js';
 import { ProcessManager, createProcessCommands } from '../src/skills/process-mgr.js';
@@ -276,6 +276,89 @@ describe('Git Skills', () => {
     expect(res.success).toBe(true);
     // The injected command substitution must NOT have run — no proof file created.
     expect(existsSync(proofPath)).toBe(false);
+  });
+});
+
+/**
+ * Regresion: git:* aceptaba --cwd sin ninguna restriccion — un rol con
+ * git:write pensado para "el repo del proyecto" podia apuntar a cualquier
+ * otro repositorio del host via --cwd. createGitCommands(jailRoot) agrega
+ * la misma contencion que file:* y workspace:* ya tienen.
+ */
+describe('Git Jail (opt-in path containment)', () => {
+  let jailDir: string;
+  let outsideRepo: string;
+  let jailed: SkillEntry[];
+
+  beforeEach(() => {
+    jailDir = mkdtempSync(join(tmpdir(), 'gitjail-'));
+    execSync('git init', { cwd: jailDir, stdio: 'pipe' });
+    execSync('git config user.email "test@test.com"', { cwd: jailDir, stdio: 'pipe' });
+    execSync('git config user.name "Test"', { cwd: jailDir, stdio: 'pipe' });
+    writeFileSync(join(jailDir, 'README.md'), '# Jailed');
+    execSync('git add -A && git commit -m "init"', { cwd: jailDir, stdio: 'pipe' });
+
+    outsideRepo = mkdtempSync(join(tmpdir(), 'gitjail-outside-'));
+    execSync('git init', { cwd: outsideRepo, stdio: 'pipe' });
+    execSync('git config user.email "test@test.com"', { cwd: outsideRepo, stdio: 'pipe' });
+    execSync('git config user.name "Test"', { cwd: outsideRepo, stdio: 'pipe' });
+    writeFileSync(join(outsideRepo, 'SECRET.md'), '# not yours');
+    execSync('git add -A && git commit -m "init"', { cwd: outsideRepo, stdio: 'pipe' });
+
+    jailed = createGitCommands(jailDir);
+  });
+
+  afterEach(() => {
+    rmSync(jailDir, { recursive: true, force: true });
+    rmSync(outsideRepo, { recursive: true, force: true });
+  });
+
+  it('GJ01: --cwd inside the jail works normally', async () => {
+    const handler = findHandler(jailed, 'git', 'status');
+    const res = await handler({ cwd: jailDir });
+    expect(res.success).toBe(true);
+    expect(res.data.clean).toBe(true);
+  });
+
+  it('GJ02: --cwd pointing at a repo outside the jail is blocked', async () => {
+    const handler = findHandler(jailed, 'git', 'status');
+    const res = await handler({ cwd: outsideRepo });
+    expect(res.success).toBe(false);
+    expect(res.error).toMatch(/jail|outside/i);
+  });
+
+  it('GJ03: no --cwd defaults inside the jail, not process.cwd()', async () => {
+    const handler = findHandler(jailed, 'git', 'status');
+    const res = await handler({});
+    expect(res.success).toBe(true);
+    expect(res.data.cwd).toBe(jailDir);
+  });
+
+  it('GJ04: git:commit --cwd outside the jail is blocked, does not touch the other repo', async () => {
+    const handler = findHandler(jailed, 'git', 'commit');
+    const before = execSync('git rev-parse HEAD', { cwd: outsideRepo, encoding: 'utf-8' }).trim();
+
+    const res = await handler({ message: 'pwn', cwd: outsideRepo });
+    expect(res.success).toBe(false);
+    expect(res.error).toMatch(/jail|outside/i);
+
+    const after = execSync('git rev-parse HEAD', { cwd: outsideRepo, encoding: 'utf-8' }).trim();
+    expect(after).toBe(before);
+  });
+
+  it('GJ05: git:clone --path escaping the jail is blocked', async () => {
+    const handler = findHandler(jailed, 'git', 'clone');
+    const target = join(outsideRepo, 'cloned-here');
+    const res = await handler({ url: jailDir, path: target });
+    expect(res.success).toBe(false);
+    expect(res.error).toMatch(/jail|outside/i);
+    expect(existsSync(target)).toBe(false);
+  });
+
+  it('GJ06: without jailRoot, --cwd is unrestricted (legacy gitCommands export)', async () => {
+    const handler = findHandler(gitCommands, 'git', 'status');
+    const res = await handler({ cwd: outsideRepo });
+    expect(res.success).toBe(true);
   });
 });
 
