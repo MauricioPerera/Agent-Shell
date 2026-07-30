@@ -9,6 +9,7 @@
  * - Exact match: "users:delete:123" matchea "users:delete:123"
  * - Resource wildcard: "users:delete:*" matchea "users:delete:123"
  * - Namespace wildcard: "users:*" matchea "users:delete" y "users:delete:123"
+ * - Action wildcard: "*:delete" matchea "users:delete" y "orders:delete" (cualquier namespace)
  * - Global wildcard: "*" matchea todo
  * - Placeholders: "users:delete:$id" se resuelve a "users:delete:123" con args={id:123}
  */
@@ -50,6 +51,10 @@ export function matchPermission(
 
   // Namespace wildcard: "ns:*" matches "ns:action" or "ns:action:resource"
   if (userPermissions.includes(`${ns}:*`)) return true;
+
+  // Action wildcard: "*:action" matches "ns:action" or "ns:action:resource" for any namespace.
+  // (AGENT_PROFILES' built-in reader/operator profiles rely on this form, e.g. '*:read'.)
+  if (action && userPermissions.includes(`*:${action}`)) return true;
 
   // Global wildcard
   if (userPermissions.includes('*')) return true;

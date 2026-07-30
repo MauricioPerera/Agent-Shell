@@ -466,6 +466,28 @@ describe('Permission Matcher (Resource-Level)', () => {
     expect(matchPermission(['users:*'], 'orders:delete')).toBe(false);
   });
 
+  /**
+   * Regresion: AGENT_PROFILES.reader/operator listan entradas como '*:read'
+   * pensando en un wildcard de accion cross-namespace, pero matchPermission
+   * nunca lo soportaba (solo ns:*, ns:action:*, y * global) — esas entradas
+   * eran letra muerta. Confirmado en vivo que hoy no cambia ningun permiso
+   * efectivo (todo ns:read ya esta enumerado explicito en los perfiles).
+   */
+  it('T52b: action wildcard *:action matchea cualquier namespace, 2-level', () => {
+    const perms = ['*:read'];
+    expect(matchPermission(perms, 'users:read')).toBe(true);
+    expect(matchPermission(perms, 'orders:read')).toBe(true);
+    expect(matchPermission(perms, 'anything:read')).toBe(true);
+  });
+
+  it('T52c: action wildcard *:action matchea 3-level (cascada a resource)', () => {
+    expect(matchPermission(['*:delete'], 'users:delete:123')).toBe(true);
+  });
+
+  it('T52d: action wildcard no matchea otra action', () => {
+    expect(matchPermission(['*:read'], 'users:delete')).toBe(false);
+  });
+
   it('T53: global wildcard matchea todo', () => {
     const perms = ['*'];
     expect(matchPermission(perms, 'users:delete')).toBe(true);
