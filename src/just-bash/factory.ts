@@ -5,8 +5,18 @@
  * Tries just-bash first (sandboxed), falls back to native (child_process).
  */
 
+import { createRequire } from 'node:module';
 import type { ShellAdapter, ShellAdapterConfig } from './types.js';
 import { JustBashShellAdapter, NativeShellAdapter } from './adapter.js';
+
+// This package builds to ESM only (tsup.config.ts: format: ['esm']). The bare
+// `require` identifier doesn't exist at runtime in ESM, and bundlers rewrite a
+// literal `require(...)` call into a shim that unconditionally throws ("Dynamic
+// require of X is not supported") regardless of whether the package is actually
+// installed — silently making the just-bash sandbox backend unreachable and
+// forcing every caller onto NativeShellAdapter (real child_process/fs) without
+// any indication. `createRequire` gives a real, working CJS require in ESM.
+const require = createRequire(import.meta.url);
 
 /** Check if just-bash is available as a peer dependency. */
 export function isJustBashAvailable(): boolean {
@@ -67,11 +77,14 @@ export function createShellAdapter(config?: ShellAdapterConfig): ShellAdapter {
   if (Bash) {
     try {
       return new JustBashShellAdapter(createBashInstance(Bash, config));
-    } catch {
+    } catch (err) {
       // just-bash available but failed to init — fallback
+      warnFallback(`failed to initialize: ${(err as Error)?.message ?? err}`);
+      return new NativeShellAdapter();
     }
   }
 
+  warnFallback('package not installed');
   return new NativeShellAdapter();
 }
 
@@ -81,6 +94,16 @@ function loadJustBash(): any {
   } catch {
     return null;
   }
+}
+
+/**
+ * Logs which shell backend ended up active. `auto` silently degrading from
+ * sandboxed to real-process execution is exactly the failure mode this
+ * module exists to prevent — surface it instead of staying quiet.
+ */
+function warnFallback(reason: string): void {
+  // eslint-disable-next-line no-console
+  console.error(`[agent-shell] just-bash sandbox not available (${reason}); shell:exec will run against the real OS via child_process.`);
 }
 
 function createBashInstance(BashClass: any, config?: ShellAdapterConfig): any {
