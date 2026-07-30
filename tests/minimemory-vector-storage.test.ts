@@ -847,6 +847,31 @@ describe('MiniMemoryVectorStorage', () => {
       expect(results[0].metadata.parameters).toEqual(['--name', '--email']);
       expect(results[0].metadata.tags).toEqual(['users', 'admin']);
     });
+
+    /**
+     * Regresion: si parameters/tags no eran ni string ni array (p.ej. el
+     * binding devuelve algo inesperado, o JSON.parse produce un objeto no-
+     * array), se devolvian tal cual sin garantizar el tipo string[] que
+     * CommandMetadata declara.
+     */
+    it('T24c: parameters/tags no-array se normalizan a array vacio, no pasan tal cual', async () => {
+      getDb().search.mockReturnValueOnce([
+        {
+          id: 'cmd:weird',
+          distance: 0.1,
+          metadata: {
+            namespace: 'users',
+            parameters: 42,
+            tags: '{"not":"an-array"}',
+          },
+        },
+      ]);
+
+      const results = await storage.search({ vector: createVector(768), topK: 5 });
+
+      expect(results[0].metadata.parameters).toEqual([]);
+      expect(results[0].metadata.tags).toEqual([]);
+    });
   });
 
   // ----------------------------------------------------------

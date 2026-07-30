@@ -71,7 +71,11 @@ export function loadMinimemory(): MiniMemoryBinding | null {
  */
 export async function createVectorStorage(options: StorageFactoryOptions): Promise<StorageFactoryResult> {
   const { dimensions, prefer = 'auto', minimemory: mmConfig } = options;
-  const available = isMinimemoryAvailable();
+  // Single require('minimemory') for this whole call, reused below instead
+  // of probing with isMinimemoryAvailable() and then having
+  // MiniMemoryVectorStorage's constructor require() it again internally.
+  const binding = loadMinimemory();
+  const available = binding !== null;
 
   // Force memory backend
   if (prefer === 'memory') {
@@ -84,7 +88,7 @@ export async function createVectorStorage(options: StorageFactoryOptions): Promi
 
   // Force minimemory backend (throw if not available)
   if (prefer === 'minimemory') {
-    if (!available) {
+    if (!binding) {
       throw new Error(
         'minimemory backend requested but not available. ' +
         'Install with: npm install minimemory'
@@ -105,7 +109,7 @@ export async function createVectorStorage(options: StorageFactoryOptions): Promi
           hnswEfConstruction: mmConfig?.hnswEfConstruction,
           quantization: mmConfig?.quantization,
           persistPath: mmConfig?.persistPath,
-        }),
+        }, binding),
         backend: 'minimemory',
         minimemoryAvailable: true,
       };
@@ -118,7 +122,7 @@ export async function createVectorStorage(options: StorageFactoryOptions): Promi
   }
 
   // Auto: try minimemory first, fallback to memory
-  if (available) {
+  if (binding) {
     try {
       const storage = new MiniMemoryVectorStorage({
         dimensions,
@@ -128,7 +132,7 @@ export async function createVectorStorage(options: StorageFactoryOptions): Promi
         hnswEfConstruction: mmConfig?.hnswEfConstruction,
         quantization: mmConfig?.quantization,
         persistPath: mmConfig?.persistPath,
-      });
+      }, binding);
       return {
         storage,
         backend: 'minimemory',

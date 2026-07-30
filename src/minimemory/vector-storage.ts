@@ -272,9 +272,27 @@ export class MiniMemoryVectorStorage implements VectorStorageAdapter {
   private deserializeMetadata(raw: Record<string, unknown>): Record<string, unknown> {
     return {
       ...raw,
-      parameters: typeof raw.parameters === 'string' ? JSON.parse(raw.parameters) : (raw.parameters || []),
-      tags: typeof raw.tags === 'string' ? JSON.parse(raw.tags) : (raw.tags || []),
+      parameters: this.normalizeToArray(raw.parameters),
+      tags: this.normalizeToArray(raw.tags),
     };
+  }
+
+  /**
+   * CommandMetadata.parameters/tags are typed string[]. If the binding ever
+   * returns something other than our own JSON-string encoding or a real
+   * array (e.g. a single non-array value), passing it through unchanged
+   * would violate that type downstream instead of failing here.
+   */
+  private normalizeToArray(value: unknown): unknown[] {
+    if (typeof value === 'string') {
+      try {
+        const parsed = JSON.parse(value);
+        return Array.isArray(parsed) ? parsed : [];
+      } catch {
+        return [];
+      }
+    }
+    return Array.isArray(value) ? value : [];
   }
 
   private autoPersist(): void {
