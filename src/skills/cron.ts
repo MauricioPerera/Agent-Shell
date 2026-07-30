@@ -141,7 +141,12 @@ const historyDef = command('cron', 'history').version('1.0.0')
   .optionalParam('name', 'string', '')
   .example('cron:history --name backup').tags('cron', 'read').build();
 
-scheduleDef.requiredPermissions = ['cron:write'];
+// Also requires shell:exec: executeTask() runs task.command through the same
+// ShellAdapter.exec() sink shell:exec uses, on a timer outside the normal
+// request pipeline. Without this, a role granted cron:write but deliberately
+// NOT shell:exec (e.g. "can manage schedules but not run ad-hoc commands")
+// gets arbitrary command execution anyway via cron:schedule.
+scheduleDef.requiredPermissions = ['cron:write', 'shell:exec'];
 listDef.requiredPermissions = ['cron:read'];
 cancelDef.requiredPermissions = ['cron:write'];
 historyDef.requiredPermissions = ['cron:read'];
