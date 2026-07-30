@@ -5,6 +5,7 @@
  */
 
 import { command } from '../command-builder/index.js';
+import { NativeShellAdapter } from '../just-bash/adapter.js';
 import type { ShellAdapter } from '../just-bash/types.js';
 import type { SkillEntry } from './scaffold.js';
 
@@ -66,15 +67,12 @@ export function createShellCommands(adapter: ShellAdapter): SkillEntry[] {
   ];
 }
 
-// Legacy export for backward compatibility (uses NativeShellAdapter inline)
-export const shellCommands: SkillEntry[] = createShellCommands(
-  // Lazy-init native adapter to avoid import issues at module load time
-  new Proxy({} as ShellAdapter, {
-    get(_, prop) {
-      // Deferred init: create real NativeShellAdapter on first use
-      const { NativeShellAdapter } = require('../just-bash/adapter.js');
-      const real = new NativeShellAdapter();
-      return (real as any)[prop].bind(real);
-    },
-  })
-);
+// Legacy export for backward compatibility (uses NativeShellAdapter inline).
+// Previously lazy-loaded NativeShellAdapter via a bare require() inside a
+// Proxy to "avoid import issues at module load time" — but it's a sibling
+// module within this same package (not an external npm dependency), so
+// there's nothing to lazily resolve: a normal static import already works,
+// and the bare require() broke entirely under this package's ESM-only
+// build (bundling inlines the target file, so the relative path require()
+// tried to resolve at runtime no longer exists on disk as a separate file).
+export const shellCommands: SkillEntry[] = createShellCommands(new NativeShellAdapter());

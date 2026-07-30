@@ -5,6 +5,7 @@
 
 import { command } from '../command-builder/index.js';
 import { resolve, sep } from 'node:path';
+import { NativeShellAdapter } from '../just-bash/adapter.js';
 import type { ShellAdapter } from '../just-bash/types.js';
 import type { SkillEntry } from './scaffold.js';
 
@@ -209,13 +210,9 @@ export function createFileCommands(adapter: ShellAdapter, jailRoot?: string): Sk
   ];
 }
 
-// Legacy export for backward compatibility
-export const fileCommands: SkillEntry[] = createFileCommands(
-  new Proxy({} as ShellAdapter, {
-    get(_, prop) {
-      const { NativeShellAdapter } = require('../just-bash/adapter.js');
-      const real = new NativeShellAdapter();
-      return (real as any)[prop].bind(real);
-    },
-  })
-);
+// Legacy export for backward compatibility. Previously lazy-loaded
+// NativeShellAdapter via a bare require() inside a Proxy — see
+// shell-exec.ts's shellCommands for why that's both unnecessary (it's a
+// sibling module, not an external dependency) and broken under this
+// package's ESM-only build.
+export const fileCommands: SkillEntry[] = createFileCommands(new NativeShellAdapter());
