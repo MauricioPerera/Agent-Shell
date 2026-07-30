@@ -129,8 +129,12 @@ export function parse(input: string): ParseResult | ParseError {
     }
   }
 
-  // Detect type and dispatch
-  if (trimmed.startsWith('batch [') || trimmed === 'batch []') {
+  // Detect type and dispatch. `\s*` between "batch" and "[" accepts the
+  // documented "batch [...]" form and also "batch[...]" (no space) — the
+  // grammar doesn't actually require the space, but the old exact-prefix
+  // check did, so "batch[a:b]" fell through to parseSingle and failed with
+  // a confusing E_INVALID_NAMESPACE instead of being parsed as a batch.
+  if (/^batch\s*\[/.test(trimmed)) {
     return parseBatch(trimmed, input);
   }
 
@@ -201,8 +205,9 @@ function parseBatch(trimmed: string, raw: string): ParseResult | ParseError {
     const segTrimmed = segment.trim();
     if (segTrimmed.length === 0) continue;
 
-    // Prevent nested batch
-    if (segTrimmed.startsWith('batch [') || segTrimmed === 'batch []') {
+    // Prevent nested batch (same "batch[" without a space also counts, see
+    // the top-level batch detection above for why).
+    if (/^batch\s*\[/.test(segTrimmed)) {
       return nestedBatchError(raw);
     }
 

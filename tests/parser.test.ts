@@ -427,6 +427,28 @@ describe('Parser', () => {
       expect(result.commands[0].args.named).toEqual({ id: '1' });
       expect(result.commands[1].args.named).toEqual({ id: '2' });
     });
+
+    /**
+     * Regresion: la deteccion de batch exigia literalmente "batch " + "["
+     * (con espacio). "batch[a:b]" sin espacio caia a parseSingle y fallaba
+     * con E_INVALID_NAMESPACE en vez de parsearse como batch.
+     */
+    it('T14b: "batch[" sin espacio se reconoce como batch igual', () => {
+      const result = parse('batch[users:count, orders:count]');
+
+      expect(isParseResult(result)).toBe(true);
+      if (!isParseResult(result)) return;
+      expect(result.type).toBe('batch');
+      expect(result.commands).toHaveLength(2);
+    });
+
+    it('T14c: batch anidado sin espacio ("batch[" adentro) se rechaza igual que con espacio', () => {
+      const result = parse('batch [users:count, batch[a:b]]');
+
+      expect(isParseResult(result)).toBe(false);
+      if (isParseResult(result)) return;
+      expect(result.errorType).toBe('E_NESTED_BATCH');
+    });
   });
 
   // ----------------------------------------------------------
