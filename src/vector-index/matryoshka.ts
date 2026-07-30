@@ -100,7 +100,7 @@ function funnelSearch(
     if (options?.namespace && entry.metadata.namespace !== options.namespace) continue;
     if (options?.tags && options.tags.length > 0) {
       const entryTags = entry.metadata.tags || [];
-      if (!options.tags.every(t => entryTags.includes(t))) continue;
+      if (!options.tags.some(t => entryTags.includes(t))) continue;
     }
     if (options?.excludeIds && options.excludeIds.includes(id)) continue;
 

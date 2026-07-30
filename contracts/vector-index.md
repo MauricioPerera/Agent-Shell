@@ -826,7 +826,7 @@ OpenAI Cohere  LocalModel   Qdrant pgvector    InMemory
 
 ### Implementado (v1.1)
 - SearchResultItem.example ahora usa metadata.example del comando
-- Filtros por tags (every match) y excludeIds (skip) en search
+- Filtros por tags (some match — OR logic, consistente con el contrato de minimemory-vector-storage y con los storage adapters) y excludeIds (skip) en search
 - Campos batchSize e indexableFields en VectorIndexConfig
 - Error codes tipados E001-E010 con clase VectorIndexError
 - Circuit breaker (5 fallas → open, 30s cooldown → half-open, 3 exitos → closed)
