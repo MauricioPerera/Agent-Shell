@@ -12,12 +12,12 @@ import type { SecretPattern } from './types.js';
 export const DEFAULT_SECRET_PATTERNS: SecretPattern[] = [
   {
     name: 'api-key-generic',
-    pattern: /(?:api[_-]?key|apikey)\s*[:=]\s*['"]?([a-zA-Z0-9_\-]{20,})['"]?/gi,
+    pattern: /(?:api[_-]?key|apikey)\s*[:=]\s*['"]?([a-zA-Z0-9_\-+/=]{20,})['"]?/gi,
     replacement: '[REDACTED:api-key]',
   },
   {
     name: 'bearer-token',
-    pattern: /Bearer\s+[a-zA-Z0-9_\-\.]{20,}/gi,
+    pattern: /Bearer\s+[a-zA-Z0-9_\-.+/=]{20,}/gi,
     replacement: 'Bearer [REDACTED]',
   },
   {
@@ -37,7 +37,7 @@ export const DEFAULT_SECRET_PATTERNS: SecretPattern[] = [
   },
   {
     name: 'private-key',
-    pattern: /-----BEGIN\s+(?:RSA\s+)?PRIVATE\s+KEY-----/g,
+    pattern: /-----BEGIN\s+(?:RSA|EC|DSA|OPENSSH|ENCRYPTED)?\s*PRIVATE\s+KEY-----(?:[\s\S]+?-----END\s+(?:RSA|EC|DSA|OPENSSH|ENCRYPTED)?\s*PRIVATE\s+KEY-----)?/g,
     replacement: '[REDACTED:private-key]',
   },
   {
