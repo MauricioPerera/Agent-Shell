@@ -635,11 +635,14 @@ function extractFlagsAndArgs(
           return invalidFlagValueError('limit', '', token.position + token.value.length, raw);
         }
         const limitValue = tokens[i].value;
-        const num = parseInt(limitValue, 10);
-        if (isNaN(num) || String(num) !== limitValue) {
+        // Grammar (contracts/parser.md): <integer> ::= [0-9]+ — digits only,
+        // no sign. The previous `String(parseInt(v)) !== v` check accepted
+        // "-5" (parseInt allows a leading sign the grammar doesn't) and
+        // rejected legitimate leading-zero integers like "007".
+        if (!/^[0-9]+$/.test(limitValue)) {
           return invalidFlagValueError('limit', limitValue, tokens[i].position, raw);
         }
-        flags.limit = num;
+        flags.limit = parseInt(limitValue, 10);
         i++;
         continue;
       }
@@ -649,11 +652,11 @@ function extractFlagsAndArgs(
           return invalidFlagValueError('offset', '', token.position + token.value.length, raw);
         }
         const offsetValue = tokens[i].value;
-        const num = parseInt(offsetValue, 10);
-        if (isNaN(num) || String(num) !== offsetValue) {
+        // Same grammar fix as --limit above: [0-9]+ only.
+        if (!/^[0-9]+$/.test(offsetValue)) {
           return invalidFlagValueError('offset', offsetValue, tokens[i].position, raw);
         }
-        flags.offset = num;
+        flags.offset = parseInt(offsetValue, 10);
         i++;
         continue;
       }

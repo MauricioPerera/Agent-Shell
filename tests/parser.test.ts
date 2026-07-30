@@ -188,6 +188,34 @@ describe('Parser', () => {
     });
 
     /**
+     * Regresion: la validacion de --limit/--offset usaba
+     * `String(parseInt(v)) !== v`, que (a) aceptaba signo negativo
+     * (parseInt("-5")=-5, String(-5)==="-5") pese a que la gramatica del
+     * contrato es `<integer> ::= [0-9]+` (sin signo), y (b) rechazaba
+     * enteros validos con ceros a la izquierda como "007".
+     */
+    it('T07b: --limit negativo es rechazado (la gramatica no admite signo)', () => {
+      const result = parse('users:list --limit -5');
+      expect(isParseResult(result)).toBe(false);
+      if (isParseResult(result)) return;
+      expect(result.errorType).toBe('E_INVALID_FLAG_VALUE');
+    });
+
+    it('T07c: --offset negativo es rechazado', () => {
+      const result = parse('users:list --offset -1');
+      expect(isParseResult(result)).toBe(false);
+      if (isParseResult(result)) return;
+      expect(result.errorType).toBe('E_INVALID_FLAG_VALUE');
+    });
+
+    it('T07d: --limit con ceros a la izquierda ("007") es aceptado', () => {
+      const result = parse('users:list --limit 007');
+      expect(isParseResult(result)).toBe(true);
+      if (!isParseResult(result)) return;
+      expect(result.commands[0].flags.limit).toBe(7);
+    });
+
+    /**
      * @test T17 - Multiples flags globales combinadas
      * @requirement F02 - Combinacion de flags
      * @priority Media
