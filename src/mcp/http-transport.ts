@@ -165,7 +165,7 @@ export class HttpSseTransport {
 
     // Handle CORS preflight
     if (method === 'OPTIONS') {
-      this.handleCorsPreFlight(res);
+      this.handleCorsPreFlight(req, res);
       return;
     }
 
@@ -363,14 +363,29 @@ export class HttpSseTransport {
     this.sendJson(res, 200, health);
   }
 
-  private handleCorsPreFlight(res: ServerResponse): void {
-    if (!this.corsOrigin) {
+  /**
+   * With an array corsOrigin, resolves which origin (if any) to echo back
+   * for THIS request — matching applyCorsHeaders' logic. Used to fix
+   * handleCorsPreFlight always answering with corsOrigin[0] regardless of
+   * the requester's actual Origin, which broke legitimate multi-origin
+   * configs (an allowed 2nd/3rd origin's preflight got the 1st origin's
+   * value back, which browsers then reject as a mismatch).
+   */
+  private resolveAllowedOrigin(req: IncomingMessage): string | null {
+    if (!this.corsOrigin) return null;
+    if (!Array.isArray(this.corsOrigin)) return this.corsOrigin;
+    const requestOrigin = req.headers['origin'] || '';
+    return this.corsOrigin.includes(requestOrigin) ? requestOrigin : null;
+  }
+
+  private handleCorsPreFlight(req: IncomingMessage, res: ServerResponse): void {
+    const origin = this.resolveAllowedOrigin(req);
+    if (!origin) {
       res.writeHead(204);
       res.end();
       return;
     }
 
-    const origin = Array.isArray(this.corsOrigin) ? this.corsOrigin[0] : this.corsOrigin;
     res.writeHead(204, {
       'Access-Control-Allow-Origin': origin,
       'Access-Control-Allow-Methods': 'POST, GET, OPTIONS',
@@ -381,16 +396,9 @@ export class HttpSseTransport {
   }
 
   private applyCorsHeaders(req: IncomingMessage, res: ServerResponse): void {
-    if (!this.corsOrigin) return;
-
-    const requestOrigin = req.headers['origin'] || '';
-
-    if (Array.isArray(this.corsOrigin)) {
-      if (this.corsOrigin.includes(requestOrigin)) {
-        res.setHeader('Access-Control-Allow-Origin', requestOrigin);
-      }
-    } else {
-      res.setHeader('Access-Control-Allow-Origin', this.corsOrigin);
+    const origin = this.resolveAllowedOrigin(req);
+    if (origin) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
     }
   }
 

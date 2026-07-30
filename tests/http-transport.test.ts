@@ -615,6 +615,37 @@ describe('HttpSseTransport', () => {
       expect(status).toBe(204);
       expect(headers['access-control-allow-origin']).toBeUndefined();
     });
+
+    /**
+     * Regresion: con corsOrigin array, el preflight (OPTIONS) siempre
+     * respondia con corsOrigin[0] sin importar el Origin real de la
+     * request — a diferencia de applyCorsHeaders (usado en requests no-
+     * preflight), que si comparaba contra el header Origin real. Rompia
+     * el segundo/tercer origen de una config multi-origen legitima: el
+     * navegador rechaza la respuesta porque el Origin devuelto no coincide
+     * con el que mando.
+     */
+    it('T28b: OPTIONS con corsOrigin array responde con el Origin real de la request, no siempre el primero', async () => {
+      transport = new HttpSseTransport({ port: 0, corsOrigin: ['http://localhost:5173', 'http://example.com'] });
+      transport.onMessage(createMockHandler());
+      await transport.start();
+
+      // El SEGUNDO origen configurado hace el preflight — antes del fix
+      // habria recibido 'http://localhost:5173' (el primero) en la respuesta.
+      const { status, headers } = await httpOptions(transport.port, '/rpc', 'http://example.com');
+      expect(status).toBe(204);
+      expect(headers['access-control-allow-origin']).toBe('http://example.com');
+    });
+
+    it('T28c: OPTIONS con corsOrigin array y Origin no permitido no incluye el header', async () => {
+      transport = new HttpSseTransport({ port: 0, corsOrigin: ['http://localhost:5173', 'http://example.com'] });
+      transport.onMessage(createMockHandler());
+      await transport.start();
+
+      const { status, headers } = await httpOptions(transport.port, '/rpc', 'http://evil.example');
+      expect(status).toBe(204);
+      expect(headers['access-control-allow-origin']).toBeUndefined();
+    });
   });
 
   describe('Integration with McpServer', () => {
