@@ -25,6 +25,13 @@ import type {
   MiniMemoryVectorDB,
 } from './types.js';
 
+import { createRequire } from 'node:module';
+
+// Same ESM/require caveat as factory.ts: a bare `require(...)` call gets
+// rewritten by the bundler into a shim that always throws under ESM,
+// regardless of whether `minimemory` is installed. createRequire is the fix.
+const require = createRequire(import.meta.url);
+
 export class MiniMemoryVectorStorage implements VectorStorageAdapter {
   private db: MiniMemoryVectorDB;
   private config: MiniMemoryVectorStorageConfig;
@@ -80,10 +87,16 @@ export class MiniMemoryVectorStorage implements VectorStorageAdapter {
       // Dynamic require for the native binding
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       return require('minimemory') as MiniMemoryBinding;
-    } catch {
+    } catch (err) {
+      // Preserve the real cause: "module not found" (not installed) and
+      // "found but failed to load" (native addon ABI/platform mismatch,
+      // permission denied) look identical without it, and only the first
+      // one is actually fixed by "npm install minimemory".
       throw new Error(
-        'minimemory binding not available. Install with: npm install minimemory ' +
-        '(or build from source: https://github.com/MauricioPerera/minimemory)'
+        `minimemory binding not available: ${(err as Error)?.message ?? err}. ` +
+        'Install with: npm install minimemory ' +
+        '(or build from source: https://github.com/MauricioPerera/minimemory)',
+        { cause: err }
       );
     }
   }
@@ -161,10 +174,14 @@ export class MiniMemoryVectorStorage implements VectorStorageAdapter {
     const results: VectorSearchResult[] = [];
 
     for (const raw of rawResults) {
-      // Convert distance to similarity score (minimemory returns distance)
-      const score = 1 - (raw.distance || 0);
+      // Convert distance to similarity score (minimemory returns distance).
+      // Clamped to [0,1]: the contract documents scores in that range, which
+      // only holds unconditionally for cosine distance (bounded [0,2]) —
+      // dot_product/euclidean distance isn't bounded the same way and can
+      // otherwise push the raw "1 - distance" outside [0,1].
+      const score = Math.max(0, Math.min(1, 1 - (raw.distance || 0)));
 
-      if (query.threshold && score < query.threshold) {
+      if (query.threshold !== undefined && score < query.threshold) {
         continue;
       }
 

@@ -7,9 +7,20 @@
  * while gracefully degrading to brute-force in-memory when it's not.
  */
 
+import { createRequire } from 'node:module';
 import type { VectorStorageAdapter, CommandMetadata, VectorSearchResult } from '../vector-index/types.js';
 import type { StorageFactoryOptions, StorageFactoryResult, MiniMemoryBinding } from './types.js';
 import { MiniMemoryVectorStorage } from './vector-storage.js';
+
+// This package builds to ESM only (tsup.config.ts: format: ['esm']). The bare
+// `require` identifier doesn't exist at runtime in ESM, and bundlers rewrite a
+// literal `require(...)` call into a shim that unconditionally throws ("Dynamic
+// require of X is not supported") regardless of whether the package is
+// actually installed — silently making isMinimemoryAvailable()/loadMinimemory()
+// always report "not available" and forcing every caller onto the slower
+// in-memory brute-force fallback (same class of bug as just-bash/factory.ts).
+// createRequire gives a real, working CJS require in ESM.
+const require = createRequire(import.meta.url);
 
 /** Check if minimemory binding is available */
 export function isMinimemoryAvailable(): boolean {
@@ -79,19 +90,31 @@ export async function createVectorStorage(options: StorageFactoryOptions): Promi
         'Install with: npm install minimemory'
       );
     }
-    return {
-      storage: new MiniMemoryVectorStorage({
-        dimensions,
-        distance: mmConfig?.distance || 'cosine',
-        indexType: mmConfig?.indexType || 'hnsw',
-        hnswM: mmConfig?.hnswM,
-        hnswEfConstruction: mmConfig?.hnswEfConstruction,
-        quantization: mmConfig?.quantization,
-        persistPath: mmConfig?.persistPath,
-      }),
-      backend: 'minimemory',
-      minimemoryAvailable: true,
-    };
+    // Unlike 'auto' below, prefer:'minimemory' is an explicit request for
+    // this backend, so a construction failure should surface (not silently
+    // fall back to memory) — but with a clear, actionable message instead
+    // of whatever internal error the binding happened to throw (e.g. a raw
+    // native-addon stack trace for an ABI/platform mismatch).
+    try {
+      return {
+        storage: new MiniMemoryVectorStorage({
+          dimensions,
+          distance: mmConfig?.distance || 'cosine',
+          indexType: mmConfig?.indexType || 'hnsw',
+          hnswM: mmConfig?.hnswM,
+          hnswEfConstruction: mmConfig?.hnswEfConstruction,
+          quantization: mmConfig?.quantization,
+          persistPath: mmConfig?.persistPath,
+        }),
+        backend: 'minimemory',
+        minimemoryAvailable: true,
+      };
+    } catch (err) {
+      throw new Error(
+        `minimemory backend requested but failed to initialize: ${(err as Error)?.message ?? err}`,
+        { cause: err }
+      );
+    }
   }
 
   // Auto: try minimemory first, fallback to memory
@@ -168,7 +191,7 @@ function createInMemoryStorage(): VectorStorageAdapter {
 
         const score = cosineSimilarity(query.vector, entry.vector);
 
-        if (query.threshold && score < query.threshold) {
+        if (query.threshold !== undefined && score < query.threshold) {
           continue;
         }
 

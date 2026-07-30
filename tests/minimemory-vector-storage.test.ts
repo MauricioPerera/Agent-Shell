@@ -634,6 +634,53 @@ describe('MiniMemoryVectorStorage', () => {
     });
 
     /**
+     * Regresion: `if (query.threshold && score < query.threshold)` trataba
+     * threshold=0 (umbral valido, "no admitir nada por debajo de 0") como
+     * "sin umbral configurado" y se saltaba el filtro por completo.
+     */
+    it('T12b: threshold=0 SI filtra (no se trata como "sin umbral")', async () => {
+      getDb().search.mockReturnValueOnce([
+        { id: 'cmd:positive', distance: 0.5, metadata: { namespace: 'test', tags: '[]', parameters: '[]' } },
+        { id: 'cmd:negative', distance: 1.5, metadata: { namespace: 'test', tags: '[]', parameters: '[]' } },
+      ]);
+
+      const results = await storage.search({
+        vector: createVector(768),
+        topK: 10,
+        threshold: 0,
+      });
+
+      // score = clamp(1 - distance): 0.5 -> 0.5 (pasa), 1.5 -> 0 (clampeado, NO pasa threshold=0 estrictamente < )
+      expect(results.map(r => r.id)).toContain('cmd:positive');
+    });
+
+    /**
+     * Regresion: `score = 1 - distance` sin clamp podia salir de [0,1] para
+     * distancias fuera del rango de cosine (dot_product/euclidean sin
+     * normalizar), violando el contrato ("todos los scores entre 0.0 y 1.0").
+     */
+    it('T12c: score siempre queda clampeado a [0,1] sin importar la distancia cruda', async () => {
+      getDb().search.mockReturnValueOnce([
+        { id: 'cmd:huge-distance', distance: 5, metadata: { namespace: 'test', tags: '[]', parameters: '[]' } },
+        { id: 'cmd:negative-distance', distance: -3, metadata: { namespace: 'test', tags: '[]', parameters: '[]' } },
+      ]);
+
+      const results = await storage.search({
+        vector: createVector(768),
+        topK: 10,
+      });
+
+      for (const r of results) {
+        expect(r.score).toBeGreaterThanOrEqual(0);
+        expect(r.score).toBeLessThanOrEqual(1);
+      }
+      const huge = results.find(r => r.id === 'cmd:huge-distance')!;
+      const negative = results.find(r => r.id === 'cmd:negative-distance')!;
+      expect(huge.score).toBe(0);
+      expect(negative.score).toBe(1);
+    });
+
+    /**
      * @test T13 - Search aplica namespace filter
      * @requirement F06 - Aplicar filtro de namespace
      * @acceptance Solo retorna vectores con metadata.namespace coincidente

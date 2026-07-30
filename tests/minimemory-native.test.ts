@@ -313,6 +313,33 @@ describe('minimemory native integration', () => {
       // Should be filtered out due to low similarity
       expect(results.length).toBe(0);
     });
+
+    /**
+     * Regresion: threshold=0 (umbral valido) se trataba como "sin umbral"
+     * por un chequeo truthy (`query.threshold && ...`) en el fallback
+     * in-memory de factory.ts, igual que en MiniMemoryVectorStorage.
+     */
+    it('T12b: threshold=0 filtra resultados con score negativo/cero, no se ignora', async () => {
+      const { createVectorStorage } = await import('../src/minimemory/factory.js');
+
+      const { storage } = await createVectorStorage({ dimensions: 3, prefer: 'memory' });
+
+      await storage.upsert({
+        id: 'opposite',
+        vector: [-1, 0, 0],
+        metadata: { namespace: 'test', command: 'cmd', description: 'desc', signature: '', parameters: [], tags: [], indexedAt: '', version: '1.0.0' },
+      });
+
+      // Cosine similarity entre [1,0,0] y [-1,0,0] es -1 (< threshold 0)
+      const results = await storage.search({ vector: [1, 0, 0], topK: 10, threshold: 0 });
+      expect(results.length).toBe(0);
+    });
+
+    // NOTA: prefer='minimemory' con fallo de CONSTRUCCION (binding presente
+    // pero roto) no es testeable aca: require('minimemory') dentro de
+    // factory.ts no resuelve al alias de vitest.config.ts (isMinimemoryAvailable()
+    // siempre da false bajo este harness, por eso T09-T12 fuerzan prefer='memory').
+    // Verificado en cambio contra dist/ real con node -e (ver sesion).
   });
 
   describe('isMinimemoryAvailable', () => {
