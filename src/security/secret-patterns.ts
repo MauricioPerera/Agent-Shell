@@ -114,14 +114,17 @@ export function isSensitiveEnvKey(key: string): boolean {
 
 /**
  * Filtra un objeto de variables de entorno, quitando las que matchean un
- * nombre sensible. Usado para no heredar credenciales del proceso host hacia
- * un child process que un agente puede invocar (shell:exec).
+ * nombre sensible O cuyo VALOR contiene un secreto (misma logica de dos
+ * capas que env:get/env:list en shell-env.ts — un nombre "inocente" como
+ * DATABASE_URL o SENTRY_DSN puede llevar una credencial embebida en el
+ * valor). Usado para no heredar credenciales del proceso host hacia un
+ * child process que un agente puede invocar (shell:exec).
  */
 export function filterSensitiveEnv(env: NodeJS.ProcessEnv): Record<string, string> {
   const filtered: Record<string, string> = {};
   for (const [key, value] of Object.entries(env)) {
     if (value === undefined) continue;
-    if (isSensitiveEnvKey(key)) continue;
+    if (isSensitiveEnvKey(key) || containsSecret(value)) continue;
     filtered[key] = value;
   }
   return filtered;

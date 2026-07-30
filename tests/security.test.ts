@@ -6,6 +6,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { AuditLogger, maskSecrets, containsSecret, RBAC, matchPermission, matchPermissions, resolvePermission, getMissingPermissions } from '../src/security/index.js';
+import { filterSensitiveEnv } from '../src/security/secret-patterns.js';
 import { EncryptedStorageAdapter } from '../src/context-store/encrypted-storage-adapter.js';
 import { randomBytes } from 'node:crypto';
 import type { StorageAdapter, SessionStore } from '../src/context-store/types.js';
@@ -156,6 +157,36 @@ describe('Secret Detection (containsSecret)', () => {
 
   it('T16: detecta secretos en arrays', () => {
     expect(containsSecret(['normal', 'password=secret123456'])).toBe(true);
+  });
+});
+
+/**
+ * Regresion: filterSensitiveEnv (usado por shell:exec para no heredar el
+ * env del host hacia un child process) solo miraba el NOMBRE de la
+ * variable, nunca el VALOR — una var con nombre inocente como DATABASE_URL
+ * o SENTRY_DSN pero con una credencial embebida en el valor pasaba entera.
+ */
+describe('filterSensitiveEnv', () => {
+  it('T16b: filtra por nombre sensible aunque el valor sea inocente', () => {
+    const filtered = filterSensitiveEnv({ API_KEY: 'whatever', PATH: '/usr/bin' } as any);
+    expect(filtered.API_KEY).toBeUndefined();
+    expect(filtered.PATH).toBe('/usr/bin');
+  });
+
+  it('T16c: filtra por CONTENIDO del valor aunque el nombre sea inocente', () => {
+    const filtered = filterSensitiveEnv({
+      DATABASE_URL: 'postgres://user:hunter2@db.internal:5432/app',
+      SENTRY_DSN: 'https://abc123def456ghi789@o12345.ingest.sentry.io/67890',
+      GREETING: 'hello world',
+    } as any);
+    expect(filtered.DATABASE_URL).toBeUndefined();
+    expect(filtered.SENTRY_DSN).toBeUndefined();
+    expect(filtered.GREETING).toBe('hello world');
+  });
+
+  it('T16d: descarta entradas undefined sin fallar', () => {
+    const filtered = filterSensitiveEnv({ FOO: 'bar', UNSET: undefined } as any);
+    expect(filtered).toEqual({ FOO: 'bar' });
   });
 });
 
