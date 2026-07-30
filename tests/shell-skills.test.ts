@@ -236,6 +236,120 @@ describe('HTTP Skills', () => {
     expect(result.data.status).toBe(200);
     expect(globalThis.fetch).toHaveBeenCalled();
   });
+
+  // -------------------------------------------------------------------------
+  // Redirect SSRF protection tests (HT11+) — a redirect target bypasses
+  // assertUrlSafe() unless each hop is re-validated before being followed.
+  // -------------------------------------------------------------------------
+
+  it('HT11: blocks a redirect to a private/internal address', async () => {
+    globalThis.fetch = vi.fn(async () => ({
+      status: 302,
+      headers: new Headers({ location: 'http://169.254.169.254/latest/meta-data/' }),
+      json: async () => ({}),
+      text: async () => '',
+    })) as any;
+
+    const handler = findHandler(httpCommands, 'http', 'get');
+    const result = await handler({ url: 'https://external.example.com/redirect-me' });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('Blocked');
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('HT12: follows a redirect to a safe address and re-validates it', async () => {
+    let call = 0;
+    globalThis.fetch = vi.fn(async (url: string) => {
+      call++;
+      if (call === 1) {
+        return {
+          status: 302,
+          headers: new Headers({ location: 'https://safe.example.com/final' }),
+          json: async () => ({}),
+          text: async () => '',
+        };
+      }
+      return {
+        status: 200,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => ({ url }),
+        text: async () => JSON.stringify({ url }),
+      };
+    }) as any;
+
+    const handler = findHandler(httpCommands, 'http', 'get');
+    const result = await handler({ url: 'https://external.example.com/redirect-me' });
+
+    expect(result.success).toBe(true);
+    expect(result.data.status).toBe(200);
+    expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+    expect((globalThis.fetch as any).mock.calls[1][0]).toBe('https://safe.example.com/final');
+  });
+
+  it('HT13: blocks a redirect chain exceeding the max hop count', async () => {
+    let call = 0;
+    globalThis.fetch = vi.fn(async () => {
+      call++;
+      return {
+        status: 302,
+        headers: new Headers({ location: `https://external.example.com/hop-${call}` }),
+        json: async () => ({}),
+        text: async () => '',
+      };
+    }) as any;
+
+    const handler = findHandler(httpCommands, 'http', 'get');
+    const result = await handler({ url: 'https://external.example.com/redirect-me' });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('too many redirects');
+  });
+
+  it('HT14: blocks a redirect response with no Location header', async () => {
+    globalThis.fetch = vi.fn(async () => ({
+      status: 302,
+      headers: new Headers({}),
+      json: async () => ({}),
+      text: async () => '',
+    })) as any;
+
+    const handler = findHandler(httpCommands, 'http', 'get');
+    const result = await handler({ url: 'https://external.example.com/redirect-me' });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('Location');
+  });
+
+  it('HT15: 303 downgrades a POST redirect to GET with no body', async () => {
+    let call = 0;
+    globalThis.fetch = vi.fn(async (_url: string, opts?: any) => {
+      call++;
+      if (call === 1) {
+        expect(opts.method).toBe('POST');
+        return {
+          status: 303,
+          headers: new Headers({ location: 'https://safe.example.com/result' }),
+          json: async () => ({}),
+          text: async () => '',
+        };
+      }
+      expect(opts.method).toBe('GET');
+      expect(opts.body).toBeUndefined();
+      return {
+        status: 200,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => ({ ok: true }),
+        text: async () => JSON.stringify({ ok: true }),
+      };
+    }) as any;
+
+    const handler = findHandler(httpCommands, 'http', 'post');
+    const result = await handler({ url: 'https://external.example.com/submit', body: { name: 'test' } });
+
+    expect(result.success).toBe(true);
+    expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+  });
 });
 
 // ===========================================================================

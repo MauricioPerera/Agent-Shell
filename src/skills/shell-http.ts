@@ -193,30 +193,66 @@ async function assertUrlSafe(url: string): Promise<void> {
   }
 }
 
+const MAX_REDIRECTS = 5;
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+
+/**
+ * Fetch follows redirects by default, and a redirect target is not covered by
+ * the assertUrlSafe() call the caller already made on the original URL. An
+ * external server can respond 302 -> http://169.254.169.254/... and bypass
+ * the SSRF guard entirely. Disable automatic following (redirect: 'manual')
+ * and re-validate + re-fetch each hop ourselves, capped at MAX_REDIRECTS.
+ */
 async function doFetch(url: string, method: string, body?: any, headers?: Record<string, string>): Promise<any> {
-  await assertUrlSafe(url);
+  const baseHeaders = headers || {};
+  let currentUrl = url;
+  let currentMethod = method;
+  let currentBody = body;
 
-  const opts: RequestInit = { method, headers: headers || {} };
-  if (body && method !== 'GET' && method !== 'HEAD') {
-    opts.body = typeof body === 'string' ? body : JSON.stringify(body);
-    if (!headers?.['content-type'] && !headers?.['Content-Type']) {
-      (opts.headers as Record<string, string>)['Content-Type'] = 'application/json';
+  for (let redirectCount = 0; ; redirectCount++) {
+    await assertUrlSafe(currentUrl);
+
+    const opts: RequestInit = { method: currentMethod, headers: { ...baseHeaders }, redirect: 'manual' };
+    if (currentBody && currentMethod !== 'GET' && currentMethod !== 'HEAD') {
+      opts.body = typeof currentBody === 'string' ? currentBody : JSON.stringify(currentBody);
+      if (!baseHeaders['content-type'] && !baseHeaders['Content-Type']) {
+        (opts.headers as Record<string, string>)['Content-Type'] = 'application/json';
+      }
     }
+
+    const res = await fetch(currentUrl, opts);
+
+    if (REDIRECT_STATUSES.has(res.status)) {
+      const location = res.headers.get('location');
+      if (!location) {
+        throw new Error(`Blocked: redirect response (${res.status}) without a Location header`);
+      }
+      if (redirectCount >= MAX_REDIRECTS) {
+        throw new Error(`Blocked: too many redirects (max ${MAX_REDIRECTS})`);
+      }
+      currentUrl = new URL(location, currentUrl).toString();
+      // 303 always downgrades to GET with no body; 301/302 downgrade non-GET/HEAD
+      // to GET too (long-standing fetch/browser behavior); 307/308 preserve both.
+      if (res.status === 303 || ((res.status === 301 || res.status === 302) && currentMethod !== 'GET' && currentMethod !== 'HEAD')) {
+        currentMethod = 'GET';
+        currentBody = undefined;
+      }
+      continue;
+    }
+
+    const contentType = res.headers.get('content-type') || '';
+    let resBody: any;
+    try {
+      resBody = contentType.includes('application/json') ? await res.json() : await res.text();
+    } catch {
+      resBody = await res.text();
+    }
+
+    const resHeaders: Record<string, string> = {};
+    res.headers.forEach((v, k) => { resHeaders[k] = v; });
+
+    return { status: res.status, headers: resHeaders, body: resBody };
   }
-
-  const res = await fetch(url, opts);
-  const contentType = res.headers.get('content-type') || '';
-  let resBody: any;
-  try {
-    resBody = contentType.includes('application/json') ? await res.json() : await res.text();
-  } catch {
-    resBody = await res.text();
-  }
-
-  const resHeaders: Record<string, string> = {};
-  res.headers.forEach((v, k) => { resHeaders[k] = v; });
-
-  return { status: res.status, headers: resHeaders, body: resBody };
 }
 
 const getDef = command('http', 'get')
