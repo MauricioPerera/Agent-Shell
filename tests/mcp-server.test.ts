@@ -24,8 +24,8 @@ function createMockCore(overrides: Partial<{ help: Function; exec: Function }> =
 
 // Helper: simulates sending a JSON-RPC message and getting the response
 // by calling the internal handler directly (bypasses stdio transport)
-async function sendMessage(server: any, request: JsonRpcRequest): Promise<JsonRpcResponse | null> {
-  return server.handleMessage(request);
+async function sendMessage(server: any, request: JsonRpcRequest, sessionId?: string): Promise<JsonRpcResponse | null> {
+  return server.handleMessage(request, sessionId);
 }
 
 /** Sends an initialize request to put the server into initialized state. */
@@ -167,7 +167,29 @@ describe('McpServer', () => {
         params: { name: 'cli_exec', arguments: { command: 'search crear usuario' } },
       });
 
-      expect(execSpy).toHaveBeenCalledWith('search crear usuario');
+      expect(execSpy).toHaveBeenCalledWith('search crear usuario', undefined);
+    });
+
+    /**
+     * Regresion: handleMessage() no propagaba ningun sessionId hacia
+     * core.exec() — workspace:* (via WorkspaceSessionStore) depende de que
+     * ese id llegue intacto para aislar el estado entre callers concurrentes
+     * de HttpSseTransport.
+     */
+    it('T08b: propaga el sessionId recibido hasta core.exec()', async () => {
+      const execSpy = vi.fn(async () => ({ code: 0, data: null, error: null, meta: {} }));
+      const spyCore = createMockCore({ exec: execSpy });
+      const spyServer = new McpServer({ core: spyCore });
+      await initializeServer(spyServer);
+
+      await sendMessage(spyServer, {
+        jsonrpc: '2.0',
+        id: 8,
+        method: 'tools/call',
+        params: { name: 'cli_exec', arguments: { command: 'workspace:status' } },
+      }, 'session-abc-123');
+
+      expect(execSpy).toHaveBeenCalledWith('workspace:status', 'session-abc-123');
     });
 
     it('T09: retorna isError=true cuando core responde con code != 0', async () => {

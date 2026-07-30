@@ -284,8 +284,17 @@ export class HttpSseTransport {
         return;
       }
 
+      // Session-scoped state (workspace:* cwd/env/history) is looked up by
+      // this id — a caller that wants persistence across requests must send
+      // the SAME X-Session-Id on each one. Without it, every request gets a
+      // fresh, isolated id: safer than the old implicit-shared-state default
+      // (one Core serving concurrent callers previously mixed everyone's
+      // cwd/env together), at the cost of no persistence for callers that
+      // haven't adopted the header yet.
+      const sessionId = (req.headers['x-session-id'] as string | undefined) || randomUUID();
+
       try {
-        const response = await this.handler(request);
+        const response = await this.handler(request, sessionId);
         if (aborted) return; // timeout already fired
         clearTimeout(timeout);
         if (response) {

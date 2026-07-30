@@ -79,7 +79,7 @@ export interface McpInitializeResult {
 /** Interfaz minima del Core consumida por McpServer. */
 export interface McpCore {
   help(): string;
-  exec(cmd: string): Promise<{ code: number; data: any; error: string | null; meta: any }>;
+  exec(cmd: string, sessionId?: string): Promise<{ code: number; data: any; error: string | null; meta: any }>;
 }
 
 /** Configuracion del MCP Server de Agent Shell. */

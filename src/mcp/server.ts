@@ -86,7 +86,7 @@ export class McpServer {
   }
 
   /** Procesa un mensaje JSON-RPC. Util para custom transports y testing. */
-  async handleMessage(request: JsonRpcRequest): Promise<JsonRpcResponse | null> {
+  async handleMessage(request: JsonRpcRequest, sessionId?: string): Promise<JsonRpcResponse | null> {
     // Notifications (no id) don't get responses
     if (request.id === undefined) {
       return null;
@@ -112,7 +112,7 @@ export class McpServer {
         }
         return request.method === 'tools/list'
           ? this.handleToolsList(request)
-          : this.handleToolsCall(request);
+          : this.handleToolsCall(request, sessionId);
       }
       default:
         return {
@@ -141,7 +141,7 @@ export class McpServer {
     return { jsonrpc: '2.0', id: request.id!, result: { tools: TOOLS } };
   }
 
-  private async handleToolsCall(request: JsonRpcRequest): Promise<JsonRpcResponse> {
+  private async handleToolsCall(request: JsonRpcRequest, sessionId?: string): Promise<JsonRpcResponse> {
     const params = request.params as McpToolCallParams | undefined;
 
     if (!params || !params.name) {
@@ -160,7 +160,7 @@ export class McpServer {
           toolResult = await this.execHelp();
           break;
         case 'cli_exec':
-          toolResult = await this.execCommand(params.arguments);
+          toolResult = await this.execCommand(params.arguments, sessionId);
           break;
         default:
           return {
@@ -186,7 +186,7 @@ export class McpServer {
     };
   }
 
-  private async execCommand(args?: Record<string, any>): Promise<McpToolResult> {
+  private async execCommand(args?: Record<string, any>, sessionId?: string): Promise<McpToolResult> {
     if (!args || typeof args.command !== 'string') {
       return {
         content: [{ type: 'text', text: 'Error: "command" argument is required and must be a string' }],
@@ -194,7 +194,7 @@ export class McpServer {
       };
     }
 
-    const response = await this.core.exec(args.command);
+    const response = await this.core.exec(args.command, sessionId);
     const text = JSON.stringify(response, null, 2);
 
     return {

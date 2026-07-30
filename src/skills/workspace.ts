@@ -41,6 +41,48 @@ export class WorkspaceState {
   }
 }
 
+const DEFAULT_SESSION = '__default__';
+const MAX_SESSIONS = 200;
+
+/**
+ * Bounded per-session store for WorkspaceState, keyed by the sessionId Core
+ * now threads through as the handler's 3rd argument.
+ *
+ * Regresion: this module used to close over ONE shared WorkspaceState for
+ * every workspace:* call in the process — on the HTTP transport, where a
+ * single Core can serve multiple concurrent callers, one caller's cwd/env
+ * mutations (and command history) leaked into every other caller's next
+ * request. Undefined/no sessionId (stdio — one agent per process, no
+ * cross-tenant risk — plus direct library/test callers that predate this
+ * parameter) maps to one shared DEFAULT_SESSION bucket, preserving the
+ * original single-shared-instance behavior exactly. A real sessionId
+ * (HttpSseTransport always supplies one) gets its own isolated instance.
+ */
+class WorkspaceSessionStore {
+  private readonly sessions = new Map<string, WorkspaceState>();
+
+  constructor(seed?: WorkspaceState) {
+    if (seed) this.sessions.set(DEFAULT_SESSION, seed);
+  }
+
+  get(sessionId?: string): WorkspaceState {
+    const key = sessionId || DEFAULT_SESSION;
+    let state = this.sessions.get(key);
+    if (!state) {
+      // Bound the map BEFORE inserting: an attacker cycling X-Session-Id
+      // values shouldn't be able to grow this without limit. Evicts the
+      // oldest entry — Map iteration order is insertion order.
+      if (this.sessions.size >= MAX_SESSIONS) {
+        const oldestKey = this.sessions.keys().next().value;
+        if (oldestKey !== undefined) this.sessions.delete(oldestKey);
+      }
+      state = new WorkspaceState();
+      this.sessions.set(key, state);
+    }
+    return state;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Command Definitions
 // ---------------------------------------------------------------------------
@@ -108,8 +150,15 @@ resetDef.requiredPermissions = ['workspace:write'];
 // ---------------------------------------------------------------------------
 
 /**
- * Creates workspace commands bound to a shared WorkspaceState.
- * The state persists across all workspace:* calls within the same process.
+ * Creates workspace commands bound to a per-session WorkspaceState store.
+ * State persists across workspace:* calls that share the same sessionId
+ * (see WorkspaceSessionStore) — the 3rd handler argument Core now threads
+ * through from the transport layer.
+ *
+ * `state`, when provided, seeds the DEFAULT_SESSION bucket only — the
+ * bucket used by callers that never pass a sessionId at all (stdio, direct
+ * library use, tests calling handlers directly). This keeps that usage
+ * byte-identical to before per-session isolation existed.
  *
  * An optional `jailRoot` may be provided to constrain workspace:init/cd to a
  * single subtree, the same containment createFileCommands() offers for
@@ -118,7 +167,7 @@ resetDef.requiredPermissions = ['workspace:write'];
  * with that unjailed directory as cwd.
  */
 export function createWorkspaceCommands(state?: WorkspaceState, adapter?: ShellAdapter, jailRoot?: string): SkillEntry[] {
-  const ws = state || new WorkspaceState();
+  const store = new WorkspaceSessionStore(state);
   const shellAdapter = adapter || new NativeShellAdapter();
   const assertInsideJail = createPathJail(jailRoot);
   const jailRootAbs = jailRoot ? resolve(jailRoot) : null;
@@ -126,7 +175,8 @@ export function createWorkspaceCommands(state?: WorkspaceState, adapter?: ShellA
   return [
     {
       definition: initDef,
-      handler: async (args: any) => {
+      handler: async (args: any, _previousData?: any, sessionId?: string) => {
+        const ws = store.get(sessionId);
         const path = args.path as string;
         const shouldCreate = args.create === true || args.create === 'true';
         const envVars = typeof args.env === 'string' ? JSON.parse(args.env) : (args.env || {});
@@ -160,7 +210,8 @@ export function createWorkspaceCommands(state?: WorkspaceState, adapter?: ShellA
     },
     {
       definition: runDef,
-      handler: async (args: any) => {
+      handler: async (args: any, _previousData?: any, sessionId?: string) => {
+        const ws = store.get(sessionId);
         const cmd = args.command as string;
         const timeout = args.timeout ?? 120_000;
         const start = Date.now();
@@ -188,7 +239,8 @@ export function createWorkspaceCommands(state?: WorkspaceState, adapter?: ShellA
     },
     {
       definition: envDef,
-      handler: async (args: any) => {
+      handler: async (args: any, _previousData?: any, sessionId?: string) => {
+        const ws = store.get(sessionId);
         // Set
         if (args.set && args.set.includes('=')) {
           const eqIdx = (args.set as string).indexOf('=');
@@ -215,7 +267,8 @@ export function createWorkspaceCommands(state?: WorkspaceState, adapter?: ShellA
     },
     {
       definition: cdDef,
-      handler: async (args: any) => {
+      handler: async (args: any, _previousData?: any, sessionId?: string) => {
+        const ws = store.get(sessionId);
         const target = ws.resolvePath(args.path as string);
         const check = assertInsideJail(target);
         if (!check.ok) return { success: false, data: null, error: check.error };
@@ -236,7 +289,8 @@ export function createWorkspaceCommands(state?: WorkspaceState, adapter?: ShellA
     },
     {
       definition: statusDef,
-      handler: async () => {
+      handler: async (_args?: any, _previousData?: any, sessionId?: string) => {
+        const ws = store.get(sessionId);
         return {
           success: true,
           data: {
@@ -252,7 +306,8 @@ export function createWorkspaceCommands(state?: WorkspaceState, adapter?: ShellA
     },
     {
       definition: resetDef,
-      handler: async () => {
+      handler: async (_args?: any, _previousData?: any, sessionId?: string) => {
+        const ws = store.get(sessionId);
         const previousCwd = ws.cwd;
         // Reset inside the jail when one is configured — resetting to
         // process.cwd() unconditionally could put ws.cwd right back

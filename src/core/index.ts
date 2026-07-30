@@ -163,7 +163,15 @@ class Core {
    * Punto de entrada principal para toda interaccion con el sistema.
    * Nunca lanza excepciones - todo error se envuelve en CoreResponse.
    */
-  async exec(cmd: string): Promise<CoreResponse> {
+  /**
+   * @param sessionId - Scopes per-session skill state (currently just
+   *   workspace:*'s cwd/env/history) to this caller. Undefined means "the
+   *   shared default session" — correct for stdio (one agent per process,
+   *   no cross-tenant risk) and any direct/library caller that predates
+   *   this parameter. HttpSseTransport always supplies one, since it's the
+   *   transport where a single Core can serve multiple concurrent callers.
+   */
+  async exec(cmd: string, sessionId?: string): Promise<CoreResponse> {
     const startTime = Date.now();
     let mode = 'execute';
 
@@ -181,13 +189,13 @@ class Core {
     // Wrap in global timeout
     const globalTimeout = this.config.timeouts?.global_ms ?? 30_000;
     try {
-      return await this.withTimeout(this.execInternal(cmd, startTime), globalTimeout, 'Request');
+      return await this.withTimeout(this.execInternal(cmd, startTime, sessionId), globalTimeout, 'Request');
     } catch (err: any) {
       return this.buildResponse(1, null, err.message || 'Request timed out', cmd.slice(0, 50), mode, startTime);
     }
   }
 
-  private async execInternal(cmd: string, startTime: number): Promise<CoreResponse> {
+  private async execInternal(cmd: string, startTime: number, sessionId?: string): Promise<CoreResponse> {
     let mode = 'execute';
     this.logger.log('INFO', 'core', 'exec', { command: cmd.slice(0, 100) });
 
@@ -213,9 +221,9 @@ class Core {
       let data: any;
 
       if (result.type === 'pipeline') {
-        data = await this.executePipeline(result.commands);
+        data = await this.executePipeline(result.commands, sessionId);
       } else if (result.type === 'batch') {
-        data = await this.executeBatch(result.commands);
+        data = await this.executeBatch(result.commands, sessionId);
         // Batch code: 0 if all succeeded, 1 if any failed
         const batchFailed = data.some((r: any) => r.code !== 0);
         const code = batchFailed ? 1 : 0;
@@ -223,7 +231,7 @@ class Core {
         return this.buildResponse(code, data, null, cmd, mode, startTime);
       } else {
         // Single command
-        data = await this.executeCommand(firstCmd);
+        data = await this.executeCommand(firstCmd, sessionId);
       }
 
       // Handle error responses from executeCommand
@@ -257,7 +265,7 @@ class Core {
 
   // --- Private methods ---
 
-  private async executeCommand(parsed: ParsedCommand): Promise<any> {
+  private async executeCommand(parsed: ParsedCommand, sessionId?: string): Promise<any> {
     const { namespace, command, args, flags } = parsed;
 
     // Builtin commands (namespace is null)
@@ -323,7 +331,7 @@ class Core {
     // convention — on failure, propagate it as the same _error shape the caller
     // (execInternal) already checks for lookup/permission failures, instead of
     // silently discarding `error` and reporting success with null data.
-    const result = await registeredCmd.handler(handlerArgs, null);
+    const result = await registeredCmd.handler(handlerArgs, null, sessionId);
     if (result && typeof result === 'object' && result.success === false) {
       return { _error: { code: 1, error: result.error || `Command failed: ${namespace}:${command}` } };
     }
@@ -446,7 +454,7 @@ class Core {
     return { valid: true, command: `${registeredCmd.namespace}:${registeredCmd.name}` };
   }
 
-  private async executePipeline(commands: ParsedCommand[]): Promise<any> {
+  private async executePipeline(commands: ParsedCommand[], sessionId?: string): Promise<any> {
     const maxDepth = 10;
     if (commands.length > maxDepth) {
       return { _error: { code: 1, error: `Pipeline exceeds maximum depth of ${maxDepth} commands` } };
@@ -483,7 +491,7 @@ class Core {
         });
       }
 
-      const result = await registeredCmd.handler(handlerArgs, previousData);
+      const result = await registeredCmd.handler(handlerArgs, previousData, sessionId);
       if (!result.success) {
         const detail = result.error ? `: ${result.error}` : '';
         return { _error: { code: 1, error: `Pipeline failed at ${namespace}:${command}${detail}` } };
@@ -495,7 +503,7 @@ class Core {
     return previousData;
   }
 
-  private async executeBatch(commands: ParsedCommand[]): Promise<any[]> {
+  private async executeBatch(commands: ParsedCommand[], sessionId?: string): Promise<any[]> {
     const maxBatchSize = 20;
     if (commands.length > maxBatchSize) {
       return [{ code: 1, data: null, error: `Batch exceeds maximum size of ${maxBatchSize} commands` }];
@@ -505,7 +513,7 @@ class Core {
     const results: any[] = [];
     for (const cmd of commands) {
       try {
-        const data = await this.executeCommand(cmd);
+        const data = await this.executeCommand(cmd, sessionId);
         if (data && typeof data === 'object' && '_error' in data) {
           results.push({ code: data._error.code, data: null, error: data._error.error });
         } else {

@@ -253,8 +253,8 @@ async function main() {
     auth: config.auth || undefined,
   });
 
-  transport.onMessage(async (msg) => {
-    const response = await mcpServer.handleMessage(msg);
+  transport.onMessage(async (msg, sessionId) => {
+    const response = await mcpServer.handleMessage(msg, sessionId);
     return response;
   });
 

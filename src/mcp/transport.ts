@@ -8,7 +8,13 @@
 
 import type { JsonRpcRequest, JsonRpcResponse } from './types.js';
 
-export type MessageHandler = (message: JsonRpcRequest) => Promise<JsonRpcResponse | null>;
+/**
+ * sessionId is optional and stdio never provides one (a stdio connection is
+ * inherently single-tenant — one agent, one process, no cross-session risk).
+ * HttpSseTransport is the transport that actually supplies it, since it's
+ * the one where multiple concurrent callers can share a single Core.
+ */
+export type MessageHandler = (message: JsonRpcRequest, sessionId?: string) => Promise<JsonRpcResponse | null>;
 
 /**
  * Transporte stdio para JSON-RPC 2.0.

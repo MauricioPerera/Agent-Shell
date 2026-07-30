@@ -7,7 +7,14 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { request as httpRequest } from 'node:http';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { HttpSseTransport } from '../src/mcp/http-transport.js';
+import { McpServer } from '../src/mcp/server.js';
+import { Core } from '../src/core/index.js';
+import { CommandRegistry } from '../src/command-registry/index.js';
+import { registerShellSkills } from '../src/skills/index.js';
 import type { JsonRpcRequest, JsonRpcResponse } from '../src/mcp/types.js';
 
 // --- Helpers ---
@@ -23,7 +30,7 @@ function createMockHandler(overrides?: Partial<{ response: any; delay: number; t
   };
 }
 
-function rpcRequest(port: number, body: any): Promise<{ status: number; body: any }> {
+function rpcRequest(port: number, body: any, extraHeaders?: Record<string, string>): Promise<{ status: number; body: any }> {
   return new Promise((resolve, reject) => {
     const data = JSON.stringify(body);
     const req = httpRequest(
@@ -35,6 +42,7 @@ function rpcRequest(port: number, body: any): Promise<{ status: number; body: an
         headers: {
           'Content-Type': 'application/json',
           'Content-Length': Buffer.byteLength(data),
+          ...extraHeaders,
         },
       },
       (res) => {
@@ -713,6 +721,61 @@ describe('HttpSseTransport', () => {
       // Clients should be disconnected (response ended)
       c1.close();
       c2.close();
+    });
+
+    /**
+     * Regresion: un solo Core/registry compartido servia TODOS los requests
+     * HTTP concurrentes a traves de la MISMA WorkspaceState — el cwd/env de
+     * un caller se filtraba al siguiente request de cualquier OTRO caller.
+     * Extremo a extremo real: dos "sesiones" (X-Session-Id distintos)
+     * inicializan workspace:* en directorios DIFERENTES; cada una debe ver
+     * solo el suyo. Sin el header, cada request es su propia sesion
+     * aislada (nunca ve el estado de la otra ni persiste entre requests).
+     */
+    it('T30b: workspace:* aisla el cwd por X-Session-Id entre requests HTTP concurrentes', async () => {
+      const registry = new CommandRegistry();
+      registerShellSkills(registry);
+      const core = new Core({ registry });
+      const mcpServer = new McpServer({ core });
+
+      transport = new HttpSseTransport({ port: 0 });
+      transport.onMessage((msg, sessionId) => mcpServer.handleMessage(msg, sessionId));
+      await transport.start();
+
+      await rpcRequest(transport.port, { jsonrpc: '2.0', id: 0, method: 'initialize', params: {} });
+
+      const dirA = mkdtempSync(join(tmpdir(), 'http-session-a-'));
+      const dirB = mkdtempSync(join(tmpdir(), 'http-session-b-'));
+
+      try {
+        const cliExec = (command: string, sessionId?: string) =>
+          rpcRequest(
+            transport.port,
+            { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'cli_exec', arguments: { command } } },
+            sessionId ? { 'X-Session-Id': sessionId } : undefined,
+          );
+
+        await cliExec(`workspace:init --path "${dirA}"`, 'session-A');
+        await cliExec(`workspace:init --path "${dirB}"`, 'session-B');
+
+        const statusA = await cliExec('workspace:status', 'session-A');
+        const dataA = JSON.parse(statusA.body.result.content[0].text);
+        expect(dataA.data.cwd).toBe(dirA);
+
+        const statusB = await cliExec('workspace:status', 'session-B');
+        const dataB = JSON.parse(statusB.body.result.content[0].text);
+        expect(dataB.data.cwd).toBe(dirB);
+
+        // No X-Session-Id at all: each request gets its own fresh, isolated
+        // session — must NOT see either session-A's or session-B's cwd.
+        const statusNoHeader = await cliExec('workspace:status');
+        const dataNoHeader = JSON.parse(statusNoHeader.body.result.content[0].text);
+        expect(dataNoHeader.data.cwd).not.toBe(dirA);
+        expect(dataNoHeader.data.cwd).not.toBe(dirB);
+      } finally {
+        rmSync(dirA, { recursive: true, force: true });
+        rmSync(dirB, { recursive: true, force: true });
+      }
     });
   });
 

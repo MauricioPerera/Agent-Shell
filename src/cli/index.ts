@@ -235,7 +235,7 @@ async function serveHttp(args: string[]): Promise<void> {
     auth: token ? { bearerToken: token } : undefined,
   });
 
-  transport.onMessage(async (msg) => mcpServer.handleMessage(msg));
+  transport.onMessage(async (msg, sessionId) => mcpServer.handleMessage(msg, sessionId));
   await transport.start();
 
   console.log(`Agent Shell v${VERSION}`);
