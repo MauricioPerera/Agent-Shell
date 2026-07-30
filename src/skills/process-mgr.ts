@@ -38,8 +38,12 @@ export class ProcessManager {
       this.processes.delete(name);
     }
 
-    const parts = cmd.split(/\s+/);
-    const proc = spawn(parts[0], parts.slice(1), {
+    // Pass the whole command as a single string with shell:true so the shell
+    // itself parses quoting/args. Splitting on whitespace and passing that as
+    // an args array together with shell:true is the anti-pattern Node flags
+    // via DEP0190: args reach the shell unescaped, and quoted arguments
+    // (e.g. `--name "my app"`) get split apart incorrectly.
+    const proc = spawn(cmd, {
       cwd: cwd || process.cwd(),
       stdio: ['ignore', 'pipe', 'pipe'],
       detached: false,
