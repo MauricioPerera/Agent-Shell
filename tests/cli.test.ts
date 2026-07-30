@@ -14,7 +14,7 @@
  */
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { validateProfile, warnIfUnrestricted, validateConfigFile } from '../src/cli/index.js';
+import { validateProfile, warnIfUnrestricted, validateConfigFile, validatePort } from '../src/cli/index.js';
 
 describe('CLI profile validation', () => {
   afterEach(() => {
@@ -101,5 +101,44 @@ describe('CLI config file validation', () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     expect(validateConfigFile({}, 'x.json')).toEqual({});
     expect(errorSpy).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Regresion: un --port/AGENT_SHELL_PORT no numerico llegaba sin validar a
+ * parseInt(), se volvia NaN, y solo se notaba despues como el error crudo
+ * de Node "options.port should be >= 0 and < 65536" en vez de un mensaje claro.
+ */
+describe('CLI port validation', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('CLI12: validatePort acepta puertos validos', () => {
+    expect(validatePort('3000')).toBe(3000);
+    expect(validatePort('0')).toBe(0);
+    expect(validatePort('65535')).toBe(65535);
+  });
+
+  it('CLI13: validatePort con un valor no numerico loguea y termina el proceso', () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+      throw new Error(`__process_exit_${code}__`);
+    }) as any);
+
+    expect(() => validatePort('abc')).toThrow('__process_exit_1__');
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("Invalid port: 'abc'"));
+  });
+
+  it('CLI14: validatePort rechaza puertos fuera de rango', () => {
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+      throw new Error(`__process_exit_${code}__`);
+    }) as any);
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    expect(() => validatePort('70000')).toThrow('__process_exit_1__');
+    expect(() => validatePort('-1')).toThrow('__process_exit_1__');
+    expect(exitSpy).toHaveBeenCalledTimes(2);
   });
 });

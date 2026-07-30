@@ -136,6 +136,21 @@ export function validateConfigFile(raw: Record<string, any>, configPath: string)
   return config;
 }
 
+/**
+ * Validates a raw --port/AGENT_SHELL_PORT/config value. An unparseable
+ * value (e.g. a typo) previously reached parseInt() unchecked, became NaN,
+ * and only surfaced later as Node's cryptic
+ * "options.port should be >= 0 and < 65536" from server.listen().
+ */
+export function validatePort(raw: string): number {
+  const port = parseInt(raw, 10);
+  if (!Number.isInteger(port) || String(port) !== raw.trim() || port < 0 || port > 65535) {
+    console.error(`Invalid port: '${raw}'. Must be an integer between 0 and 65535.`);
+    process.exit(1);
+  }
+  return port;
+}
+
 function loadConfigFile(): Record<string, any> {
   const configPath = resolve(process.cwd(), 'agent-shell.config.json');
   if (!existsSync(configPath)) return {};
@@ -184,7 +199,7 @@ function serveStdio(args: string[]): void {
 async function serveHttp(args: string[]): Promise<void> {
   const fileConfig = loadConfigFile();
 
-  const port = parseInt(parseFlag(args, '--port') || process.env.AGENT_SHELL_PORT || fileConfig.port || '3000', 10);
+  const port = validatePort(String(parseFlag(args, '--port') || process.env.AGENT_SHELL_PORT || fileConfig.port || '3000'));
   const host = parseFlag(args, '--host') || process.env.AGENT_SHELL_HOST || fileConfig.host || '0.0.0.0';
   const token = parseFlag(args, '--token') || process.env.AGENT_SHELL_TOKEN || fileConfig.auth?.bearerToken;
   const profile = validateProfile(parseFlag(args, '--profile') || process.env.AGENT_SHELL_PROFILE || fileConfig.agentProfile);

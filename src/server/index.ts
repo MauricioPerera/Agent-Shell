@@ -47,6 +47,20 @@ interface ServerConfig {
  * indirectly via HttpSseTransport and fail with a confusing internal error
  * instead of a clear one here.
  */
+/**
+ * Validates a raw port value from AGENT_SHELL_PORT. An unparseable value
+ * previously reached parseInt() unchecked, became NaN, and only surfaced
+ * later as Node's cryptic "options.port should be >= 0 and < 65536" error
+ * from server.listen() instead of a message pointing at the actual cause.
+ */
+function validatePort(raw: string): number {
+  const port = parseInt(raw, 10);
+  if (!Number.isInteger(port) || String(port) !== raw.trim() || port < 0 || port > 65535) {
+    throw new Error(`Invalid port: '${raw}'. Must be an integer between 0 and 65535.`);
+  }
+  return port;
+}
+
 function validateConfigFile(raw: Record<string, any>, configPath: string): Record<string, any> {
   const config: Record<string, any> = {};
   const warn = (field: string, expected: string) =>
@@ -120,7 +134,7 @@ function loadConfig(): ServerConfig {
   }
 
   // Env vars override file config
-  if (process.env.AGENT_SHELL_PORT) config.port = parseInt(process.env.AGENT_SHELL_PORT, 10);
+  if (process.env.AGENT_SHELL_PORT) config.port = validatePort(process.env.AGENT_SHELL_PORT);
   if (process.env.AGENT_SHELL_HOST) config.host = process.env.AGENT_SHELL_HOST;
   if (process.env.AGENT_SHELL_TOKEN) config.auth = { bearerToken: process.env.AGENT_SHELL_TOKEN };
   if (process.env.AGENT_SHELL_PROFILE) config.agentProfile = process.env.AGENT_SHELL_PROFILE as AgentProfile;
