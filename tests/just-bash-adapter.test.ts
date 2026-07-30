@@ -117,6 +117,23 @@ describe('NativeShellAdapter', () => {
     expect(clampExecTimeout(1000)).toBe(1000);
     expect(clampExecTimeout(undefined)).toBe(30000);
   });
+
+  /**
+   * Regresion: NativeShellAdapter.chmod pasaba `mode` directo a fs.chmod sin
+   * enmascarar setuid/setgid/sticky — a diferencia de JustBashShellAdapter.chmod,
+   * que si enmascara con (mode & 0o777). Un agente con solo file:write podia
+   * setear setuid via file:chmod --mode 4755.
+   */
+  it('NA11: chmod enmascara setuid/setgid/sticky, solo deja los permisos 0o777', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'na-test-'));
+    writeFileSync(join(tempDir, 'f.txt'), 'x');
+    try {
+      const result = await adapter.chmod(join(tempDir, 'f.txt'), 0o4755);
+      expect(result.mode).toBe(0o755);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
 });
 
 // ===========================================================================

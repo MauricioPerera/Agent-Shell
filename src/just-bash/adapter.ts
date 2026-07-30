@@ -279,7 +279,8 @@ export class NativeShellAdapter implements ShellAdapter {
 
   async chmod(path: string, mode: number): Promise<{ path: string; mode: number }> {
     const fs = await import('node:fs/promises');
-    await fs.chmod(path, mode);
-    return { path, mode };
+    const masked = mode & 0o777;
+    await fs.chmod(path, masked);
+    return { path, mode: masked };
   }
 }
