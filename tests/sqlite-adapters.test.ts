@@ -692,6 +692,62 @@ describe('SQLiteStorageAdapter', () => {
     expect(loaded!.history).toHaveLength(0);
     expect(loaded!.undo_snapshots).toHaveLength(0);
   });
+
+  /**
+   * Regresion: docs/adapters.md documenta EncryptedStorageAdapter(SQLiteStorageAdapter)
+   * como el patron recomendado para encriptar sesiones at-rest sobre SQLite.
+   * EncryptedStorageAdapter.save() le pasaba a save() un payload {_encrypted,iv,tag,data}
+   * en vez de un SessionStore real, y este adapter siempre destructuraba
+   * store.context.entries — TypeError en cada save(), la composicion documentada
+   * nunca funciono. Ahora SQLiteStorageAdapter detecta el payload cifrado y lo
+   * persiste como blob opaco en una columna dedicada.
+   */
+  describe('Composicion con EncryptedStorageAdapter (patron documentado)', () => {
+    it('T16: save/load hace roundtrip sin lanzar, a traves de encriptacion real', async () => {
+      const { EncryptedStorageAdapter } = await import('../src/context-store/encrypted-storage-adapter.js');
+      const key = Buffer.alloc(32, 7);
+      const encrypted = new EncryptedStorageAdapter(adapter, { key });
+
+      const store = createSampleStore();
+      await expect(encrypted.save('sess-enc', store)).resolves.not.toThrow();
+
+      const loaded = await encrypted.load('sess-enc');
+      expect(loaded).not.toBeNull();
+      expect(loaded!.context.entries.theme.value).toBe('dark');
+      expect(loaded!.history).toHaveLength(2);
+    });
+
+    it('T17: el dato persistido en la fila de sessions no contiene plaintext', async () => {
+      const { EncryptedStorageAdapter } = await import('../src/context-store/encrypted-storage-adapter.js');
+      const key = Buffer.alloc(32, 7);
+      const encrypted = new EncryptedStorageAdapter(adapter, { key });
+
+      const store = createSampleStore();
+      await encrypted.save('sess-enc-2', store);
+
+      const row = db.prepare('SELECT * FROM sessions WHERE session_id = ?').get('sess-enc-2');
+      expect(row.encrypted_blob).toBeTruthy();
+      expect(row.encrypted_blob).not.toContain('dark');
+      expect(row.encrypted_blob).not.toContain('theme');
+      expect(JSON.parse(row.encrypted_blob)._encrypted).toBe(true);
+
+      // Ninguna fila plaintext debe quedar en las tablas normalizadas.
+      const ctx = db.prepare('SELECT * FROM session_context WHERE session_id = ?').all('sess-enc-2');
+      expect(ctx).toHaveLength(0);
+    });
+
+    it('T18: con la clave equivocada, load() falla en vez de devolver datos silenciosamente', async () => {
+      const { EncryptedStorageAdapter } = await import('../src/context-store/encrypted-storage-adapter.js');
+      const keyA = Buffer.alloc(32, 1);
+      const keyB = Buffer.alloc(32, 2);
+
+      const writer = new EncryptedStorageAdapter(adapter, { key: keyA });
+      await writer.save('sess-wrongkey', createSampleStore());
+
+      const reader = new EncryptedStorageAdapter(adapter, { key: keyB });
+      await expect(reader.load('sess-wrongkey')).rejects.toThrow();
+    });
+  });
 });
 
 // =====================================================================

@@ -18,7 +18,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     session_id      TEXT PRIMARY KEY,
     created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     last_access_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-    status          TEXT NOT NULL DEFAULT 'active'
+    status          TEXT NOT NULL DEFAULT 'active',
+    encrypted_blob  TEXT DEFAULT NULL
 );
 
 CREATE TABLE IF NOT EXISTS session_context (
@@ -110,6 +111,14 @@ export class SQLiteStorageAdapter implements StorageAdapter {
       'UPDATE sessions SET last_access_at = ? WHERE session_id = ?'
     ).run(new Date().toISOString(), session_id);
 
+    // Blob mode: save() stored an already-encrypted payload (from
+    // EncryptedStorageAdapter) rather than a real SessionStore — hand it
+    // back as-is so the caller (EncryptedStorageAdapter.load()) can decrypt
+    // it. See save() for why this table can't just decompose it normally.
+    if (session.encrypted_blob) {
+      return JSON.parse(session.encrypted_blob) as unknown as SessionStore;
+    }
+
     // Load context entries
     const contextRows = this.db.prepare(
       'SELECT * FROM session_context WHERE session_id = ?'
@@ -176,8 +185,30 @@ export class SQLiteStorageAdapter implements StorageAdapter {
     }
 
     const saveTransaction = this.db.transaction(() => {
-      // Upsert session
       const now = new Date().toISOString();
+
+      // Blob mode: `store` is actually an already-encrypted payload from
+      // EncryptedStorageAdapter, not a real SessionStore — this table's
+      // normal path destructures store.context.entries/history/undo_snapshots,
+      // which don't exist on that shape (that mismatch is what made this
+      // composition always throw). Persist it opaquely instead, and clear
+      // any stale rows from a prior unencrypted save of the same session so
+      // plaintext data doesn't linger once encryption is turned on.
+      if ('_encrypted' in (store as any)) {
+        this.db.prepare(`
+          INSERT INTO sessions (session_id, created_at, last_access_at, status)
+          VALUES (?, ?, ?, 'active')
+          ON CONFLICT(session_id) DO UPDATE SET last_access_at = ?
+        `).run(session_id, now, now, now);
+        this.db.prepare('UPDATE sessions SET encrypted_blob = ? WHERE session_id = ?')
+          .run(JSON.stringify(store), session_id);
+        this.db.prepare('DELETE FROM session_context WHERE session_id = ?').run(session_id);
+        this.db.prepare('DELETE FROM command_history WHERE session_id = ?').run(session_id);
+        this.db.prepare('DELETE FROM undo_snapshots WHERE session_id = ?').run(session_id);
+        return;
+      }
+
+      // Upsert session
       this.db.prepare(`
         INSERT INTO sessions (session_id, created_at, last_access_at, status)
         VALUES (?, ?, ?, 'active')
@@ -273,5 +304,14 @@ export class SQLiteStorageAdapter implements StorageAdapter {
 
   private runMigrations(): void {
     this.db.exec(MIGRATIONS);
+    // Best-effort for DBs created before `encrypted_blob` existed: the
+    // CREATE TABLE IF NOT EXISTS above only adds the column on a fresh
+    // table. Duplicate-column errors on an already-migrated DB are expected
+    // and ignored.
+    try {
+      this.db.exec('ALTER TABLE sessions ADD COLUMN encrypted_blob TEXT DEFAULT NULL');
+    } catch {
+      // Column already exists.
+    }
   }
 }
