@@ -94,7 +94,7 @@ export {
   httpCommands, jsonCommands, fileCommands, shellCommands, envCommands,
   createFileCommands, createShellCommands,
   workspaceCommands, createWorkspaceCommands, WorkspaceState,
-  gitCommands,
+  gitCommands, createGitCommands,
   cronCommands, createCronCommands, CronScheduler,
   secretCommands, createSecretCommands, SecretStore,
   processCommands, createProcessCommands, ProcessManager,
