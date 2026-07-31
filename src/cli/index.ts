@@ -17,6 +17,8 @@ import { registerSkills, registerShellSkills } from '../skills/index.js';
 import { createShellAdapter } from '../just-bash/factory.js';
 import { InMemoryStorageAdapter, SessionScopedContextStore } from '../context-store/index.js';
 import { AuditLogger } from '../security/audit-logger.js';
+import { RBAC } from '../security/rbac.js';
+import type { RBACConfig } from '../security/rbac-types.js';
 import { AGENT_PROFILES, resolveAgentPermissions } from '../core/agent-profiles.js';
 import type { AgentProfile } from '../core/agent-profiles.js';
 import { readFileSync, existsSync } from 'node:fs';
@@ -157,11 +159,56 @@ export function validateConfigFile(raw: Record<string, any>, configPath: string)
       process.exit(1);
     }
   }
+  // permissions/rbac scope what the agent can do — same fail-closed
+  // reasoning as agentProfile/jailRoot above.
+  if (raw.permissions !== undefined) {
+    if (Array.isArray(raw.permissions) && raw.permissions.every((p: any) => typeof p === 'string')) {
+      config.permissions = raw.permissions;
+    } else {
+      console.error(`${configPath} field 'permissions' should be an array of strings, refusing to start with an ambiguous access-control config.`);
+      process.exit(1);
+    }
+  }
+  if (raw.rbac !== undefined) {
+    config.rbac = validateRbacConfig(raw.rbac, configPath);
+  }
   if (raw.shellAdapter !== undefined) {
     if (typeof raw.shellAdapter === 'string') config.shellAdapter = raw.shellAdapter;
     else warn('shellAdapter', 'a string');
   }
   return config;
+}
+
+/**
+ * Validates a raw `rbac` config value into an RBACConfig, exiting on any
+ * malformed shape — same fail-closed reasoning as validateConfigFile's other
+ * access-control fields: a wrong-typed rbac config is a security-relevant
+ * error, not something to silently drop.
+ */
+function validateRbacConfig(raw: any, configPath: string): RBACConfig {
+  const fail = (msg: string): never => {
+    console.error(`${configPath} field 'rbac' ${msg}, refusing to start with an ambiguous access-control config.`);
+    process.exit(1);
+  };
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw) || !Array.isArray(raw.roles)) {
+    fail("must be an object with a 'roles' array");
+  }
+  const roles = (raw.roles as any[]).map((r, i) => {
+    if (typeof r !== 'object' || r === null || typeof r.name !== 'string' || r.name.length === 0) {
+      fail(`roles[${i}] must be an object with a non-empty string 'name'`);
+    }
+    if (!Array.isArray(r.permissions) || !r.permissions.every((p: any) => typeof p === 'string')) {
+      fail(`roles[${i}] ('${r.name}') 'permissions' must be an array of strings`);
+    }
+    if (r.inherits !== undefined && (!Array.isArray(r.inherits) || !r.inherits.every((p: any) => typeof p === 'string'))) {
+      fail(`roles[${i}] ('${r.name}') 'inherits' must be an array of strings`);
+    }
+    return r.inherits ? { name: r.name, permissions: r.permissions, inherits: r.inherits } : { name: r.name, permissions: r.permissions };
+  });
+  if (raw.defaultRole !== undefined && typeof raw.defaultRole !== 'string') {
+    fail("'defaultRole' must be a string");
+  }
+  return raw.defaultRole ? { roles, defaultRole: raw.defaultRole } : { roles };
 }
 
 /**
@@ -228,14 +275,20 @@ function serveStdio(args: string[]): void {
   warnIfUnrestricted(profile);
   const jailRoot = parseFlag(args, '--jail-root') || process.env.AGENT_SHELL_JAIL_ROOT || fileConfig.jailRoot;
   const shellAdapterPreference = parseFlag(args, '--shell-adapter') || process.env.AGENT_SHELL_ADAPTER || fileConfig.shellAdapter;
+  // rbac/permissions are config-file only (no flag/env var), same as on
+  // server/index.ts. When rbac is set, permissions is treated as role names
+  // instead of literal permission strings — see resolveAgentPermissions().
+  const rbac: RBAC | undefined = fileConfig.rbac ? new RBAC(fileConfig.rbac) : undefined;
 
   // Resolved ahead of Core (which computes the same thing internally) so
   // registry:list/describe/export can filter what they reveal by the
   // caller's own permissions — see registryAdminCommands.
-  const agentPermissions = resolveAgentPermissions({ agentProfile: profile });
+  const agentPermissions = resolveAgentPermissions({ agentProfile: profile, permissions: fileConfig.permissions, rbac });
   const registry = buildRegistry(args, agentPermissions, jailRoot, shellAdapterPreference);
   const coreConfig: any = { registry };
   if (profile) coreConfig.agentProfile = profile;
+  if (fileConfig.permissions) coreConfig.permissions = fileConfig.permissions;
+  if (rbac) coreConfig.rbac = rbac;
   // In-memory only (no persistence across restarts, no external dependency)
   // — enables context:get/set/delete, which every real entry point left
   // permanently unreachable before this. `search`/vectorIndex stays
@@ -267,13 +320,19 @@ async function serveHttp(args: string[]): Promise<void> {
   const corsOrigin = parseFlag(args, '--cors-origin') || process.env.AGENT_SHELL_CORS_ORIGIN || fileConfig.corsOrigin;
   const jailRoot = parseFlag(args, '--jail-root') || process.env.AGENT_SHELL_JAIL_ROOT || fileConfig.jailRoot;
   const shellAdapterPreference = parseFlag(args, '--shell-adapter') || process.env.AGENT_SHELL_ADAPTER || fileConfig.shellAdapter;
+  // rbac/permissions are config-file only (no flag/env var), same as on
+  // server/index.ts. When rbac is set, permissions is treated as role names
+  // instead of literal permission strings — see resolveAgentPermissions().
+  const rbac: RBAC | undefined = fileConfig.rbac ? new RBAC(fileConfig.rbac) : undefined;
 
-  const agentPermissions = resolveAgentPermissions({ agentProfile: profile });
+  const agentPermissions = resolveAgentPermissions({ agentProfile: profile, permissions: fileConfig.permissions, rbac });
   const registry = buildRegistry(args, agentPermissions, jailRoot, shellAdapterPreference);
   const totalCommands = registry.listAll().length;
 
   const coreConfig: any = { registry };
   if (profile) coreConfig.agentProfile = profile;
+  if (fileConfig.permissions) coreConfig.permissions = fileConfig.permissions;
+  if (rbac) coreConfig.rbac = rbac;
   // See the same contextStore comment in serveStdio() above — sessionId is
   // threaded per-call now, so this is safe for HttpSseTransport's
   // concurrent sessions too (each gets its own isolated context).
@@ -296,6 +355,7 @@ async function serveHttp(args: string[]): Promise<void> {
   console.log(`  Auth: ${token ? 'Bearer token' : 'DISABLED'}`);
   console.log(`  Profile: ${profile || 'unrestricted'}`);
   console.log(`  Jail root: ${jailRoot || 'none (unrestricted filesystem access)'}`);
+  console.log(`  RBAC: ${rbac ? `${fileConfig.rbac.roles.length} role(s) defined` : 'none (permissions, if set, are used as-is)'}`);
   console.log(`  Shell adapter: ${shellAdapterPreference || 'auto'}`);
   console.log(`  Listening: http://${host}:${port}`);
 

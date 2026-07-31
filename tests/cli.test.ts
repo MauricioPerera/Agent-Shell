@@ -153,6 +153,76 @@ describe('CLI config file validation', () => {
     expect(result.shellAdapter).toBeUndefined();
     expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("field 'shellAdapter' should be a string"));
   });
+
+  /**
+   * Regresion: cli/index.ts no tenia NINGUN soporte de permissions/rbac —
+   * RBAC estaba totalmente implementado (src/security/rbac.ts) pero sin
+   * superficie de config en ningun entry point real, era inalcanzable.
+   * Mismo patron fail-closed que agentProfile/jailRoot: un valor mal
+   * tipado aborta el proceso, no cae al default mas permisivo.
+   */
+  it('CLI16: acepta permissions como array de strings', () => {
+    const result = validateConfigFile({ permissions: ['users:read', 'users:write'] }, 'x.json');
+    expect(result.permissions).toEqual(['users:read', 'users:write']);
+  });
+
+  it('CLI17: permissions no-array-de-strings aborta el proceso (exit 1)', () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+      throw new Error(`__process_exit_${code}__`);
+    }) as any);
+
+    expect(() => validateConfigFile({ permissions: ['ok', 42] }, 'x.json')).toThrow('__process_exit_1__');
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("field 'permissions' should be an array of strings"));
+  });
+
+  it('CLI18: acepta un rbac bien formado (roles + defaultRole)', () => {
+    const raw = {
+      rbac: {
+        roles: [
+          { name: 'viewer', permissions: ['users:read'] },
+          { name: 'editor', permissions: ['users:write'], inherits: ['viewer'] },
+        ],
+        defaultRole: 'viewer',
+      },
+    };
+    const result = validateConfigFile(raw, 'x.json');
+    expect(result.rbac).toEqual(raw.rbac);
+  });
+
+  it('CLI19: rbac sin roles[] aborta el proceso (exit 1)', () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+      throw new Error(`__process_exit_${code}__`);
+    }) as any);
+
+    expect(() => validateConfigFile({ rbac: { defaultRole: 'viewer' } }, 'x.json')).toThrow('__process_exit_1__');
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("field 'rbac' must be an object with a 'roles' array"));
+  });
+
+  it('CLI20: rbac con un role sin name/permissions valido aborta el proceso (exit 1)', () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+      throw new Error(`__process_exit_${code}__`);
+    }) as any);
+
+    expect(() => validateConfigFile({ rbac: { roles: [{ name: 'viewer' }] } }, 'x.json')).toThrow('__process_exit_1__');
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("'permissions' must be an array of strings"));
+  });
+
+  it('CLI21: rbac con inherits no-array-de-strings aborta el proceso (exit 1)', () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+      throw new Error(`__process_exit_${code}__`);
+    }) as any);
+
+    expect(() => validateConfigFile({ rbac: { roles: [{ name: 'editor', permissions: [], inherits: [42] }] } }, 'x.json')).toThrow('__process_exit_1__');
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("'inherits' must be an array of strings"));
+  });
 });
 
 /**

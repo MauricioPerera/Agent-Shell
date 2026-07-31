@@ -26,6 +26,8 @@ import { createShellAdapter } from '../just-bash/factory.js';
 import { InMemoryStorageAdapter, SessionScopedContextStore } from '../context-store/index.js';
 import { AGENT_PROFILES, resolveAgentPermissions } from '../core/agent-profiles.js';
 import { AuditLogger } from '../security/audit-logger.js';
+import { RBAC } from '../security/rbac.js';
+import type { RBACConfig } from '../security/rbac-types.js';
 import type { AgentProfile } from '../core/agent-profiles.js';
 import { readFileSync, existsSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -44,6 +46,38 @@ interface ServerConfig {
   skills: { cli: boolean; shell: boolean };
   shellAdapter: 'native' | 'just-bash' | 'auto';
   jailRoot: string | null;
+  rbac: RBACConfig | null;
+}
+
+/**
+ * Validates a raw `rbac` config value into an RBACConfig, throwing on any
+ * malformed shape — same fail-closed reasoning as agentProfile/permissions/
+ * jailRoot below: a wrong-typed rbac config is a security-relevant error,
+ * not something to silently drop and fall back to "no rbac configured".
+ */
+function validateRbacConfig(raw: any, configPath: string): RBACConfig {
+  const fail = (msg: string): never => {
+    throw new Error(`${configPath} field 'rbac' ${msg}, refusing to start with an ambiguous access-control config.`);
+  };
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw) || !Array.isArray(raw.roles)) {
+    fail("must be an object with a 'roles' array");
+  }
+  const roles = (raw.roles as any[]).map((r, i) => {
+    if (typeof r !== 'object' || r === null || typeof r.name !== 'string' || r.name.length === 0) {
+      fail(`roles[${i}] must be an object with a non-empty string 'name'`);
+    }
+    if (!Array.isArray(r.permissions) || !r.permissions.every((p: any) => typeof p === 'string')) {
+      fail(`roles[${i}] ('${r.name}') 'permissions' must be an array of strings`);
+    }
+    if (r.inherits !== undefined && (!Array.isArray(r.inherits) || !r.inherits.every((p: any) => typeof p === 'string'))) {
+      fail(`roles[${i}] ('${r.name}') 'inherits' must be an array of strings`);
+    }
+    return r.inherits ? { name: r.name, permissions: r.permissions, inherits: r.inherits } : { name: r.name, permissions: r.permissions };
+  });
+  if (raw.defaultRole !== undefined && typeof raw.defaultRole !== 'string') {
+    fail("'defaultRole' must be a string");
+  }
+  return raw.defaultRole ? { roles, defaultRole: raw.defaultRole } : { roles };
 }
 
 /**
@@ -129,6 +163,11 @@ export function validateConfigFile(raw: Record<string, any>, configPath: string)
     if (typeof raw.jailRoot === 'string') config.jailRoot = raw.jailRoot;
     else throw new Error(`${configPath} field 'jailRoot' should be a string, refusing to start with an ambiguous access-control config.`);
   }
+  // rbac defines the role graph that `permissions` (below) resolves against
+  // — same fail-closed reasoning as agentProfile/permissions/jailRoot above.
+  if (raw.rbac !== undefined) {
+    config.rbac = validateRbacConfig(raw.rbac, configPath);
+  }
   if (raw.corsOrigin !== undefined) {
     if (typeof raw.corsOrigin === 'string' || (Array.isArray(raw.corsOrigin) && raw.corsOrigin.every((o: any) => typeof o === 'string'))) {
       config.corsOrigin = raw.corsOrigin;
@@ -163,6 +202,7 @@ function loadConfig(): ServerConfig {
     skills: { cli: true, shell: true },
     shellAdapter: 'auto',
     jailRoot: null,
+    rbac: null,
   };
 
   // Try config file
@@ -189,6 +229,7 @@ function loadConfig(): ServerConfig {
       if (fileConfig.skills) config.skills = { ...config.skills, ...fileConfig.skills };
       if (fileConfig.shellAdapter) config.shellAdapter = fileConfig.shellAdapter;
       if (fileConfig.jailRoot) config.jailRoot = fileConfig.jailRoot;
+      if (fileConfig.rbac) config.rbac = fileConfig.rbac;
     }
   }
 
@@ -228,6 +269,7 @@ async function main() {
   console.log(`  Profile: ${config.agentProfile || 'none (unrestricted)'}`);
   console.log(`  Shell adapter: ${config.shellAdapter}`);
   console.log(`  Jail root: ${config.jailRoot || 'none (unrestricted filesystem access)'}`);
+  console.log(`  RBAC: ${config.rbac ? `${config.rbac.roles.length} role(s) defined` : 'none (permissions, if set, are used as-is)'}`);
 
   if (!config.auth) {
     console.warn('\n  WARNING: No authentication configured. Server is open to anyone.');
@@ -242,13 +284,21 @@ async function main() {
   // Registry
   const registry = new CommandRegistry();
 
+  // When rbac is configured, `permissions` (above) is no longer taken as
+  // literal permission strings — resolveAgentPermissions() treats it as a
+  // list of role names to resolve against this RBAC's role graph instead
+  // (see core/agent-profiles.ts). agentProfile still takes priority over
+  // both, same precedence as before rbac existed.
+  const rbac = config.rbac ? new RBAC(config.rbac) : undefined;
+
   // Resolved ahead of Core (which computes the same thing internally from
-  // the same two fields) so registry:list/describe/export can filter what
+  // the same fields) so registry:list/describe/export can filter what
   // they reveal by the caller's own permissions, not just gate on
   // registry:read for the whole command — see registryAdminCommands.
   const agentPermissions = resolveAgentPermissions({
     agentProfile: config.agentProfile ?? undefined,
     permissions: config.permissions ?? undefined,
+    rbac,
   });
 
   // Skills
@@ -269,6 +319,7 @@ async function main() {
   const coreConfig: any = { registry };
   if (config.agentProfile) coreConfig.agentProfile = config.agentProfile;
   if (config.permissions) coreConfig.permissions = config.permissions;
+  if (rbac) coreConfig.rbac = rbac;
   // In-memory only (no persistence across restarts, no external dependency)
   // — enables context:get/set/delete. Safe for this transport's concurrent
   // sessions: sessionId is threaded per-call through to a per-session
