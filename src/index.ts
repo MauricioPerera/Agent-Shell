@@ -76,7 +76,7 @@ export type {
 export { AuditLogger, maskSecrets, containsSecret, RBAC, matchPermission, matchPermissions, resolvePermission, getMissingPermissions } from './security/index.js';
 export type { AuditEvent, AuditEventType, SecretPattern, Role, RBACConfig, RBACContext, PermissionMatchOptions } from './security/index.js';
 
-export { EncryptedStorageAdapter, SQLiteStorageAdapter } from './context-store/index.js';
+export { EncryptedStorageAdapter, SQLiteStorageAdapter, InMemoryStorageAdapter, SessionScopedContextStore } from './context-store/index.js';
 export type { ContextStoreConfig, EncryptionConfig, SQLiteDatabase, SQLiteStorageConfig } from './context-store/index.js';
 
 export { SQLiteRegistryAdapter } from './command-registry/sqlite-registry-adapter.js';

@@ -15,6 +15,7 @@ import { Core } from '../core/index.js';
 import { CommandRegistry } from '../command-registry/index.js';
 import { registerSkills, registerShellSkills } from '../skills/index.js';
 import { createShellAdapter } from '../just-bash/factory.js';
+import { InMemoryStorageAdapter, SessionScopedContextStore } from '../context-store/index.js';
 import { AGENT_PROFILES, resolveAgentPermissions } from '../core/agent-profiles.js';
 import type { AgentProfile } from '../core/agent-profiles.js';
 import { readFileSync, existsSync } from 'node:fs';
@@ -23,7 +24,7 @@ import { resolve } from 'node:path';
 const VERSION = '0.1.0';
 
 const USAGE = `
-agent-shell - AI-first CLI framework (2 tools + vector discovery)
+agent-shell - AI-first CLI framework (2 tools + in-memory context store)
 
 Usage:
   agent-shell <command> [options]
@@ -218,6 +219,12 @@ function serveStdio(args: string[]): void {
   const registry = buildRegistry(args, agentPermissions, jailRoot, shellAdapterPreference);
   const coreConfig: any = { registry };
   if (profile) coreConfig.agentProfile = profile;
+  // In-memory only (no persistence across restarts, no external dependency)
+  // — enables context:get/set/delete, which every real entry point left
+  // permanently unreachable before this. `search`/vectorIndex stays
+  // disabled: it needs a real EmbeddingAdapter, which nothing in this
+  // codebase provides.
+  coreConfig.contextStore = new SessionScopedContextStore(new InMemoryStorageAdapter());
 
   const core = new Core(coreConfig);
   const server = new McpServer({ core, version: VERSION });
@@ -249,6 +256,10 @@ async function serveHttp(args: string[]): Promise<void> {
 
   const coreConfig: any = { registry };
   if (profile) coreConfig.agentProfile = profile;
+  // See the same contextStore comment in serveStdio() above — sessionId is
+  // threaded per-call now, so this is safe for HttpSseTransport's
+  // concurrent sessions too (each gets its own isolated context).
+  coreConfig.contextStore = new SessionScopedContextStore(new InMemoryStorageAdapter());
 
   const core = new Core(coreConfig);
   const mcpServer = new McpServer({ core, version: VERSION });

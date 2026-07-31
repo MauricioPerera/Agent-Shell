@@ -153,12 +153,12 @@ function createMockVectorIndex() {
 function createMockContextStore() {
   const store = new Map<string, any>();
   return {
-    set(key: string, value: any) { store.set(key, value); return { status: 0 }; },
-    get(key: string) { return { status: 0, data: store.get(key) ?? null }; },
-    getAll() { return { status: 0, data: Object.fromEntries(store) }; },
-    delete(key: string) { store.delete(key); return { status: 0 }; },
-    getHistory() { return { status: 0, data: [] }; },
-    recordCommand() {},
+    async set(key: string, value: any) { store.set(key, value); return { status: 0 }; },
+    async get(key: string) { return { status: 0, data: store.get(key) ?? null }; },
+    async getAll() { return { status: 0, data: Object.fromEntries(store) }; },
+    async delete(key: string) { store.delete(key); return { status: 0 }; },
+    async getHistory() { return { status: 0, data: [] }; },
+    async recordCommand() {},
   };
 }
 

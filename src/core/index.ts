@@ -315,7 +315,7 @@ class Core {
           return { _error: { code: 3, error: `Permission denied: ${command}` } };
         }
       }
-      return this.executeBuiltin(command, args, signal);
+      return this.executeBuiltin(command, args, signal, sessionId);
     }
 
     // Context namespace special handling
@@ -323,7 +323,7 @@ class Core {
       if (this.agentPermissions && !matchPermissions(this.agentPermissions, ['context'])) {
         return { _error: { code: 3, error: `Permission denied: context:${command}` } };
       }
-      return this.executeContext(command, args);
+      return this.executeContext(command, args, sessionId);
     }
 
     // Lookup in registry
@@ -426,7 +426,7 @@ class Core {
     this.pendingConfirms.sweepExpired();
   }
 
-  private async executeBuiltin(command: string, args: any, signal?: AbortSignal): Promise<any> {
+  private async executeBuiltin(command: string, args: any, signal?: AbortSignal, sessionId?: string): Promise<any> {
     switch (command) {
       case 'search': {
         if (!this.vectorIndex) {
@@ -466,7 +466,7 @@ class Core {
 
       case 'context': {
         if (!this.contextStore) return {};
-        const result = this.contextStore.getAll();
+        const result = await this.contextStore.getAll(sessionId);
         return result.data ?? {};
       }
 
@@ -493,7 +493,7 @@ class Core {
     }
   }
 
-  private executeContext(command: string, args: any): any {
+  private async executeContext(command: string, args: any, sessionId?: string): Promise<any> {
     if (!this.contextStore) {
       return { _error: { code: 1, error: 'Context store not available' } };
     }
@@ -503,21 +503,24 @@ class Core {
         const key = args.positional[0];
         const value = args.positional[1];
         if (!key) return { _error: { code: 1, error: 'Usage: context:set <key> <value>' } };
-        this.contextStore.set(key, value);
+        const result = await this.contextStore.set(key, value, sessionId);
+        if (result.error) return { _error: { code: 1, error: result.error.message } };
         return { key, value, status: 'set' };
       }
 
       case 'get': {
         const key = args.positional[0];
         if (!key) return { _error: { code: 1, error: 'Usage: context:get <key>' } };
-        const result = this.contextStore.get(key);
+        const result = await this.contextStore.get(key, sessionId);
+        if (result.error) return { _error: { code: 2, error: result.error.message } };
         return result.data;
       }
 
       case 'delete': {
         const key = args.positional[0];
         if (!key) return { _error: { code: 1, error: 'Usage: context:delete <key>' } };
-        this.contextStore.delete(key);
+        const result = await this.contextStore.delete(key, sessionId);
+        if (result.error) return { _error: { code: 1, error: result.error.message } };
         return { key, status: 'deleted' };
       }
 

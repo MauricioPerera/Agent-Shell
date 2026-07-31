@@ -4,8 +4,11 @@
  * @description Production-ready Agent Shell HTTP server.
  *
  * Reads configuration from environment variables or agent-shell.config.json,
- * bootstraps the full stack (registry + skills + vectorIndex + core + MCP),
- * and starts the HTTP/SSE transport with Bearer token auth.
+ * bootstraps the stack (registry + skills + an in-memory contextStore +
+ * core + MCP), and starts the HTTP/SSE transport with Bearer token auth.
+ * No vectorIndex is wired up: `search` needs a real EmbeddingAdapter, which
+ * nothing in this codebase provides yet (bring-your-own via CoreConfig if
+ * you have one).
  *
  * Usage:
  *   AGENT_SHELL_TOKEN=my-secret npx tsx src/server/index.ts
@@ -20,6 +23,7 @@ import { McpServer } from '../mcp/server.js';
 import { HttpSseTransport } from '../mcp/http-transport.js';
 import { registerSkills, registerShellSkills } from '../skills/index.js';
 import { createShellAdapter } from '../just-bash/factory.js';
+import { InMemoryStorageAdapter, SessionScopedContextStore } from '../context-store/index.js';
 import { AGENT_PROFILES, resolveAgentPermissions } from '../core/agent-profiles.js';
 import type { AgentProfile } from '../core/agent-profiles.js';
 import { readFileSync, existsSync } from 'node:fs';
@@ -252,6 +256,12 @@ async function main() {
   const coreConfig: any = { registry };
   if (config.agentProfile) coreConfig.agentProfile = config.agentProfile;
   if (config.permissions) coreConfig.permissions = config.permissions;
+  // In-memory only (no persistence across restarts, no external dependency)
+  // — enables context:get/set/delete. Safe for this transport's concurrent
+  // sessions: sessionId is threaded per-call through to a per-session
+  // ContextStore instance (see SessionScopedContextStore), not one shared
+  // instance. `search`/vectorIndex stays disabled — see the module docstring.
+  coreConfig.contextStore = new SessionScopedContextStore(new InMemoryStorageAdapter());
   const core = new Core(coreConfig);
 
   // MCP Server

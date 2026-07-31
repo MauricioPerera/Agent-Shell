@@ -15,6 +15,8 @@ export { type StorageAdapter, type OperationResult, type HistoryEntry, type Undo
 export { EncryptedStorageAdapter, type EncryptionConfig } from './encrypted-storage-adapter.js';
 export { SQLiteStorageAdapter } from './sqlite-storage-adapter.js';
 export { type SQLiteDatabase, type SQLiteStorageConfig } from './sqlite-types.js';
+export { InMemoryStorageAdapter } from './memory-storage-adapter.js';
+export { SessionScopedContextStore } from './session-scoped-context-store.js';
 
 class SessionExpiredError extends Error {
   constructor(sessionId: string, age: number, ttl: number) {

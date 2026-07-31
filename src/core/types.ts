@@ -42,12 +42,22 @@ export interface CoreVectorIndex {
   search(query: string, options?: any): Promise<any>;
 }
 
-/** Interfaz minima del context store consumida por Core. */
+/**
+ * Interfaz minima del context store consumida por Core.
+ *
+ * Async y con sessionId opcional en cada metodo: cualquier implementacion
+ * real (ver ContextStore en src/context-store/index.ts) es I/O-bound, y una
+ * sola instancia esta atada a UN sessionId a la vez — pasarlo por llamada
+ * es lo que le permite a un adapter multi-sesion (ver
+ * SessionScopedContextStore) aislar correctamente a cada caller concurrente
+ * en el transporte HTTP. sessionId undefined = sesion default compartida,
+ * correcto para stdio (un agente por proceso).
+ */
 export interface CoreContextStore {
-  get(key: string): { data?: any };
-  set(key: string, value: any): void;
-  delete(key: string): void;
-  getAll(): { data?: Record<string, any> };
+  get(key: string, sessionId?: string): Promise<{ data?: any; error?: { code: string; message: string } }>;
+  set(key: string, value: any, sessionId?: string): Promise<{ data?: any; error?: { code: string; message: string } }>;
+  delete(key: string, sessionId?: string): Promise<{ data?: any; error?: { code: string; message: string } }>;
+  getAll(sessionId?: string): Promise<{ data?: Record<string, any>; error?: { code: string; message: string } }>;
 }
 
 /** Configuracion del Core. */

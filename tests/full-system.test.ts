@@ -186,10 +186,10 @@ describe('Full System: Parser → Core → Response', () => {
     await vectorIndex.indexBatch(registry.listAll());
     const ctxStore: Record<string, any> = {};
     const contextStore = {
-      get(key: string) { return { data: ctxStore[key] }; },
-      set(key: string, value: any) { ctxStore[key] = value; },
-      delete(key: string) { delete ctxStore[key]; },
-      getAll() { return { data: { ...ctxStore } }; },
+      async get(key: string) { return { data: ctxStore[key] }; },
+      async set(key: string, value: any) { ctxStore[key] = value; return {}; },
+      async delete(key: string) { delete ctxStore[key]; return {}; },
+      async getAll() { return { data: { ...ctxStore } }; },
     };
     core = new Core({ registry, vectorIndex, contextStore });
   });
@@ -855,10 +855,10 @@ describe('Full System: Context Store', () => {
   function createSimpleContextStore() {
     const store: Record<string, any> = {};
     return {
-      get(key: string) { return { data: store[key] }; },
-      set(key: string, value: any) { store[key] = value; },
-      delete(key: string) { delete store[key]; },
-      getAll() { return { data: { ...store } }; },
+      async get(key: string) { return { data: store[key] }; },
+      async set(key: string, value: any) { store[key] = value; return {}; },
+      async delete(key: string) { delete store[key]; return {}; },
+      async getAll() { return { data: { ...store } }; },
     };
   }
 
