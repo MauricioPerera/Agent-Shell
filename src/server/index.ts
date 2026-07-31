@@ -38,6 +38,7 @@ interface ServerConfig {
   corsOrigin: string | string[] | undefined;
   skills: { cli: boolean; shell: boolean };
   shellAdapter: 'native' | 'just-bash' | 'auto';
+  jailRoot: string | null;
 }
 
 /**
@@ -104,6 +105,13 @@ export function validateConfigFile(raw: Record<string, any>, configPath: string)
     if (Array.isArray(raw.permissions) && raw.permissions.every((p: any) => typeof p === 'string')) config.permissions = raw.permissions;
     else throw new Error(`${configPath} field 'permissions' should be an array of strings, refusing to start with an ambiguous access-control config.`);
   }
+  // jailRoot scopes what paths file:*/git:*/workspace:* can touch: same
+  // reasoning as agentProfile/permissions above — a wrong-typed value must
+  // abort startup rather than silently fall through to "no jail configured".
+  if (raw.jailRoot !== undefined) {
+    if (typeof raw.jailRoot === 'string') config.jailRoot = raw.jailRoot;
+    else throw new Error(`${configPath} field 'jailRoot' should be a string, refusing to start with an ambiguous access-control config.`);
+  }
   if (raw.corsOrigin !== undefined) {
     if (typeof raw.corsOrigin === 'string' || (Array.isArray(raw.corsOrigin) && raw.corsOrigin.every((o: any) => typeof o === 'string'))) {
       config.corsOrigin = raw.corsOrigin;
@@ -137,6 +145,7 @@ function loadConfig(): ServerConfig {
     corsOrigin: undefined,
     skills: { cli: true, shell: true },
     shellAdapter: 'auto',
+    jailRoot: null,
   };
 
   // Try config file
@@ -162,6 +171,7 @@ function loadConfig(): ServerConfig {
       if (fileConfig.corsOrigin) config.corsOrigin = fileConfig.corsOrigin;
       if (fileConfig.skills) config.skills = { ...config.skills, ...fileConfig.skills };
       if (fileConfig.shellAdapter) config.shellAdapter = fileConfig.shellAdapter;
+      if (fileConfig.jailRoot) config.jailRoot = fileConfig.jailRoot;
     }
   }
 
@@ -172,6 +182,7 @@ function loadConfig(): ServerConfig {
   if (process.env.AGENT_SHELL_PROFILE) config.agentProfile = process.env.AGENT_SHELL_PROFILE as AgentProfile;
   if (process.env.AGENT_SHELL_CORS_ORIGIN) config.corsOrigin = process.env.AGENT_SHELL_CORS_ORIGIN;
   if (process.env.AGENT_SHELL_ADAPTER) config.shellAdapter = process.env.AGENT_SHELL_ADAPTER as any;
+  if (process.env.AGENT_SHELL_JAIL_ROOT) config.jailRoot = process.env.AGENT_SHELL_JAIL_ROOT;
 
   return config;
 }
@@ -199,6 +210,7 @@ async function main() {
   console.log(`  Auth: ${config.auth ? 'Bearer token enabled' : 'DISABLED (not recommended)'}`);
   console.log(`  Profile: ${config.agentProfile || 'none (unrestricted)'}`);
   console.log(`  Shell adapter: ${config.shellAdapter}`);
+  console.log(`  Jail root: ${config.jailRoot || 'none (unrestricted filesystem access)'}`);
 
   if (!config.auth) {
     console.warn('\n  WARNING: No authentication configured. Server is open to anyone.');
@@ -229,7 +241,7 @@ async function main() {
   }
   if (config.skills.shell) {
     const adapter = createShellAdapter({ prefer: config.shellAdapter });
-    registerShellSkills(registry, adapter);
+    registerShellSkills(registry, adapter, config.jailRoot ?? undefined);
     console.log(`  Shell skills: 12 commands registered (${adapter.backend} backend)`);
   }
 

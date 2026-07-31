@@ -589,4 +589,25 @@ describe('Shell Skills Registration', () => {
     expect(namespaces).toContain('shell');
     expect(namespaces).toContain('env');
   });
+
+  /**
+   * Regresion: registerShellSkills() no tenia forma de recibir un jailRoot
+   * y reenviarlo a createFileCommands/createGitCommands/createWorkspaceCommands
+   * — cli/index.ts y server/index.ts (los unicos llamadores reales) nunca
+   * podian activar la contencion agregada en la sesion previa. Verifica que
+   * un jailRoot pasado a registerShellSkills() efectivamente llega hasta
+   * el handler de file:read.
+   */
+  it('INT04: registerShellSkills reenvia jailRoot a file:read', async () => {
+    const registry = new CommandRegistry();
+    registerShellSkills(registry, nativeAdapter, 'C:/jail-root');
+
+    const resolved = registry.get('file', 'read');
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+
+    const result = await resolved.value.handler({ path: 'C:/outside-jail/secret.txt' });
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('resolves outside jail root');
+  });
 });

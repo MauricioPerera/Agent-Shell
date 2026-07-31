@@ -113,6 +113,28 @@ describe('CLI config file validation', () => {
     expect(validateConfigFile({}, 'x.json')).toEqual({});
     expect(errorSpy).not.toHaveBeenCalled();
   });
+
+  it('CLI12: acepta jailRoot como string', () => {
+    const result = validateConfigFile({ jailRoot: '/opt/workspace' }, 'x.json');
+    expect(result.jailRoot).toBe('/opt/workspace');
+  });
+
+  /**
+   * Regresion: mismo patron que CLI08 — jailRoot es tan de control de acceso
+   * como agentProfile (determina que puede tocar file:, git: y workspace:),
+   * asi que un valor mal tipado debe abortar el proceso, no caer en
+   * silencio a "sin jail configurado" (el default MAS permisivo).
+   */
+  it('CLI13: jailRoot no-string aborta el proceso (exit 1), no cae a "sin jail"', () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+      throw new Error(`__process_exit_${code}__`);
+    }) as any);
+
+    expect(() => validateConfigFile({ jailRoot: 123 }, 'x.json')).toThrow('__process_exit_1__');
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("field 'jailRoot' should be a string"));
+  });
 });
 
 /**

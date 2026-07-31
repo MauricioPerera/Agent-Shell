@@ -206,7 +206,7 @@ agent-shell serve --transport http --profile operator     # Con perfil de permis
 agent-shell serve --transport http --no-shell-skills      # Sin skills de sistema
 ```
 
-**Env vars:** `AGENT_SHELL_TOKEN`, `AGENT_SHELL_PORT`, `AGENT_SHELL_HOST`, `AGENT_SHELL_PROFILE`
+**Env vars:** `AGENT_SHELL_TOKEN`, `AGENT_SHELL_PORT`, `AGENT_SHELL_HOST`, `AGENT_SHELL_PROFILE`, `AGENT_SHELL_JAIL_ROOT`
 **Config file:** `agent-shell.config.json` (env vars override)
 
 El binario se registra automaticamente en `package.json`:

@@ -40,6 +40,7 @@ Serve Options:
   --token <string>          Bearer token for auth (or env: AGENT_SHELL_TOKEN)
   --profile <string>        Agent profile: admin|operator|reader|restricted
   --cors-origin <origin>    CORS origin (default: *)
+  --jail-root <path>        Confine file:*/git:*/workspace:* to this directory
   --no-cli-skills           Skip registering CLI creation skills
   --no-shell-skills         Skip registering system shell skills
 
@@ -49,6 +50,7 @@ Environment Variables:
   AGENT_SHELL_TOKEN         Bearer token
   AGENT_SHELL_PROFILE       Agent profile
   AGENT_SHELL_CORS_ORIGIN   CORS origin
+  AGENT_SHELL_JAIL_ROOT     Path-jail root
 
 Config File:
   agent-shell.config.json   Loaded from working directory (env vars override)
@@ -140,6 +142,17 @@ export function validateConfigFile(raw: Record<string, any>, configPath: string)
     if (typeof raw.auth.bearerToken === 'string') config.auth = { bearerToken: raw.auth.bearerToken };
     else warn('auth.bearerToken', 'a string');
   }
+  // jailRoot scopes what paths file:*/git:*/workspace:* can touch: same
+  // reasoning as agentProfile above — silently dropping a wrong-typed value
+  // would fall through to "no jail configured" (unrestricted filesystem
+  // access), the opposite of what a bad config author intended.
+  if (raw.jailRoot !== undefined) {
+    if (typeof raw.jailRoot === 'string') config.jailRoot = raw.jailRoot;
+    else {
+      console.error(`${configPath} field 'jailRoot' should be a string, refusing to start with an ambiguous access-control config.`);
+      process.exit(1);
+    }
+  }
   return config;
 }
 
@@ -170,7 +183,7 @@ function loadConfigFile(): Record<string, any> {
   }
 }
 
-function buildRegistry(args: string[], agentPermissions?: string[] | null): CommandRegistry {
+function buildRegistry(args: string[], agentPermissions?: string[] | null, jailRoot?: string): CommandRegistry {
   const registry = new CommandRegistry();
 
   if (!hasFlag(args, '--no-cli-skills')) {
@@ -179,7 +192,7 @@ function buildRegistry(args: string[], agentPermissions?: string[] | null): Comm
 
   if (!hasFlag(args, '--no-shell-skills')) {
     const adapter = createShellAdapter();
-    registerShellSkills(registry, adapter);
+    registerShellSkills(registry, adapter, jailRoot);
   }
 
   return registry;
@@ -189,12 +202,13 @@ function serveStdio(args: string[]): void {
   const fileConfig = loadConfigFile();
   const profile = validateProfile(parseFlag(args, '--profile') || process.env.AGENT_SHELL_PROFILE || fileConfig.agentProfile);
   warnIfUnrestricted(profile);
+  const jailRoot = parseFlag(args, '--jail-root') || process.env.AGENT_SHELL_JAIL_ROOT || fileConfig.jailRoot;
 
   // Resolved ahead of Core (which computes the same thing internally) so
   // registry:list/describe/export can filter what they reveal by the
   // caller's own permissions — see registryAdminCommands.
   const agentPermissions = resolveAgentPermissions({ agentProfile: profile });
-  const registry = buildRegistry(args, agentPermissions);
+  const registry = buildRegistry(args, agentPermissions, jailRoot);
   const coreConfig: any = { registry };
   if (profile) coreConfig.agentProfile = profile;
 
@@ -219,9 +233,10 @@ async function serveHttp(args: string[]): Promise<void> {
   // succeeds, defeating the Content-Type CSRF check on the common
   // loopback-with-no-auth deployment. Opt in explicitly via --cors-origin.
   const corsOrigin = parseFlag(args, '--cors-origin') || process.env.AGENT_SHELL_CORS_ORIGIN || fileConfig.corsOrigin;
+  const jailRoot = parseFlag(args, '--jail-root') || process.env.AGENT_SHELL_JAIL_ROOT || fileConfig.jailRoot;
 
   const agentPermissions = resolveAgentPermissions({ agentProfile: profile });
-  const registry = buildRegistry(args, agentPermissions);
+  const registry = buildRegistry(args, agentPermissions, jailRoot);
   const totalCommands = registry.listAll().length;
 
   const coreConfig: any = { registry };
@@ -242,6 +257,7 @@ async function serveHttp(args: string[]): Promise<void> {
   console.log(`  ${totalCommands} commands registered`);
   console.log(`  Auth: ${token ? 'Bearer token' : 'DISABLED'}`);
   console.log(`  Profile: ${profile || 'unrestricted'}`);
+  console.log(`  Jail root: ${jailRoot || 'none (unrestricted filesystem access)'}`);
   console.log(`  Listening: http://${host}:${port}`);
 
   if (!token) {

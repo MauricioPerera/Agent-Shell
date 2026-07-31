@@ -38,7 +38,7 @@ import { createFileCommands } from './shell-file.js';
 import { createShellCommands } from './shell-exec.js';
 import { envCommands } from './shell-env.js';
 import { createWorkspaceCommands } from './workspace.js';
-import { gitCommands } from './shell-git.js';
+import { createGitCommands } from './shell-git.js';
 import { createCronCommands } from './cron.js';
 import { createSecretCommands } from './secret-store.js';
 import { createProcessCommands } from './process-mgr.js';
@@ -87,8 +87,13 @@ export function registerSkills(registry: CommandRegistry, agentPermissions?: str
  * @param registry - CommandRegistry to register into
  * @param shellAdapter - Optional ShellAdapter. If not provided, auto-detects
  *   just-bash (sandboxed) or falls back to native (child_process).
+ * @param jailRoot - Optional path-containment root, forwarded to the file/
+ *   git/workspace skills (see security/path-jail.ts). Omitted = no jail,
+ *   matching prior behavior. cli/index.ts and server/index.ts are the only
+ *   real callers of this function and must forward their own jailRoot
+ *   config through here for the containment checks to have any effect.
  */
-export function registerShellSkills(registry: CommandRegistry, shellAdapter?: ShellAdapter): void {
+export function registerShellSkills(registry: CommandRegistry, shellAdapter?: ShellAdapter, jailRoot?: string): void {
   const adapter = shellAdapter || createShellAdapter();
 
   for (const { definition, handler } of httpCommands) {
@@ -97,7 +102,7 @@ export function registerShellSkills(registry: CommandRegistry, shellAdapter?: Sh
   for (const { definition, handler } of jsonCommands) {
     registry.register(definition, handler);
   }
-  for (const { definition, handler } of createFileCommands(adapter)) {
+  for (const { definition, handler } of createFileCommands(adapter, jailRoot)) {
     registry.register(definition, handler);
   }
   for (const { definition, handler } of createShellCommands(adapter)) {
@@ -106,10 +111,10 @@ export function registerShellSkills(registry: CommandRegistry, shellAdapter?: Sh
   for (const { definition, handler } of envCommands) {
     registry.register(definition, handler);
   }
-  for (const { definition, handler } of createWorkspaceCommands(undefined, adapter)) {
+  for (const { definition, handler } of createWorkspaceCommands(undefined, adapter, jailRoot)) {
     registry.register(definition, handler);
   }
-  for (const { definition, handler } of gitCommands) {
+  for (const { definition, handler } of createGitCommands(jailRoot)) {
     registry.register(definition, handler);
   }
   for (const { definition, handler } of createCronCommands(undefined, adapter)) {
@@ -124,7 +129,7 @@ export function registerShellSkills(registry: CommandRegistry, shellAdapter?: Sh
 }
 
 /** Registers ALL skills (CLI creation + shell). */
-export function registerAllSkills(registry: CommandRegistry, shellAdapter?: ShellAdapter, agentPermissions?: string[] | null): void {
+export function registerAllSkills(registry: CommandRegistry, shellAdapter?: ShellAdapter, agentPermissions?: string[] | null, jailRoot?: string): void {
   registerSkills(registry, agentPermissions);
-  registerShellSkills(registry, shellAdapter);
+  registerShellSkills(registry, shellAdapter, jailRoot);
 }
