@@ -8,6 +8,7 @@ import { execSync, execFileSync } from 'node:child_process';
 import { resolve, isAbsolute } from 'node:path';
 import type { SkillEntry } from './scaffold.js';
 import { createPathJail } from '../security/path-jail.js';
+import { filterSensitiveEnv } from '../security/secret-patterns.js';
 
 function gitExec(cmd: string, cwd?: string): { stdout: string; stderr: string; exitCode: number } {
   try {
@@ -17,6 +18,12 @@ function gitExec(cmd: string, cwd?: string): { stdout: string; stderr: string; e
       timeout: 120_000,
       maxBuffer: 10 * 1024 * 1024,
       stdio: ['pipe', 'pipe', 'pipe'],
+      // Same reasoning as NativeShellAdapter.exec (just-bash/adapter.ts):
+      // git:* only requires git:read/git:write, not env:read, so a spawned
+      // git process (and any hook it runs) inheriting the full host
+      // environment verbatim would let an agent read every credential
+      // through a side door the env:get/env:list masking never covers.
+      env: filterSensitiveEnv(process.env),
     }) as string;
     return { stdout: stdout.trimEnd(), stderr: '', exitCode: 0 };
   } catch (err: any) {
@@ -40,6 +47,7 @@ function gitExecArgs(args: string[], cwd?: string): { stdout: string; stderr: st
       maxBuffer: 10 * 1024 * 1024,
       stdio: ['pipe', 'pipe', 'pipe'],
       shell: false,
+      env: filterSensitiveEnv(process.env),
     }) as string;
     return { stdout: stdout.trimEnd(), stderr: '', exitCode: 0 };
   } catch (err: any) {

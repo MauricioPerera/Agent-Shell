@@ -7,6 +7,7 @@
 import { command } from '../command-builder/index.js';
 import { spawn, type ChildProcess } from 'node:child_process';
 import type { SkillEntry } from './scaffold.js';
+import { filterSensitiveEnv } from '../security/secret-patterns.js';
 
 // ---------------------------------------------------------------------------
 // ProcessManager
@@ -48,6 +49,13 @@ export class ProcessManager {
       stdio: ['ignore', 'pipe', 'pipe'],
       detached: false,
       shell: true,
+      // Same reasoning as NativeShellAdapter.exec (just-bash/adapter.ts) and
+      // gitExec (shell-git.ts): process:spawn only requires process:write,
+      // not env:read, so a background process inheriting the full host
+      // environment verbatim would let an agent read every credential
+      // (e.g. via `process:spawn --command env`, then process:logs) through
+      // a side door the env:get/env:list masking never covers.
+      env: filterSensitiveEnv(process.env),
     });
 
     if (!proc.pid) {

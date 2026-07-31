@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from 'vitest';
-import { mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, statSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, statSync, readFileSync, chmodSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execSync } from 'node:child_process';
@@ -276,6 +276,42 @@ describe('Git Skills', () => {
     expect(res.success).toBe(true);
     // The injected command substitution must NOT have run — no proof file created.
     expect(existsSync(proofPath)).toBe(false);
+  });
+
+  /**
+   * Regresion: gitExec/gitExecArgs (usados por todos los handlers de git:*)
+   * nunca pasaban `env` a execSync/execFileSync, asi que el proceso git (y
+   * cualquier hook que corra) heredaba el environment del host sin filtrar
+   * — el mismo hueco que shell:exec tenia antes de esta sesion, pero nunca
+   * se propago a git:*. Un hook post-commit es un proceso hijo de git, asi
+   * que si el env que le llega sigue teniendo el secreto, el fix no aplico.
+   */
+  it('GI07: git:* no filtra el env sensible hacia git ni sus hooks', async () => {
+    const dumpPath = join(tempDir, 'env-dump.txt').replace(/\\/g, '/');
+    const hooksDir = join(tempDir, '.git', 'hooks');
+    const hookPath = join(hooksDir, 'post-commit');
+    writeFileSync(hookPath, `#!/bin/sh\nenv > "${dumpPath}"\n`);
+    chmodSync(hookPath, 0o755);
+
+    const canary = 'leak-canary-' + Date.now();
+    const prevToken = process.env.AGENT_SHELL_TEST_TOKEN;
+    process.env.AGENT_SHELL_TEST_TOKEN = canary;
+    try {
+      writeFileSync(join(tempDir, 'file2.txt'), 'new');
+      const handler = findHandler(gitCommands, 'git', 'commit');
+      const res = await handler({ message: 'trigger hook', 'add-all': true, cwd: tempDir });
+      expect(res.success).toBe(true);
+    } finally {
+      if (prevToken === undefined) delete process.env.AGENT_SHELL_TEST_TOKEN;
+      else process.env.AGENT_SHELL_TEST_TOKEN = prevToken;
+    }
+
+    expect(existsSync(dumpPath)).toBe(true);
+    const dumped = readFileSync(dumpPath, 'utf-8');
+    // The hook actually ran and captured a real environment (not empty).
+    expect(dumped.length).toBeGreaterThan(0);
+    // The sensitive var must NOT have reached git's child process.
+    expect(dumped).not.toContain(canary);
   });
 });
 
@@ -688,6 +724,42 @@ describe('Process Manager Skills', () => {
     const res = await logs({ name: 'echoer' });
     expect(res.success).toBe(true);
     expect(res.data.stdout).toContain('hello-from-process');
+  });
+
+  /**
+   * Regresion: ProcessManager.spawn() nunca pasaba `env` a child_process.spawn(),
+   * asi que el proceso heredaba el environment del host sin filtrar — el
+   * mismo hueco que shell:exec tenia antes de esta sesion (env:* solo
+   * enmascara sus propias lecturas; un proceso spawneado con acceso crudo
+   * al env era una via lateral sin enmascarar), nunca propagado a process:*.
+   */
+  it('PM06: process:spawn no filtra el env sensible hacia el proceso hijo', async () => {
+    // Un archivo .js en vez de `node -e "..."` inline evita todo problema de
+    // quoting entre cmd.exe (Windows) y sh (POSIX) para el script en si.
+    const scriptDir = mkdtempSync(join(tmpdir(), 'pm-env-leak-'));
+    const scriptPath = join(scriptDir, 'dump-env.js').replace(/\\/g, '/');
+    writeFileSync(scriptPath, 'console.log(process.env.AGENT_SHELL_TEST_TOKEN || "MISSING")');
+
+    const canary = 'leak-canary-' + Date.now();
+    const prevToken = process.env.AGENT_SHELL_TEST_TOKEN;
+    process.env.AGENT_SHELL_TEST_TOKEN = canary;
+
+    const spawn = findHandler(cmds, 'process', 'spawn');
+    const logs = findHandler(cmds, 'process', 'logs');
+    try {
+      const res = await spawn({ name: 'env-leak-check', command: `node "${scriptPath}"` });
+      expect(res.success).toBe(true);
+
+      await new Promise(r => setTimeout(r, 500));
+      const logRes = await logs({ name: 'env-leak-check' });
+      expect(logRes.success).toBe(true);
+      expect(logRes.data.stdout).toContain('MISSING');
+      expect(logRes.data.stdout).not.toContain(canary);
+    } finally {
+      if (prevToken === undefined) delete process.env.AGENT_SHELL_TEST_TOKEN;
+      else process.env.AGENT_SHELL_TEST_TOKEN = prevToken;
+      rmSync(scriptDir, { recursive: true, force: true });
+    }
   });
 });
 
