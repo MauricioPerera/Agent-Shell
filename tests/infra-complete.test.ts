@@ -645,6 +645,26 @@ describe('Secret Store Skills', () => {
     expect(() => store.get('TAMPER')).toThrow();
   });
 
+  /**
+   * Regresion: set()/get() no ligaban el ciphertext al nombre via AAD, la
+   * misma laguna que EncryptedStorageAdapter tenia con session_id (ver
+   * tests/security.test.ts T45b) hasta que se le agrego setAAD(session_id).
+   * Un entry de "SECRET_A" que terminara guardado bajo la clave "SECRET_B"
+   * del Map (p.ej. por un bug futuro de import/restore masivo) desencriptaba
+   * "con exito" bajo el nombre equivocado en vez de fallar el auth tag.
+   */
+  it('SE09: un entry leido bajo OTRO nombre falla el auth tag (AAD)', () => {
+    store.set('SECRET_A', 'value-of-a');
+    const rawA = (store as any).secrets.get('SECRET_A');
+
+    // Simula el entry de SECRET_A terminando guardado bajo SECRET_B.
+    (store as any).secrets.set('SECRET_B', rawA);
+
+    expect(() => store.get('SECRET_B')).toThrow();
+    // El nombre correcto sigue funcionando normalmente.
+    expect(store.get('SECRET_A')).toBe('value-of-a');
+  });
+
   it('SE09: distinct encryptionKeys cannot read each other secrets', () => {
     const storeA = new SecretStore('key-for-store-a-aaaaaaaaaa');
     const storeB = new SecretStore('key-for-store-b-bbbbbbbbbb');

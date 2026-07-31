@@ -31,6 +31,13 @@ export class SecretStore {
   set(name: string, value: string): void {
     const iv = randomBytes(12);
     const cipher = createCipheriv('aes-256-gcm', this.key, iv) as CipherGCM;
+    // Bind the ciphertext to the name it's stored under (same reasoning as
+    // EncryptedStorageAdapter binding to session_id): GCM's auth tag alone
+    // only proves "this blob wasn't tampered with", not "this is the entry
+    // stored under THIS name" — without AAD, a bug that mixed up two
+    // entries' ciphertexts in the map would still decrypt "successfully"
+    // under the wrong name instead of failing the auth-tag check.
+    cipher.setAAD(Buffer.from(name, 'utf-8'));
     let encrypted = cipher.update(value, 'utf-8', 'hex');
     encrypted += cipher.final('hex');
     const tag = cipher.getAuthTag();
@@ -41,6 +48,7 @@ export class SecretStore {
     const entry = this.secrets.get(name);
     if (!entry) return null;
     const decipher = createDecipheriv('aes-256-gcm', this.key, Buffer.from(entry.iv, 'hex')) as DecipherGCM;
+    decipher.setAAD(Buffer.from(name, 'utf-8'));
     decipher.setAuthTag(Buffer.from(entry.tag, 'hex'));
     let decrypted = decipher.update(entry.encrypted, 'hex', 'utf-8');
     decrypted += decipher.final('utf-8');
