@@ -10,7 +10,7 @@ import { command } from '../command-builder/index.js';
 import type { CommandRegistry } from '../command-registry/index.js';
 import type { CommandDefinition } from '../command-registry/types.js';
 import type { SkillEntry } from './scaffold.js';
-import { matchPermissions } from '../security/permission-matcher.js';
+import { isVisibleToAgent } from '../security/permission-matcher.js';
 
 // ---------------------------------------------------------------------------
 // Skill Definitions
@@ -69,8 +69,7 @@ exportDef.requiredPermissions = ['registry:read'];
  * configured", matching Core's own convention.
  */
 function filterByPermissions(defs: CommandDefinition[], agentPermissions?: string[] | null): CommandDefinition[] {
-  if (!agentPermissions) return defs;
-  return defs.filter(def => !def.requiredPermissions?.length || matchPermissions(agentPermissions, def.requiredPermissions));
+  return defs.filter(def => isVisibleToAgent(def.requiredPermissions, agentPermissions));
 }
 
 /**

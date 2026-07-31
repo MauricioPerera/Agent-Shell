@@ -9,7 +9,7 @@
 
 import { parse } from '../parser/index.js';
 import { applyFilter } from '../jq-filter/index.js';
-import { matchPermissions } from '../security/permission-matcher.js';
+import { matchPermissions, isVisibleToAgent } from '../security/permission-matcher.js';
 import { maskSecrets } from '../security/secret-patterns.js';
 import { resolveAgentPermissions } from './agent-profiles.js';
 import { PendingConfirmStore } from '../shared/pending-confirm-store.js';
@@ -335,10 +335,8 @@ class Core {
     const registeredCmd = { ...lookupResult.value.definition, handler: lookupResult.value.handler };
 
     // Check agent permissions
-    if (this.agentPermissions && registeredCmd.requiredPermissions?.length) {
-      if (!matchPermissions(this.agentPermissions, registeredCmd.requiredPermissions)) {
-        return { _error: { code: 3, error: `Permission denied: ${namespace}:${command}` } };
-      }
+    if (!isVisibleToAgent(registeredCmd.requiredPermissions, this.agentPermissions)) {
+      return { _error: { code: 3, error: `Permission denied: ${namespace}:${command}` } };
     }
 
     // Validate mode: check required params
@@ -442,9 +440,7 @@ class Core {
             const lookupResult = this.registry.get(r.namespace, r.command);
             // Fail-closed: if the command isn't in the registry, exclude it
             if (!lookupResult.ok) return false;
-            const { requiredPermissions } = lookupResult.value.definition;
-            if (!requiredPermissions?.length) return true;
-            return matchPermissions(this.agentPermissions!, requiredPermissions);
+            return isVisibleToAgent(lookupResult.value.definition.requiredPermissions, this.agentPermissions);
           });
         }
         return searchResult;
@@ -462,10 +458,8 @@ class Core {
         }
         const definition = lookupResult.value.definition;
         // Check agent permissions before revealing command definition
-        if (this.agentPermissions && definition.requiredPermissions?.length) {
-          if (!matchPermissions(this.agentPermissions, definition.requiredPermissions)) {
-            return { _error: { code: 3, error: `Permission denied: cannot describe ${target}` } };
-          }
+        if (!isVisibleToAgent(definition.requiredPermissions, this.agentPermissions)) {
+          return { _error: { code: 3, error: `Permission denied: cannot describe ${target}` } };
         }
         return definition;
       }
@@ -572,10 +566,8 @@ class Core {
       const registeredCmd = { ...lookupResult.value.definition, handler: lookupResult.value.handler };
 
       // Check agent permissions for each pipeline step
-      if (this.agentPermissions && registeredCmd.requiredPermissions?.length) {
-        if (!matchPermissions(this.agentPermissions, registeredCmd.requiredPermissions)) {
-          return { _error: { code: 3, error: `Permission denied at pipeline step: ${namespace}:${command}` } };
-        }
+      if (!isVisibleToAgent(registeredCmd.requiredPermissions, this.agentPermissions)) {
+        return { _error: { code: 3, error: `Permission denied at pipeline step: ${namespace}:${command}` } };
       }
 
       const handlerArgs: Record<string, any> = { ...args.named };

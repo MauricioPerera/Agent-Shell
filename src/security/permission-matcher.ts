@@ -90,3 +90,22 @@ export function getMissingPermissions(
 ): string[] {
   return required.filter(perm => !matchPermission(userPermissions, perm, options));
 }
+
+/**
+ * True si un comando (dados sus requiredPermissions) es visible/invocable
+ * para un caller con agentPermissions — la misma regla que Core y
+ * registry-admin.ts reimplementaban cada uno por su lado: sin
+ * agentPermissions configurado = sin enforcement (visible); sin
+ * requiredPermissions en el comando = siempre visible; si no, requiere
+ * matchPermissions(). null/undefined agentPermissions sigue la convencion
+ * de resolveAgentPermissions() ("sin perfil/permisos = sin restricciones").
+ */
+export function isVisibleToAgent(
+  requiredPermissions: string[] | undefined | null,
+  agentPermissions?: string[] | null,
+  options?: PermissionMatchOptions
+): boolean {
+  if (!agentPermissions) return true;
+  if (!requiredPermissions?.length) return true;
+  return matchPermissions(agentPermissions, requiredPermissions, options);
+}

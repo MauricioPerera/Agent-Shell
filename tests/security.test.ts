@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { AuditLogger, maskSecrets, containsSecret, RBAC, matchPermission, matchPermissions, resolvePermission, getMissingPermissions } from '../src/security/index.js';
+import { AuditLogger, maskSecrets, containsSecret, RBAC, matchPermission, matchPermissions, resolvePermission, getMissingPermissions, isVisibleToAgent } from '../src/security/index.js';
 import { filterSensitiveEnv } from '../src/security/secret-patterns.js';
 import { EncryptedStorageAdapter } from '../src/context-store/encrypted-storage-adapter.js';
 import { randomBytes } from 'node:crypto';
@@ -592,6 +592,26 @@ describe('Permission Matcher (Resource-Level)', () => {
   it('T59: getMissingPermissions retorna vacio si todos satisfechos', () => {
     const perms = ['users:*'];
     expect(getMissingPermissions(perms, ['users:read', 'users:write'])).toEqual([]);
+  });
+
+  /**
+   * isVisibleToAgent unifica la regla de visibilidad que Core (search/describe/
+   * executeCommand/executePipeline) y registry-admin.ts (filterByPermissions)
+   * reimplementaban cada uno a mano.
+   */
+  it('T59b: isVisibleToAgent sin agentPermissions configurado siempre es visible', () => {
+    expect(isVisibleToAgent(['users:delete'], null)).toBe(true);
+    expect(isVisibleToAgent(['users:delete'], undefined)).toBe(true);
+  });
+
+  it('T59c: isVisibleToAgent sin requiredPermissions siempre es visible', () => {
+    expect(isVisibleToAgent(undefined, ['users:read'])).toBe(true);
+    expect(isVisibleToAgent([], ['users:read'])).toBe(true);
+  });
+
+  it('T59d: isVisibleToAgent delega en matchPermissions cuando ambos estan configurados', () => {
+    expect(isVisibleToAgent(['users:delete'], ['users:*'])).toBe(true);
+    expect(isVisibleToAgent(['users:delete'], ['users:read'])).toBe(false);
   });
 
   it('T60: RBAC.checkPermission integra resolvePermissions + matchPermission', () => {
