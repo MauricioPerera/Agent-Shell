@@ -408,6 +408,47 @@ describe('PgVectorStorageAdapter', () => {
     expect(indexQuery!.text).toContain('vector_ip_ops');
   });
 
+  /**
+   * Regresion: la expresion de score en SQL no estaba acotada a [0,1] como
+   * documenta el contrato (contracts/vector-index.md) — 'cosine' puede dar
+   * negativo (pgvector's <=> da distancia coseno en [0,2], asi que
+   * 1-distancia cae en [-1,1]), e 'inner_product' no tiene cota superior en
+   * absoluto (dot product crudo). Mismo bug que minimemory/vector-storage.ts
+   * ya corrige del lado JS, nunca portado a este adapter hermano. El clamp
+   * va en SQL (no solo despues del map de filas en JS) porque la misma
+   * expresion tambien filtra el WHERE de threshold.
+   */
+  for (const distanceType of ['cosine', 'l2', 'inner_product'] as const) {
+    it(`T26: distanceType ${distanceType} envuelve el score en GREATEST(0, LEAST(1, ...))`, async () => {
+      const c = new MockPgClient();
+      const a = new PgVectorStorageAdapter({ client: c, dimensions: 3, distanceType });
+      await a.initialize();
+      await a.search({ vector: [1, 0, 0], topK: 1 });
+
+      const searchQuery = c.queries.find(q => q.text.toUpperCase().includes('SELECT') && q.text.toUpperCase().includes('SCORE'));
+      expect(searchQuery).toBeDefined();
+      expect(searchQuery!.text).toMatch(/GREATEST\(0, LEAST\(1,/);
+    });
+  }
+
+  /**
+   * El WHERE del filtro de threshold reusa la MISMA expresion acotada que
+   * el SELECT — un clamp solo-en-JS (despues de mapear filas) habria dejado
+   * este filtro comparando contra el valor crudo sin acotar, inconsistente
+   * con el score que el caller termina viendo.
+   */
+  it('T27: el filtro de threshold usa la misma expresion acotada que el SELECT', async () => {
+    const c = new MockPgClient();
+    const a = new PgVectorStorageAdapter({ client: c, dimensions: 3, distanceType: 'cosine' });
+    await a.initialize();
+    await a.search({ vector: [1, 0, 0], topK: 1, threshold: 0.5 });
+
+    const searchQuery = c.queries.find(q => q.text.toUpperCase().includes('SELECT') && q.text.toUpperCase().includes('SCORE'));
+    expect(searchQuery).toBeDefined();
+    const occurrences = searchQuery!.text.match(/GREATEST\(0, LEAST\(1,/g) ?? [];
+    expect(occurrences.length).toBe(2); // once in SELECT, once in the WHERE threshold clause
+  });
+
   it('T24: deleteBatch con array vacio retorna success=0', async () => {
     const result = await adapter.deleteBatch([]);
     expect(result.success).toBe(0);

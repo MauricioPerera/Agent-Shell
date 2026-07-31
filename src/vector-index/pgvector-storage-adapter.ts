@@ -256,16 +256,36 @@ export class PgVectorStorageAdapter implements VectorStorageAdapter {
     return `${column} ${this.getDistanceOperator()} ${param}::vector`;
   }
 
-  /** Convierte distancia a score de similaridad (0-1). */
+  /**
+   * Convierte distancia a score de similaridad, acotado a [0, 1] — mismo
+   * contrato (y mismo bug, encontrado independientemente) que
+   * minimemory/vector-storage.ts ya corrige con un clamp en JS. Sin el
+   * clamp: 'cosine' puede dar negativo (pgvector's <=> devuelve distancia
+   * coseno en [0,2], asi que 1-distancia cae en [-1,1]), e 'inner_product'
+   * no tiene cota superior en absoluto (es un dot product crudo, no
+   * normalizado). 'l2' ya caia naturalmente en (0,1] sin necesitar esto,
+   * pero envolverlo igual no cambia su resultado.
+   *
+   * Se aplica en SQL (no en JS despues del map de filas) porque
+   * similarityExpr tambien se usa en el WHERE del filtro de threshold —
+   * un clamp solo-en-JS habria dejado ese filtro comparando contra el
+   * valor crudo sin acotar, inconsistente con el score que el caller
+   * termina viendo.
+   */
   private getSimilarityExpression(distanceExpr: string): string {
+    let raw: string;
     switch (this.distanceType) {
       case 'cosine':
-        return `1 - (${distanceExpr})`;
+        raw = `1 - (${distanceExpr})`;
+        break;
       case 'l2':
-        return `1 / (1 + (${distanceExpr}))`;
+        raw = `1 / (1 + (${distanceExpr}))`;
+        break;
       case 'inner_product':
-        return `-(${distanceExpr})`;
+        raw = `-(${distanceExpr})`;
+        break;
     }
+    return `GREATEST(0, LEAST(1, ${raw}))`;
   }
 
   private ensureInitialized(): void {
