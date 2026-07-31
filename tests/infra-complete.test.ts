@@ -85,6 +85,30 @@ describe('File CRUD Operations', () => {
     expect(mode).toBe(0o755);
   });
 
+  /**
+   * Regresion: parseInt(args.mode, 8) con un mode no-octal (ej. 'abc',
+   * '999', '') retornaba NaN, y NaN & 0o777 evalua a 0 en JS — un --mode
+   * mal escrito no fallaba con un error, sino que borraba TODOS los
+   * permisos del archivo en silencio en vez de rechazar el input invalido.
+   */
+  it('FO07: file:chmod rechaza un mode invalido en vez de dejar el archivo en 000', async () => {
+    if (process.platform === 'win32') return; // chmod not meaningful on Windows
+    const handler = findHandler(cmds, 'file', 'chmod');
+    const path = join(tempDir, 'script2.sh');
+    writeFileSync(path, '#!/bin/bash');
+    chmodSync(path, 0o755);
+
+    for (const badMode of ['abc', '999', '', '75']) {
+      const res = await handler({ path, mode: badMode });
+      expect(res.success).toBe(false);
+      expect(res.error).toMatch(/invalid mode/i);
+    }
+
+    // Permissions must be untouched by every rejected attempt.
+    const mode = statSync(path).mode & 0o777;
+    expect(mode).toBe(0o755);
+  });
+
   it('FO06: file:mkdir + file:write + file:read roundtrip', async () => {
     const mkdirH = findHandler(cmds, 'file', 'mkdir');
     const writeH = findHandler(cmds, 'file', 'write');

@@ -177,6 +177,14 @@ export function createFileCommands(adapter: ShellAdapter, jailRoot?: string): Sk
       definition: chmodDef,
       handler: async (args: any) => {
         try {
+          // A non-octal mode (e.g. 'abc', '999', '') previously reached
+          // parseInt(args.mode, 8) unchecked: parseInt returns NaN for that
+          // input, and `NaN & 0o777` evaluates to 0 in JS — so a malformed
+          // --mode silently stripped ALL permissions from the target
+          // instead of failing with a validation error.
+          if (!/^[0-7]{3,4}$/.test(String(args.mode))) {
+            return { success: false, data: null, error: `file:chmod failed: invalid mode '${args.mode}' — expected 3 or 4 octal digits (e.g. '755', '0755')` };
+          }
           const check = assertInsideJail(args.path);
           if (!check.ok) return { success: false, data: null, error: check.error };
           await adapter.chmod(check.resolved, parseInt(args.mode, 8));
