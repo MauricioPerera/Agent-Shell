@@ -88,11 +88,11 @@ export function registerSkills(registry: CommandRegistry, agentPermissions?: str
  * @param shellAdapter - Optional ShellAdapter. If not provided, auto-detects
  *   just-bash (sandboxed) or falls back to native (child_process).
  * @param jailRoot - Optional path-containment root, forwarded to the
- *   file/git/workspace/process skills (see security/path-jail.ts). Omitted
- *   = no jail, matching prior behavior. cli/index.ts and server/index.ts
- *   are the only real callers of this function and must forward their own
- *   jailRoot config through here for the containment checks to have any
- *   effect.
+ *   file/git/workspace/process/cron skills (see security/path-jail.ts).
+ *   Omitted = no jail, matching prior behavior. cli/index.ts and
+ *   server/index.ts are the only real callers of this function and must
+ *   forward their own jailRoot config through here for the containment
+ *   checks to have any effect.
  */
 export function registerShellSkills(registry: CommandRegistry, shellAdapter?: ShellAdapter, jailRoot?: string): void {
   const adapter = shellAdapter || createShellAdapter();
@@ -118,7 +118,7 @@ export function registerShellSkills(registry: CommandRegistry, shellAdapter?: Sh
   for (const { definition, handler } of createGitCommands(jailRoot)) {
     registry.register(definition, handler);
   }
-  for (const { definition, handler } of createCronCommands(undefined, adapter)) {
+  for (const { definition, handler } of createCronCommands(undefined, adapter, jailRoot)) {
     registry.register(definition, handler);
   }
   for (const { definition, handler } of createSecretCommands()) {

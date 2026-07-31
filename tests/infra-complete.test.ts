@@ -11,7 +11,7 @@ import { CommandRegistry } from '../src/command-registry/index.js';
 import { registerShellSkills } from '../src/skills/index.js';
 import { createFileCommands } from '../src/skills/shell-file.js';
 import { gitCommands, createGitCommands } from '../src/skills/shell-git.js';
-import { CronScheduler, createCronCommands } from '../src/skills/cron.js';
+import { CronScheduler, createCronCommands, cronCommands } from '../src/skills/cron.js';
 import { SecretStore, createSecretCommands } from '../src/skills/secret-store.js';
 import { ProcessManager, createProcessCommands, processCommands } from '../src/skills/process-mgr.js';
 import { NativeShellAdapter } from '../src/just-bash/adapter.js';
@@ -494,6 +494,98 @@ describe('Cron Skills', () => {
     const handler = findHandler(cmds, 'cron', 'history');
     const res = await handler({});
     expect(res.data.count).toBe(0);
+  });
+});
+
+/**
+ * Regresion: cron:schedule soportaba un --cwd de facto (CronScheduler.schedule()
+ * ya tomaba un 4to parametro cwd, usado en executeTask), pero scheduleDef no
+ * exponia --cwd en absoluto — la unica forma de usarlo era llamando
+ * CronScheduler.schedule() directamente, no via el comando. Al exponerlo se
+ * agrega el mismo containment que file:*, git:*, workspace:* y process:* ya
+ * tienen: executeTask corre task.command por el mismo sink que process:spawn,
+ * asi que dejar --cwd sin jail hubiera reabierto el escape que process:spawn
+ * ya cerro.
+ */
+describe('Cron Jail (opt-in path containment)', () => {
+  let execMock: ReturnType<typeof vi.fn>;
+  let fakeAdapter: ShellAdapter;
+  let scheduler: CronScheduler;
+  let jailDir: string;
+  let outsideDir: string;
+  let jailed: SkillEntry[];
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    execMock = vi.fn().mockResolvedValue({ stdout: '', stderr: '', exitCode: 0 });
+    fakeAdapter = {
+      backend: 'test',
+      exec: execMock,
+      which: vi.fn().mockResolvedValue({ program: '', path: null, found: false }),
+      readFile: vi.fn().mockResolvedValue({ path: '', content: '', size: 0 }),
+      writeFile: vi.fn().mockResolvedValue({ path: '', size: 0, written: true }),
+      listDir: vi.fn().mockResolvedValue({ path: '', entries: [], count: 0 }),
+    };
+    scheduler = new CronScheduler(fakeAdapter);
+    jailDir = mkdtempSync(join(tmpdir(), 'cronjail-'));
+    outsideDir = mkdtempSync(join(tmpdir(), 'cronjail-outside-'));
+    jailed = createCronCommands(scheduler, undefined, jailDir);
+  });
+
+  afterEach(() => {
+    scheduler.destroy();
+    vi.useRealTimers();
+    rmSync(jailDir, { recursive: true, force: true });
+    rmSync(outsideDir, { recursive: true, force: true });
+  });
+
+  it('CJ01: --cwd inside the jail is accepted', async () => {
+    const handler = findHandler(jailed, 'cron', 'schedule');
+    const res = await handler({ name: 'inside', command: 'echo hi', interval: '1s', cwd: jailDir });
+    expect(res.success).toBe(true);
+  });
+
+  it('CJ02: --cwd pointing outside the jail is blocked', async () => {
+    const handler = findHandler(jailed, 'cron', 'schedule');
+    const res = await handler({ name: 'escape', command: 'echo hi', interval: '1s', cwd: outsideDir });
+    expect(res.success).toBe(false);
+    expect(res.error).toMatch(/jail|outside/i);
+
+    const list = findHandler(jailed, 'cron', 'list');
+    expect((await list({})).data.count).toBe(0);
+  });
+
+  it('CJ03: relative --cwd traversal outside the jail is blocked', async () => {
+    const handler = findHandler(jailed, 'cron', 'schedule');
+    const res = await handler({ name: 'traverse', command: 'echo hi', interval: '1s', cwd: '../../../../etc' });
+    expect(res.success).toBe(false);
+    expect(res.error).toMatch(/jail|outside/i);
+  });
+
+  it('CJ04: no --cwd defaults inside the jail, not process.cwd()', async () => {
+    const handler = findHandler(jailed, 'cron', 'schedule');
+    const res = await handler({ name: 'default-cwd', command: 'echo hi', interval: '1s' });
+    expect(res.success).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(execMock).toHaveBeenCalledWith('echo hi', { cwd: jailDir, timeout: 60_000 });
+  });
+
+  it('CJ05: without jailRoot, --cwd is unrestricted (legacy cronCommands export)', async () => {
+    // cronCommands is a module-level singleton with its own real
+    // CronScheduler + NativeShellAdapter (not this describe block's fake
+    // one) — cancel the task afterward so it doesn't leave a real
+    // setInterval running for the rest of the suite.
+    const name = 'unrestricted-' + Date.now();
+    const handler = findHandler(cronCommands, 'cron', 'schedule');
+    const cancel = findHandler(cronCommands, 'cron', 'cancel');
+    const res = await handler({ name, command: 'echo hi', interval: '1m', cwd: outsideDir });
+    try {
+      expect(res.success).toBe(true);
+    } finally {
+      await cancel({ name });
+    }
   });
 });
 

@@ -7,6 +7,8 @@ import { command } from '../command-builder/index.js';
 import type { SkillEntry } from './scaffold.js';
 import type { ShellAdapter } from '../just-bash/types.js';
 import { NativeShellAdapter } from '../just-bash/adapter.js';
+import { createPathJail } from '../security/path-jail.js';
+import { resolve, isAbsolute } from 'node:path';
 
 // ---------------------------------------------------------------------------
 // CronScheduler
@@ -124,7 +126,8 @@ function parseInterval(interval: string): number | null {
 const scheduleDef = command('cron', 'schedule').version('1.0.0')
   .description('Schedule a recurring task')
   .requiredParam('name', 'string').requiredParam('command', 'string').requiredParam('interval', 'string')
-  .example('cron:schedule --name backup --command "tar czf /tmp/backup.tar.gz /data" --interval 1h')
+  .optionalParam('cwd', 'string', '')
+  .example('cron:schedule --name backup --command "tar czf /tmp/backup.tar.gz /data" --interval 1h --cwd /data')
   .tags('cron', 'schedule', 'automation').build();
 
 const listDef = command('cron', 'list').version('1.0.0')
@@ -151,12 +154,36 @@ listDef.requiredPermissions = ['cron:read'];
 cancelDef.requiredPermissions = ['cron:write'];
 historyDef.requiredPermissions = ['cron:read'];
 
-export function createCronCommands(scheduler?: CronScheduler, adapter?: ShellAdapter): SkillEntry[] {
+/**
+ * Creates cron command entries. An optional `jailRoot` constrains
+ * cron:schedule's `--cwd` to a single subtree, the same containment
+ * createFileCommands()/createGitCommands()/createWorkspaceCommands()/
+ * createProcessCommands() offer — executeTask() runs task.command through
+ * the same ShellAdapter.exec() sink process:spawn uses, so leaving --cwd
+ * unrestricted here would reopen the exact escape process:spawn's jailRoot
+ * support was added to close.
+ *
+ * Without jailRoot, behavior is byte-identical to before this option
+ * existed (unresolved `args.cwd`, natural child_process cwd default).
+ */
+export function createCronCommands(scheduler?: CronScheduler, adapter?: ShellAdapter, jailRoot?: string): SkillEntry[] {
   const cron = scheduler || new CronScheduler(adapter);
+  const assertInsideJail = createPathJail(jailRoot);
+  const jailRootAbs = jailRoot ? resolve(jailRoot) : null;
+
+  function resolveCwd(rawCwd: string | undefined): { ok: true; cwd: string | undefined } | { ok: false; error: string } {
+    if (!jailRootAbs) return { ok: true, cwd: rawCwd || undefined };
+    const base = rawCwd ? (isAbsolute(rawCwd) ? rawCwd : resolve(jailRootAbs, rawCwd)) : jailRootAbs;
+    const check = assertInsideJail(base);
+    if (!check.ok) return { ok: false, error: check.error };
+    return { ok: true, cwd: check.resolved };
+  }
 
   return [
     { definition: scheduleDef, handler: async (args: any) => {
-      const res = cron.schedule(args.name, args.command, args.interval);
+      const cwdCheck = resolveCwd(args.cwd || undefined);
+      if (!cwdCheck.ok) return { success: false, data: null, error: cwdCheck.error };
+      const res = cron.schedule(args.name, args.command, args.interval, cwdCheck.cwd);
       return res.success
         ? { success: true, data: { name: args.name, command: args.command, interval: args.interval, scheduled: true } }
         : { success: false, data: null, error: res.error };
