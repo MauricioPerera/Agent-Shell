@@ -87,6 +87,9 @@ export interface ExecutorConfig {
   rateLimit?: {
     maxRequests: number;
     windowMs: number;
+    /** Optional burst cap over a shorter sub-window (default 1000ms). Unset preserves prior behavior (window-only limiting). */
+    burstSize?: number;
+    burstWindowMs?: number;
   };
 }
 

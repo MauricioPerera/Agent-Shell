@@ -14,6 +14,7 @@ import type { SkillEntry } from './scaffold.js';
 import type { ShellAdapter } from '../just-bash/types.js';
 import { NativeShellAdapter } from '../just-bash/adapter.js';
 import { createPathJail } from '../security/path-jail.js';
+import type { HandlerContext } from '../shared/handler-context.js';
 
 // ---------------------------------------------------------------------------
 // WorkspaceState — persistent state across commands
@@ -196,8 +197,8 @@ export function createWorkspaceCommands(state?: WorkspaceState, adapter?: ShellA
   return [
     {
       definition: initDef,
-      handler: async (args: any, _previousData?: any, sessionId?: string) => {
-        const ws = store.get(sessionId);
+      handler: async (args: any, _previousData?: any, ctx?: HandlerContext) => {
+        const ws = store.get(ctx?.sessionId);
         const path = args.path as string;
         const shouldCreate = args.create === true || args.create === 'true';
         const envVars = typeof args.env === 'string' ? JSON.parse(args.env) : (args.env || {});
@@ -231,8 +232,8 @@ export function createWorkspaceCommands(state?: WorkspaceState, adapter?: ShellA
     },
     {
       definition: runDef,
-      handler: async (args: any, _previousData?: any, sessionId?: string) => {
-        const ws = store.get(sessionId);
+      handler: async (args: any, _previousData?: any, ctx?: HandlerContext) => {
+        const ws = store.get(ctx?.sessionId);
 
         // Defense in depth: init/cd already validate ws.cwd before
         // committing it, and a freshly-created state now seeds cwd from
@@ -269,8 +270,8 @@ export function createWorkspaceCommands(state?: WorkspaceState, adapter?: ShellA
     },
     {
       definition: envDef,
-      handler: async (args: any, _previousData?: any, sessionId?: string) => {
-        const ws = store.get(sessionId);
+      handler: async (args: any, _previousData?: any, ctx?: HandlerContext) => {
+        const ws = store.get(ctx?.sessionId);
         // Set
         if (args.set && args.set.includes('=')) {
           const eqIdx = (args.set as string).indexOf('=');
@@ -297,8 +298,8 @@ export function createWorkspaceCommands(state?: WorkspaceState, adapter?: ShellA
     },
     {
       definition: cdDef,
-      handler: async (args: any, _previousData?: any, sessionId?: string) => {
-        const ws = store.get(sessionId);
+      handler: async (args: any, _previousData?: any, ctx?: HandlerContext) => {
+        const ws = store.get(ctx?.sessionId);
         const target = ws.resolvePath(args.path as string);
         const check = assertInsideJail(target);
         if (!check.ok) return { success: false, data: null, error: check.error };
@@ -319,8 +320,8 @@ export function createWorkspaceCommands(state?: WorkspaceState, adapter?: ShellA
     },
     {
       definition: statusDef,
-      handler: async (_args?: any, _previousData?: any, sessionId?: string) => {
-        const ws = store.get(sessionId);
+      handler: async (_args?: any, _previousData?: any, ctx?: HandlerContext) => {
+        const ws = store.get(ctx?.sessionId);
         return {
           success: true,
           data: {
@@ -336,8 +337,8 @@ export function createWorkspaceCommands(state?: WorkspaceState, adapter?: ShellA
     },
     {
       definition: resetDef,
-      handler: async (_args?: any, _previousData?: any, sessionId?: string) => {
-        const ws = store.get(sessionId);
+      handler: async (_args?: any, _previousData?: any, ctx?: HandlerContext) => {
+        const ws = store.get(ctx?.sessionId);
         const previousCwd = ws.cwd;
         // Reset inside the jail when one is configured — resetting to
         // process.cwd() unconditionally could put ws.cwd right back

@@ -7,12 +7,13 @@
  * y retorna respuestas en formato estandar.
  */
 
-import { randomUUID } from 'node:crypto';
 import { parse } from '../parser/index.js';
 import { applyFilter } from '../jq-filter/index.js';
 import { matchPermissions } from '../security/permission-matcher.js';
 import { maskSecrets } from '../security/secret-patterns.js';
 import { resolveAgentPermissions } from './agent-profiles.js';
+import { PendingConfirmStore } from '../shared/pending-confirm-store.js';
+import { SlidingWindowRateLimiter } from '../shared/sliding-window-rate-limiter.js';
 import type { ParseResult, ParsedCommand, ParseError } from '../parser/index.js';
 import type { CoreResponse, CoreConfig, CoreRegistry, CoreVectorIndex, CoreContextStore, LogEntry } from './types.js';
 
@@ -107,7 +108,6 @@ interface PendingConfirm {
   registeredCmd: any;
   handlerArgs: Record<string, any>;
   sessionId?: string;
-  createdAt: number;
 }
 
 class Core {
@@ -119,19 +119,31 @@ class Core {
   private readonly logger: CoreLogger;
   private readonly history: Array<{ command: string; code: number; timestamp: string }> = [];
   private static readonly MAX_HISTORY = 10_000;
-  private rateLimitTimestamps: number[] = [];
+  private rateLimiter: SlidingWindowRateLimiter | null;
   // --confirm support: HELP_TEXT documents 'code 4: Requires confirmation'
   // and a 'confirm <token>' builtin, but executeCommand used to just tag
-  // mode='confirm' and run the handler anyway — this Map is what actually
+  // mode='confirm' and run the handler anyway — this store is what actually
   // makes the two-step preview-then-confirm workflow real. Not scoped by
-  // sessionId (mirrors Executor's own single Map, which has no session
-  // concept at all): the token itself is an unguessable UUID, so the risk
-  // this session-scoping would close (a caller guessing another caller's
-  // identifier) doesn't apply the same way it did for workspace:* state.
-  private readonly pendingConfirms: Map<string, PendingConfirm> = new Map();
+  // sessionId (mirrors Executor's own equivalent store, which has no
+  // session concept at all): the token itself is an unguessable UUID, so
+  // the risk session-scoping would close (a caller guessing another
+  // caller's identifier) doesn't apply the same way it did for
+  // workspace:* state. Shared with Executor's own confirm-token handling
+  // (src/shared/pending-confirm-store.ts) so a future TTL/eviction fix
+  // only has to happen once.
+  private readonly pendingConfirms: PendingConfirmStore<PendingConfirm>;
 
   constructor(config: CoreConfig) {
     this.config = config;
+    this.pendingConfirms = new PendingConfirmStore(config.confirmTTL_ms ?? 300_000);
+    this.rateLimiter = config.rateLimit
+      ? new SlidingWindowRateLimiter({
+          maxRequests: config.rateLimit.maxRequests ?? 120,
+          windowMs: config.rateLimit.windowMs ?? 60_000,
+          burstSize: config.rateLimit.burstSize ?? 20,
+          burstWindowMs: 1000,
+        })
+      : null;
     this.registry = config.registry;
     this.vectorIndex = config.vectorIndex || null;
     this.contextStore = config.contextStore || null;
@@ -140,33 +152,23 @@ class Core {
   }
 
   private checkRateLimit(): boolean {
-    const config = this.config.rateLimit;
-    if (!config) return true;
-
-    const now = Date.now();
-    const windowMs = config.windowMs ?? 60_000;
-    const maxRequests = config.maxRequests ?? 120;
-    const burstSize = config.burstSize ?? 20;
-    const windowStart = now - windowMs;
-
-    this.rateLimitTimestamps = this.rateLimitTimestamps.filter(t => t > windowStart);
-
-    // Check burst (requests in last 1 second)
-    const burstWindowStart = now - 1000;
-    const burstCount = this.rateLimitTimestamps.filter(t => t > burstWindowStart).length;
-    if (burstCount >= burstSize) return false;
-
-    // Check window limit
-    if (this.rateLimitTimestamps.length >= maxRequests) return false;
-
-    this.rateLimitTimestamps.push(now);
-    return true;
+    if (!this.rateLimiter) return true;
+    return this.rateLimiter.tryAcquire();
   }
 
-  private withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  /**
+   * @param controller - Aborted when the timeout fires, so a running handler
+   *   that reads the signal from its {@link HandlerContext} can cooperatively
+   *   stop instead of running to completion after the caller already got a
+   *   timeout response — mirrors Executor's existing timeout cancellation.
+   */
+  private withTimeout<T>(promise: Promise<T>, ms: number, label: string, controller?: AbortController): Promise<T> {
     let timerId: ReturnType<typeof setTimeout>;
     const timeoutPromise = new Promise<never>((_, reject) => {
-      timerId = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+      timerId = setTimeout(() => {
+        controller?.abort();
+        reject(new Error(`${label} timed out after ${ms}ms`));
+      }, ms);
     });
     return Promise.race([promise, timeoutPromise]).finally(() => {
       clearTimeout(timerId);
@@ -209,14 +211,15 @@ class Core {
 
     // Wrap in global timeout
     const globalTimeout = this.config.timeouts?.global_ms ?? 30_000;
+    const controller = new AbortController();
     try {
-      return await this.withTimeout(this.execInternal(cmd, startTime, sessionId), globalTimeout, 'Request');
+      return await this.withTimeout(this.execInternal(cmd, startTime, sessionId, controller.signal), globalTimeout, 'Request', controller);
     } catch (err: any) {
       return this.buildResponse(1, null, err.message || 'Request timed out', cmd.slice(0, 50), mode, startTime);
     }
   }
 
-  private async execInternal(cmd: string, startTime: number, sessionId?: string): Promise<CoreResponse> {
+  private async execInternal(cmd: string, startTime: number, sessionId?: string, signal?: AbortSignal): Promise<CoreResponse> {
     let mode = 'execute';
     this.logger.log('INFO', 'core', 'exec', { command: cmd.slice(0, 100) });
     this.cleanExpiredConfirms();
@@ -243,9 +246,9 @@ class Core {
       let data: any;
 
       if (result.type === 'pipeline') {
-        data = await this.executePipeline(result.commands, sessionId);
+        data = await this.executePipeline(result.commands, sessionId, signal);
       } else if (result.type === 'batch') {
-        data = await this.executeBatch(result.commands, sessionId);
+        data = await this.executeBatch(result.commands, sessionId, signal);
         // Batch code: 0 if all succeeded, 1 if any failed
         const batchFailed = data.some((r: any) => r.code !== 0);
         const code = batchFailed ? 1 : 0;
@@ -253,7 +256,7 @@ class Core {
         return this.buildResponse(code, data, null, cmd, mode, startTime);
       } else {
         // Single command
-        data = await this.executeCommand(firstCmd, sessionId);
+        data = await this.executeCommand(firstCmd, sessionId, signal);
       }
 
       // Handle error responses from executeCommand
@@ -297,7 +300,7 @@ class Core {
 
   // --- Private methods ---
 
-  private async executeCommand(parsed: ParsedCommand, sessionId?: string): Promise<any> {
+  private async executeCommand(parsed: ParsedCommand, sessionId?: string, signal?: AbortSignal): Promise<any> {
     const { namespace, command, args, flags } = parsed;
 
     // Builtin commands (namespace is null)
@@ -312,7 +315,7 @@ class Core {
           return { _error: { code: 3, error: `Permission denied: ${command}` } };
         }
       }
-      return this.executeBuiltin(command, args);
+      return this.executeBuiltin(command, args, signal);
     }
 
     // Context namespace special handling
@@ -374,7 +377,9 @@ class Core {
     // convention — on failure, propagate it as the same _error shape the caller
     // (execInternal) already checks for lookup/permission failures, instead of
     // silently discarding `error` and reporting success with null data.
-    const result = await registeredCmd.handler(handlerArgs, null, sessionId);
+    // The 3rd arg unifies what Core and Executor each used to pass ad hoc
+    // (see src/shared/handler-context.ts).
+    const result = await registeredCmd.handler(handlerArgs, null, { sessionId, signal });
     if (result && typeof result === 'object' && result.success === false) {
       return { _error: { code: 1, error: result.error || `Command failed: ${namespace}:${command}` } };
     }
@@ -389,15 +394,7 @@ class Core {
     handlerArgs: Record<string, any>,
     sessionId?: string
   ): any {
-    const token = randomUUID();
-    this.pendingConfirms.set(token, {
-      namespace,
-      command,
-      registeredCmd,
-      handlerArgs,
-      sessionId,
-      createdAt: Date.now(),
-    });
+    const token = this.pendingConfirms.create({ namespace, command, registeredCmd, handlerArgs, sessionId });
 
     return {
       confirmRequired: true,
@@ -412,14 +409,14 @@ class Core {
   }
 
   /** Looks up a pending confirmation by token and, if still valid, runs the stashed command. */
-  private async resolveConfirmation(token: string): Promise<any> {
-    const pending = this.pendingConfirms.get(token);
-    if (!pending) {
+  private async resolveConfirmation(token: string, signal?: AbortSignal): Promise<any> {
+    const resolved = this.pendingConfirms.resolve(token);
+    if (resolved.status !== 'ok') {
       return { _error: { code: 2, error: 'Invalid or expired confirmation token' } };
     }
-    this.pendingConfirms.delete(token);
+    const pending = resolved.payload;
 
-    const result = await pending.registeredCmd.handler(pending.handlerArgs, null, pending.sessionId);
+    const result = await pending.registeredCmd.handler(pending.handlerArgs, null, { sessionId: pending.sessionId, signal });
     if (result && typeof result === 'object' && result.success === false) {
       return { _error: { code: 1, error: result.error || `Command failed: ${pending.namespace}:${pending.command}` } };
     }
@@ -428,16 +425,10 @@ class Core {
 
   /** Evicts confirm tokens older than confirmTTL_ms (default 5 min). Runs once per exec() call. */
   private cleanExpiredConfirms(): void {
-    const ttl = this.config.confirmTTL_ms ?? 300_000;
-    const now = Date.now();
-    for (const [token, pending] of this.pendingConfirms) {
-      if (now - pending.createdAt > ttl) {
-        this.pendingConfirms.delete(token);
-      }
-    }
+    this.pendingConfirms.sweepExpired();
   }
 
-  private async executeBuiltin(command: string, args: any): Promise<any> {
+  private async executeBuiltin(command: string, args: any, signal?: AbortSignal): Promise<any> {
     switch (command) {
       case 'search': {
         if (!this.vectorIndex) {
@@ -496,7 +487,7 @@ class Core {
       case 'confirm': {
         const token = args.positional[0] || '';
         if (!token) return { _error: { code: 1, error: 'Usage: confirm <token>' } };
-        return this.resolveConfirmation(token);
+        return this.resolveConfirmation(token, signal);
       }
 
       case 'help': {
@@ -559,7 +550,7 @@ class Core {
     return { valid: true, command: `${registeredCmd.namespace}:${registeredCmd.name}` };
   }
 
-  private async executePipeline(commands: ParsedCommand[], sessionId?: string): Promise<any> {
+  private async executePipeline(commands: ParsedCommand[], sessionId?: string, signal?: AbortSignal): Promise<any> {
     const maxDepth = 10;
     if (commands.length > maxDepth) {
       return { _error: { code: 1, error: `Pipeline exceeds maximum depth of ${maxDepth} commands` } };
@@ -596,7 +587,7 @@ class Core {
         });
       }
 
-      const result = await registeredCmd.handler(handlerArgs, previousData, sessionId);
+      const result = await registeredCmd.handler(handlerArgs, previousData, { sessionId, signal });
       if (!result.success) {
         const detail = result.error ? `: ${result.error}` : '';
         return { _error: { code: 1, error: `Pipeline failed at ${namespace}:${command}${detail}` } };
@@ -608,7 +599,7 @@ class Core {
     return previousData;
   }
 
-  private async executeBatch(commands: ParsedCommand[], sessionId?: string): Promise<any[]> {
+  private async executeBatch(commands: ParsedCommand[], sessionId?: string, signal?: AbortSignal): Promise<any[]> {
     const maxBatchSize = 20;
     if (commands.length > maxBatchSize) {
       return [{ code: 1, data: null, error: `Batch exceeds maximum size of ${maxBatchSize} commands` }];
@@ -618,7 +609,7 @@ class Core {
     const results: any[] = [];
     for (const cmd of commands) {
       try {
-        const data = await this.executeCommand(cmd, sessionId);
+        const data = await this.executeCommand(cmd, sessionId, signal);
         if (data && typeof data === 'object' && '_error' in data) {
           results.push({ code: data._error.code, data: null, error: data._error.error });
         } else if (data && typeof data === 'object' && data.confirmRequired === true) {

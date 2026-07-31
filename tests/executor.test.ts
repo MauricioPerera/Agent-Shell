@@ -1037,4 +1037,98 @@ describe('Executor', () => {
       expect(result.meta.reversible).toBe(true);
     });
   });
+
+  // ----------------------------------------------------------
+  // Regresion: definiciones reales de CommandRegistry/command-builder
+  // ----------------------------------------------------------
+  // Los tests de arriba usan mocks que definen sus comandos con `args:`
+  // directamente. El registry REAL (CommandRegistry + command-builder,
+  // usado por todos los skills del producto) siempre produce `params:`
+  // (ver CommandDefinition en src/command-registry/types.ts) — Executor
+  // leia `definition.args` a secas, asi que con una definicion real
+  // `argDefs` quedaba vacio y CUALQUIER argumento (nombrado o posicional)
+  // se perdia en silencio antes de llegar al handler.
+  describe('Integracion con CommandRegistry real (params, no args)', () => {
+    it('un comando con requiredParam string definido via command-builder recibe su argumento nombrado', async () => {
+      const { command } = await import('../src/command-builder/index.js');
+      const { CommandRegistry } = await import('../src/command-registry/index.js');
+      const { parse } = await import('../src/parser/index.js');
+
+      const def = command('greet', 'hello')
+        .version('1.0.0')
+        .description('Saluda a alguien')
+        .requiredParam('name', 'string')
+        .example('greet:hello --name World')
+        .build();
+
+      let receivedArgs: any = null;
+      const registry = new CommandRegistry();
+      registry.register(def, async (args: any) => {
+        receivedArgs = args;
+        return { greeting: `Hello, ${args.name}!` };
+      });
+
+      const ctx = createMockContext({ permissions: ['*'] });
+      const realExecutor = new Executor(registry as any, ctx);
+
+      const result = await realExecutor.execute(parse('greet:hello --name World')) as ExecutionResult;
+
+      expect(result.code).toBe(0);
+      expect(receivedArgs).toEqual({ name: 'World' });
+      expect(result.data).toEqual({ greeting: 'Hello, World!' });
+    });
+
+    it('un argumento posicional se mapea al param correspondiente, igual que en Core', async () => {
+      const { command } = await import('../src/command-builder/index.js');
+      const { CommandRegistry } = await import('../src/command-registry/index.js');
+      const { parse } = await import('../src/parser/index.js');
+
+      const def = command('greet', 'hello')
+        .version('1.0.0')
+        .description('Saluda a alguien')
+        .requiredParam('name', 'string')
+        .example('greet:hello World')
+        .build();
+
+      let receivedArgs: any = null;
+      const registry = new CommandRegistry();
+      registry.register(def, async (args: any) => {
+        receivedArgs = args;
+        return { greeting: `Hello, ${args.name}!` };
+      });
+
+      const ctx = createMockContext({ permissions: ['*'] });
+      const realExecutor = new Executor(registry as any, ctx);
+
+      const result = await realExecutor.execute(parse('greet:hello World')) as ExecutionResult;
+
+      expect(result.code).toBe(0);
+      expect(receivedArgs).toEqual({ name: 'World' });
+    });
+
+    it('un comando con requiredParam string sin proveer el argumento retorna E_INVALID_ARGS, no lo omite en silencio', async () => {
+      const { command } = await import('../src/command-builder/index.js');
+      const { CommandRegistry } = await import('../src/command-registry/index.js');
+      const { parse } = await import('../src/parser/index.js');
+
+      const def = command('greet', 'hello')
+        .version('1.0.0')
+        .description('Saluda a alguien')
+        .requiredParam('name', 'string')
+        .example('greet:hello --name World')
+        .build();
+
+      const registry = new CommandRegistry();
+      registry.register(def, async (args: any) => ({ greeting: `Hello, ${args.name}!` }));
+
+      const ctx = createMockContext({ permissions: ['*'] });
+      const realExecutor = new Executor(registry as any, ctx);
+
+      const result = await realExecutor.execute(parse('greet:hello')) as ExecutionResult;
+
+      expect(result.code).toBe(1);
+      expect(result.error!.type).toBe('E_INVALID_ARGS');
+      expect(result.error!.message).toContain("--name");
+    });
+  });
 });

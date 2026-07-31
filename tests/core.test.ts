@@ -414,6 +414,55 @@ describe('Core', () => {
   });
 
   // ----------------------------------------------------------
+  // Cancelacion cooperativa en timeout (paridad con Executor)
+  // ----------------------------------------------------------
+  describe('Cancelacion cooperativa en timeout (signal)', () => {
+    it('T06h: el handler recibe {sessionId, signal} y la signal se aborta cuando el timeout global expira', async () => {
+      let observedAbort = false;
+      let observedSessionId: string | undefined;
+      const slowRegistry = createMockRegistry();
+      const originalGet = slowRegistry.get.bind(slowRegistry);
+      (slowRegistry as any).get = (namespace: string, name: string) => {
+        if (namespace === 'slow' && name === 'handler') {
+          return {
+            ok: true,
+            value: {
+              definition: { namespace: 'slow', name: 'handler', params: [] },
+              handler: async (_args: any, _input: any, ctx: any) => {
+                observedSessionId = ctx?.sessionId;
+                await new Promise<void>((resolve) => {
+                  ctx?.signal?.addEventListener('abort', () => {
+                    observedAbort = true;
+                    resolve();
+                  });
+                  // Safety net so the test can't hang if the signal never fires.
+                  setTimeout(resolve, 500);
+                });
+                return { success: true, data: { done: true } };
+              },
+            },
+          };
+        }
+        return originalGet(namespace, name);
+      };
+
+      const shortTimeoutCore = new Core({
+        registry: slowRegistry,
+        vectorIndex: createMockVectorIndex(),
+        contextStore: createMockContextStore(),
+        timeouts: { global_ms: 50 },
+      });
+
+      const response = await shortTimeoutCore.exec('slow:handler', 'session-abc');
+
+      expect(response.code).toBe(1);
+      expect(response.error).toContain('timed out');
+      expect(observedAbort).toBe(true);
+      expect(observedSessionId).toBe('session-abc');
+    });
+  });
+
+  // ----------------------------------------------------------
   // Seccion 5: Pipeline (Pipe >>)
   // ----------------------------------------------------------
   describe('Pipeline (Pipe >>)', () => {

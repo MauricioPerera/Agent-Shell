@@ -10,6 +10,8 @@
 import type { ExecutionResult, ExecutionError, ExecutionMeta, BatchResult, PipelineResult, PipelineStep, ExecutionContext, ExecutorRegistry } from './types.js';
 import { maskSecrets } from '../security/secret-patterns.js';
 import { matchPermissions } from '../security/permission-matcher.js';
+import { PendingConfirmStore } from '../shared/pending-confirm-store.js';
+import { SlidingWindowRateLimiter } from '../shared/sliding-window-rate-limiter.js';
 
 export { type ExecutionResult, type ExecutionError, type ExecutionMeta, type BatchResult, type PipelineResult, type PipelineStep, type ExecutionContext, type ExecutorConfig, type HistoryStore, type ExecutorRegistry } from './types.js';
 
@@ -19,7 +21,6 @@ interface PendingConfirm {
   command: string;
   args: Record<string, any>;
   registeredCommand: any;
-  createdAt: number;
 }
 
 /**
@@ -34,12 +35,25 @@ interface PendingConfirm {
 export class Executor {
   private registry: ExecutorRegistry;
   private context: ExecutionContext;
-  private pendingConfirms: Map<string, PendingConfirm> = new Map();
-  private rateLimitTimestamps: number[] = [];
+  // Shared with Core's own confirm-token handling
+  // (src/shared/pending-confirm-store.ts) so a future TTL/eviction fix
+  // only has to happen once — found this exact pattern hand-duplicated
+  // between the two engines while auditing for tech debt.
+  private pendingConfirms: PendingConfirmStore<PendingConfirm>;
+  private rateLimiter: SlidingWindowRateLimiter | null;
 
   constructor(registry: ExecutorRegistry, context: ExecutionContext) {
     this.registry = registry;
     this.context = context;
+    this.pendingConfirms = new PendingConfirmStore(context.config.confirmTTL_ms ?? 300_000);
+    this.rateLimiter = context.config.rateLimit
+      ? new SlidingWindowRateLimiter({
+          maxRequests: context.config.rateLimit.maxRequests,
+          windowMs: context.config.rateLimit.windowMs,
+          burstSize: context.config.rateLimit.burstSize,
+          burstWindowMs: context.config.rateLimit.burstWindowMs,
+        })
+      : null;
   }
 
   /** Ejecuta un ParseResult (single, pipeline, o batch). */
@@ -85,21 +99,18 @@ export class Executor {
 
   /** Confirma un comando previamente pendiente con su token. */
   async confirm(token: string): Promise<ExecutionResult> {
-    const pending = this.pendingConfirms.get(token);
-    if (!pending) {
+    const resolved = this.pendingConfirms.resolve(token);
+    if (resolved.status === 'not_found') {
       return this.errorResult(2, 'E_CONFIRM_INVALID', 'Invalid or expired confirmation token', 'normal', '');
     }
-
-    // Check TTL
-    const ttl = this.context.config.confirmTTL_ms ?? 300_000;
-    const elapsed = Date.now() - pending.createdAt;
-    if (elapsed > ttl) {
-      this.pendingConfirms.delete(token);
-      this.context.auditLogger?.audit('confirm:expired', { command: `${pending.namespace}:${pending.command}`, token });
-      return this.errorResult(2, 'E_CONFIRM_EXPIRED', `Confirmation token expired (${Math.round(elapsed / 1000)}s > ${ttl / 1000}s TTL)`, 'normal', `${pending.namespace}:${pending.command}`);
+    if (resolved.status === 'expired') {
+      const pending = resolved.payload;
+      const command = `${pending.namespace}:${pending.command}`;
+      this.context.auditLogger?.audit('confirm:expired', { command, token });
+      return this.errorResult(2, 'E_CONFIRM_EXPIRED', `Confirmation token expired (${Math.round(resolved.ageMs / 1000)}s > ${resolved.ttlMs / 1000}s TTL)`, 'normal', command);
     }
 
-    this.pendingConfirms.delete(token);
+    const pending = resolved.payload;
 
     // Execute the stored command
     const { registeredCommand, args } = pending;
@@ -154,7 +165,22 @@ export class Executor {
     const definition = registeredCommand.definition;
 
     // 2. VALIDATE ARGS
-    const validationResult = this.validateArgs(cmd.args.named, definition.args || [], input);
+    // `params` is the canonical field CommandRegistry/command-builder produce
+    // (see CommandDefinition in src/command-registry/types.ts); `args` is
+    // kept as a fallback for registries that define it directly. Positional
+    // args are mapped onto their param name first, mirroring the same
+    // mapping Core does, so `workspace:cd src/server` resolves identically
+    // through either engine.
+    const argDefs = definition.params || definition.args || [];
+    const mergedNamed = { ...cmd.args.named };
+    if (Array.isArray(cmd.args.positional)) {
+      argDefs.forEach((def: any, idx: number) => {
+        if (cmd.args.positional[idx] !== undefined && !(def.name in mergedNamed)) {
+          mergedNamed[def.name] = cmd.args.positional[idx];
+        }
+      });
+    }
+    const validationResult = this.validateArgs(mergedNamed, argDefs, input);
     if (!validationResult.ok) {
       return this.errorResult(1, 'E_INVALID_ARGS', validationResult.message, this.getMode(cmd.flags), fullName);
     }
@@ -196,13 +222,11 @@ export class Executor {
     }
 
     if (mode === 'confirm') {
-      const confirmToken = crypto.randomUUID();
-      this.pendingConfirms.set(confirmToken, {
+      const confirmToken = this.pendingConfirms.create({
         namespace: cmd.namespace,
         command: cmd.command,
         args: validatedArgs,
         registeredCommand,
-        createdAt: Date.now(),
       });
 
       this.context.auditLogger?.audit('confirm:requested', { command: fullName, token: confirmToken });
@@ -508,29 +532,12 @@ export class Executor {
   }
 
   private checkRateLimit(): boolean {
-    const config = this.context.config.rateLimit;
-    if (!config) return true;
-
-    const now = Date.now();
-    const windowStart = now - config.windowMs;
-    this.rateLimitTimestamps = this.rateLimitTimestamps.filter(t => t > windowStart);
-
-    if (this.rateLimitTimestamps.length >= config.maxRequests) {
-      return false;
-    }
-
-    this.rateLimitTimestamps.push(now);
-    return true;
+    if (!this.rateLimiter) return true;
+    return this.rateLimiter.tryAcquire();
   }
 
   private cleanExpiredConfirms(): void {
-    const ttl = this.context.config.confirmTTL_ms ?? 300_000;
-    const now = Date.now();
-    for (const [token, pending] of this.pendingConfirms) {
-      if (now - pending.createdAt > ttl) {
-        this.pendingConfirms.delete(token);
-      }
-    }
+    this.pendingConfirms.sweepExpired();
   }
 
   private hasPermissions(required: string[], args?: Record<string, any>): boolean {
@@ -540,13 +547,14 @@ export class Executor {
   private async executeWithTimeout(handler: Function, args: any, input?: any): Promise<any> {
     const timeout = this.context.config.timeout_ms;
 
-    // Handlers that accept a 3rd (signal) arg can cooperatively stop work once
-    // the timeout fires; handlers that ignore it behave exactly as before.
-    // This does not force-kill non-cooperative handlers (JS has no such primitive),
-    // but it gives the executor a real cancellation channel instead of none at all.
+    // Handlers that accept a 3rd (HandlerContext) arg can read sessionId
+    // and/or cooperatively stop work once the timeout fires; handlers that
+    // ignore it behave exactly as before. Cancellation does not force-kill
+    // non-cooperative handlers (JS has no such primitive), but it gives the
+    // executor a real cancellation channel instead of none at all.
     const controller = new AbortController();
     let timerId: ReturnType<typeof setTimeout>;
-    const handlerPromise = Promise.resolve(handler(args, input, { signal: controller.signal }));
+    const handlerPromise = Promise.resolve(handler(args, input, { sessionId: this.context.sessionId, signal: controller.signal }));
     const timeoutPromise = new Promise((_, reject) => {
       timerId = setTimeout(() => {
         controller.abort();
@@ -619,20 +627,17 @@ export class Executor {
 
   /** Revoca un token de confirmacion pendiente. Retorna true si se revoco, false si no existia. */
   revokeConfirm(token: string): boolean {
-    const pending = this.pendingConfirms.get(token);
+    const pending = this.pendingConfirms.revoke(token);
     if (!pending) {
       return false;
     }
-    this.pendingConfirms.delete(token);
     this.context.auditLogger?.audit('confirm:expired', { command: `${pending.namespace}:${pending.command}`, token, reason: 'revoked' });
     return true;
   }
 
   /** Revoca todos los tokens de confirmacion pendientes. Retorna el numero de tokens revocados. */
   revokeAllConfirms(): number {
-    const count = this.pendingConfirms.size;
-    this.pendingConfirms.clear();
-    return count;
+    return this.pendingConfirms.revokeAll();
   }
 }
 
