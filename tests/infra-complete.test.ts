@@ -13,7 +13,7 @@ import { createFileCommands } from '../src/skills/shell-file.js';
 import { gitCommands, createGitCommands } from '../src/skills/shell-git.js';
 import { CronScheduler, createCronCommands } from '../src/skills/cron.js';
 import { SecretStore, createSecretCommands } from '../src/skills/secret-store.js';
-import { ProcessManager, createProcessCommands } from '../src/skills/process-mgr.js';
+import { ProcessManager, createProcessCommands, processCommands } from '../src/skills/process-mgr.js';
 import { NativeShellAdapter } from '../src/just-bash/adapter.js';
 import type { SkillEntry } from '../src/skills/scaffold.js';
 import type { ShellAdapter } from '../src/just-bash/types.js';
@@ -779,6 +779,88 @@ describe('Process Manager Skills', () => {
       if (prevToken === undefined) delete process.env.AGENT_SHELL_TEST_TOKEN;
       else process.env.AGENT_SHELL_TEST_TOKEN = prevToken;
       rmSync(scriptDir, { recursive: true, force: true });
+    }
+  });
+});
+
+/**
+ * Regresion: process:spawn aceptaba --cwd sin ninguna restriccion — a
+ * diferencia de file:*, git:* y workspace:*, que ya soportan
+ * createXCommands(..., jailRoot), createProcessCommands() no tomaba
+ * jailRoot en absoluto. Un caller con solo process:write podia spawnear un
+ * comando con --cwd apuntando a cualquier directorio del host, evadiendo
+ * por completo un jail configurado para el resto de las skills.
+ */
+describe('Process Jail (opt-in path containment)', () => {
+  let pm: ProcessManager;
+  let jailDir: string;
+  let outsideDir: string;
+  let jailed: SkillEntry[];
+
+  beforeEach(() => {
+    pm = new ProcessManager();
+    jailDir = mkdtempSync(join(tmpdir(), 'processjail-'));
+    outsideDir = mkdtempSync(join(tmpdir(), 'processjail-outside-'));
+    jailed = createProcessCommands(pm, jailDir);
+  });
+
+  afterEach(() => {
+    pm.destroy();
+    rmSync(jailDir, { recursive: true, force: true });
+    rmSync(outsideDir, { recursive: true, force: true });
+  });
+
+  it('PJ01: --cwd inside the jail works normally', async () => {
+    const handler = findHandler(jailed, 'process', 'spawn');
+    const res = await handler({ name: 'inside', command: 'echo hi', cwd: jailDir });
+    expect(res.success).toBe(true);
+  });
+
+  it('PJ02: --cwd pointing outside the jail is blocked', async () => {
+    const handler = findHandler(jailed, 'process', 'spawn');
+    const res = await handler({ name: 'escape', command: 'echo hi', cwd: outsideDir });
+    expect(res.success).toBe(false);
+    expect(res.error).toMatch(/jail|outside/i);
+  });
+
+  it('PJ03: no --cwd defaults inside the jail, not process.cwd()', async () => {
+    // Uses node's own process.cwd() rather than a shell builtin (pwd/cd):
+    // spawn's shell:true runs via the OS default shell (cmd.exe on native
+    // Windows, not a POSIX shell), and shell-builtin output formatting
+    // (short paths, drive-letter quoting) is a confound this test isn't
+    // about — node's process.cwd() reflects the spawn `cwd` option exactly.
+    const handler = findHandler(jailed, 'process', 'spawn');
+    const logs = findHandler(jailed, 'process', 'logs');
+    const res = await handler({ name: 'default-cwd', command: 'node -e "console.log(process.cwd())"' });
+    expect(res.success).toBe(true);
+    await new Promise(r => setTimeout(r, 500));
+    const logRes = await logs({ name: 'default-cwd' });
+    expect(logRes.data.stdout.trim().toLowerCase()).toBe(jailDir.toLowerCase());
+  });
+
+  it('PJ04: relative --cwd traversal outside the jail is blocked', async () => {
+    const handler = findHandler(jailed, 'process', 'spawn');
+    const res = await handler({ name: 'traverse', command: 'echo hi', cwd: '../../../../etc' });
+    expect(res.success).toBe(false);
+    expect(res.error).toMatch(/jail|outside/i);
+  });
+
+  it('PJ05: without jailRoot, --cwd is unrestricted (legacy processCommands export)', async () => {
+    // processCommands is a module-level singleton with its own untracked
+    // ProcessManager (not this describe block's `pm`), so afterEach's
+    // pm.destroy() never reaches it — a still-running child holding
+    // outsideDir as its cwd would keep Windows from deleting the directory.
+    const handler = findHandler(processCommands, 'process', 'spawn');
+    const kill = findHandler(processCommands, 'process', 'kill');
+    const res = await handler({ name: 'unrestricted', command: 'echo hi', cwd: outsideDir });
+    try {
+      expect(res.success).toBe(true);
+    } finally {
+      await kill({ name: 'unrestricted' });
+      // kill() only sends SIGTERM; give Windows a moment to actually
+      // terminate the process and release its lock on outsideDir before
+      // afterEach's rmSync runs.
+      await new Promise(r => setTimeout(r, 500));
     }
   });
 });

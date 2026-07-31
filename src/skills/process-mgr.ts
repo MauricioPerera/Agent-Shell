@@ -6,8 +6,10 @@
 
 import { command } from '../command-builder/index.js';
 import { spawn, type ChildProcess } from 'node:child_process';
+import { resolve, isAbsolute } from 'node:path';
 import type { SkillEntry } from './scaffold.js';
 import { filterSensitiveEnv } from '../security/secret-patterns.js';
+import { createPathJail } from '../security/path-jail.js';
 
 // ---------------------------------------------------------------------------
 // ProcessManager
@@ -150,12 +152,35 @@ listDef.requiredPermissions = ['process:read'];
 killDef.requiredPermissions = ['process:write'];
 logsDef.requiredPermissions = ['process:read'];
 
-export function createProcessCommands(manager?: ProcessManager): SkillEntry[] {
+/**
+ * Creates process command entries. An optional `jailRoot` constrains
+ * process:spawn's `--cwd` to a single subtree, the same containment
+ * createFileCommands()/createGitCommands()/createWorkspaceCommands() offer
+ * — without it, a caller holding only `process:write` could spawn a shell
+ * command with an arbitrary `--cwd` anywhere on disk, fully escaping a jail
+ * configured for file:*, git:*, or workspace:*.
+ *
+ * Without jailRoot, behavior is byte-identical to before this option
+ * existed (unresolved `args.cwd`, natural child_process cwd default).
+ */
+export function createProcessCommands(manager?: ProcessManager, jailRoot?: string): SkillEntry[] {
   const pm = manager || new ProcessManager();
+  const assertInsideJail = createPathJail(jailRoot);
+  const jailRootAbs = jailRoot ? resolve(jailRoot) : null;
+
+  function resolveCwd(rawCwd: string | undefined): { ok: true; cwd: string | undefined } | { ok: false; error: string } {
+    if (!jailRootAbs) return { ok: true, cwd: rawCwd || undefined };
+    const base = rawCwd ? (isAbsolute(rawCwd) ? rawCwd : resolve(jailRootAbs, rawCwd)) : jailRootAbs;
+    const check = assertInsideJail(base);
+    if (!check.ok) return { ok: false, error: check.error };
+    return { ok: true, cwd: check.resolved };
+  }
 
   return [
     { definition: spawnDef, handler: async (args: any) => {
-      const res = pm.spawn(args.name, args.command, args.cwd || undefined);
+      const cwdCheck = resolveCwd(args.cwd || undefined);
+      if (!cwdCheck.ok) return { success: false, data: null, error: cwdCheck.error };
+      const res = pm.spawn(args.name, args.command, cwdCheck.cwd);
       return res.success
         ? { success: true, data: { name: args.name, pid: res.pid, command: args.command, spawned: true } }
         : { success: false, data: null, error: res.error };
