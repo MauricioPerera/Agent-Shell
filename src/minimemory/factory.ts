@@ -11,6 +11,7 @@ import { createRequire } from 'node:module';
 import type { VectorStorageAdapter, CommandMetadata, VectorSearchResult } from '../vector-index/types.js';
 import type { StorageFactoryOptions, StorageFactoryResult, MiniMemoryBinding } from './types.js';
 import { MiniMemoryVectorStorage } from './vector-storage.js';
+import { cosineSimilarity } from '../vector-index/similarity.js';
 
 // This package builds to ESM only (tsup.config.ts: format: ['esm']). The bare
 // `require` identifier doesn't exist at runtime in ESM, and bundlers rewrite a
@@ -242,17 +243,4 @@ function createInMemoryStorage(): VectorStorageAdapter {
       return { status: 'healthy', details: `in-memory: ${entries.size} vectors` };
     },
   };
-}
-
-function cosineSimilarity(a: number[], b: number[]): number {
-  let dot = 0;
-  let normA = 0;
-  let normB = 0;
-  for (let i = 0; i < a.length; i++) {
-    dot += a[i] * b[i];
-    normA += a[i] * a[i];
-    normB += b[i] * b[i];
-  }
-  const denom = Math.sqrt(normA) * Math.sqrt(normB);
-  return denom === 0 ? 0 : dot / denom;
 }

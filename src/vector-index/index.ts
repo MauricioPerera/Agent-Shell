@@ -26,6 +26,7 @@ import type {
 } from './types.js';
 import { MAX_RESULTS, VectorIndexError } from './types.js';
 import { funnelSearch } from './matryoshka.js';
+import { cosineSimilarity } from './similarity.js';
 
 export { VectorIndex };
 export { PgVectorStorageAdapter } from './pgvector-storage-adapter.js';
@@ -463,23 +464,6 @@ class VectorIndex {
     this.lastSyncAt = new Date().toISOString();
     return { added, updated, removed, duration_ms: Date.now() - startTime };
   }
-}
-
-/**
- * Calcula la similaridad coseno entre dos vectores.
- * Retorna un valor entre -1 y 1 (1 = identico, 0 = ortogonal).
- */
-function cosineSimilarity(a: number[], b: number[]): number {
-  let dot = 0;
-  let normA = 0;
-  let normB = 0;
-  for (let i = 0; i < a.length; i++) {
-    dot += a[i] * b[i];
-    normA += a[i] * a[i];
-    normB += b[i] * b[i];
-  }
-  const denom = Math.sqrt(normA) * Math.sqrt(normB);
-  return denom === 0 ? 0 : dot / denom;
 }
 
 /**
