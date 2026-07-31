@@ -135,6 +135,24 @@ describe('CLI config file validation', () => {
     expect(exitSpy).toHaveBeenCalledWith(1);
     expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("field 'jailRoot' should be a string"));
   });
+
+  /**
+   * Regresion: server/index.ts ya soportaba shellAdapter (--shell-adapter/
+   * AGENT_SHELL_ADAPTER/config), pero cli/index.ts llamaba createShellAdapter()
+   * sin argumentos — no habia forma de forzar native (bypasear el sandbox) o
+   * just-bash (exigirlo) desde el CLI real.
+   */
+  it('CLI14: acepta shellAdapter como string', () => {
+    const result = validateConfigFile({ shellAdapter: 'just-bash' }, 'x.json');
+    expect(result.shellAdapter).toBe('just-bash');
+  });
+
+  it('CLI15: descarta shellAdapter no-string con warning', () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const result = validateConfigFile({ shellAdapter: 42 }, 'x.json');
+    expect(result.shellAdapter).toBeUndefined();
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("field 'shellAdapter' should be a string"));
+  });
 });
 
 /**

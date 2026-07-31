@@ -41,6 +41,7 @@ Serve Options:
   --profile <string>        Agent profile: admin|operator|reader|restricted
   --cors-origin <origin>    CORS origin (default: *)
   --jail-root <path>        Confine file:*/git:*/workspace:* to this directory
+  --shell-adapter <string>  Shell backend: native|just-bash|auto (default: auto)
   --no-cli-skills           Skip registering CLI creation skills
   --no-shell-skills         Skip registering system shell skills
 
@@ -51,6 +52,7 @@ Environment Variables:
   AGENT_SHELL_PROFILE       Agent profile
   AGENT_SHELL_CORS_ORIGIN   CORS origin
   AGENT_SHELL_JAIL_ROOT     Path-jail root
+  AGENT_SHELL_ADAPTER       Shell backend
 
 Config File:
   agent-shell.config.json   Loaded from working directory (env vars override)
@@ -153,6 +155,10 @@ export function validateConfigFile(raw: Record<string, any>, configPath: string)
       process.exit(1);
     }
   }
+  if (raw.shellAdapter !== undefined) {
+    if (typeof raw.shellAdapter === 'string') config.shellAdapter = raw.shellAdapter;
+    else warn('shellAdapter', 'a string');
+  }
   return config;
 }
 
@@ -183,7 +189,7 @@ function loadConfigFile(): Record<string, any> {
   }
 }
 
-function buildRegistry(args: string[], agentPermissions?: string[] | null, jailRoot?: string): CommandRegistry {
+function buildRegistry(args: string[], agentPermissions?: string[] | null, jailRoot?: string, shellAdapterPreference?: string): CommandRegistry {
   const registry = new CommandRegistry();
 
   if (!hasFlag(args, '--no-cli-skills')) {
@@ -191,7 +197,7 @@ function buildRegistry(args: string[], agentPermissions?: string[] | null, jailR
   }
 
   if (!hasFlag(args, '--no-shell-skills')) {
-    const adapter = createShellAdapter();
+    const adapter = createShellAdapter({ prefer: shellAdapterPreference as any });
     registerShellSkills(registry, adapter, jailRoot);
   }
 
@@ -203,12 +209,13 @@ function serveStdio(args: string[]): void {
   const profile = validateProfile(parseFlag(args, '--profile') || process.env.AGENT_SHELL_PROFILE || fileConfig.agentProfile);
   warnIfUnrestricted(profile);
   const jailRoot = parseFlag(args, '--jail-root') || process.env.AGENT_SHELL_JAIL_ROOT || fileConfig.jailRoot;
+  const shellAdapterPreference = parseFlag(args, '--shell-adapter') || process.env.AGENT_SHELL_ADAPTER || fileConfig.shellAdapter;
 
   // Resolved ahead of Core (which computes the same thing internally) so
   // registry:list/describe/export can filter what they reveal by the
   // caller's own permissions — see registryAdminCommands.
   const agentPermissions = resolveAgentPermissions({ agentProfile: profile });
-  const registry = buildRegistry(args, agentPermissions, jailRoot);
+  const registry = buildRegistry(args, agentPermissions, jailRoot, shellAdapterPreference);
   const coreConfig: any = { registry };
   if (profile) coreConfig.agentProfile = profile;
 
@@ -234,9 +241,10 @@ async function serveHttp(args: string[]): Promise<void> {
   // loopback-with-no-auth deployment. Opt in explicitly via --cors-origin.
   const corsOrigin = parseFlag(args, '--cors-origin') || process.env.AGENT_SHELL_CORS_ORIGIN || fileConfig.corsOrigin;
   const jailRoot = parseFlag(args, '--jail-root') || process.env.AGENT_SHELL_JAIL_ROOT || fileConfig.jailRoot;
+  const shellAdapterPreference = parseFlag(args, '--shell-adapter') || process.env.AGENT_SHELL_ADAPTER || fileConfig.shellAdapter;
 
   const agentPermissions = resolveAgentPermissions({ agentProfile: profile });
-  const registry = buildRegistry(args, agentPermissions, jailRoot);
+  const registry = buildRegistry(args, agentPermissions, jailRoot, shellAdapterPreference);
   const totalCommands = registry.listAll().length;
 
   const coreConfig: any = { registry };
@@ -258,6 +266,7 @@ async function serveHttp(args: string[]): Promise<void> {
   console.log(`  Auth: ${token ? 'Bearer token' : 'DISABLED'}`);
   console.log(`  Profile: ${profile || 'unrestricted'}`);
   console.log(`  Jail root: ${jailRoot || 'none (unrestricted filesystem access)'}`);
+  console.log(`  Shell adapter: ${shellAdapterPreference || 'auto'}`);
   console.log(`  Listening: http://${host}:${port}`);
 
   if (!token) {
