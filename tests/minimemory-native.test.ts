@@ -340,6 +340,28 @@ describe('minimemory native integration', () => {
     // factory.ts no resuelve al alias de vitest.config.ts (isMinimemoryAvailable()
     // siempre da false bajo este harness, por eso T09-T12 fuerzan prefer='memory').
     // Verificado en cambio contra dist/ real con node -e (ver sesion).
+
+    /**
+     * Regresion: el fallback de prefer='auto' (default) a in-memory era
+     * TOTALMENTE silencioso cuando minimemory no estaba disponible o fallaba
+     * al construirse — a diferencia de just-bash/factory.ts, que siempre
+     * avisa por console.error cuando cae de sandboxed a native. Un operador
+     * con 'auto' (el default) no tenia forma de saber que quedo en
+     * brute-force en vez de HNSW. isMinimemoryAvailable() siempre da false
+     * bajo este harness (ver NOTA arriba), asi que el default 'auto' cae
+     * siempre por la rama "package not installed" — exactamente el caso que
+     * este test ejercita.
+     */
+    it('T14: createVectorStorage con prefer=auto (default) avisa por console.error si cae a in-memory', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const { createVectorStorage } = await import('../src/minimemory/factory.js');
+
+      const result = await createVectorStorage({ dimensions: 3 });
+
+      expect(result.backend).toBe('memory');
+      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('minimemory backend not available'));
+      errorSpy.mockRestore();
+    });
   });
 
   describe('isMinimemoryAvailable', () => {

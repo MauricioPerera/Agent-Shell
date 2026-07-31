@@ -138,9 +138,12 @@ export async function createVectorStorage(options: StorageFactoryOptions): Promi
         backend: 'minimemory',
         minimemoryAvailable: true,
       };
-    } catch {
+    } catch (err) {
       // minimemory available but failed to init - fallback
+      warnFallback(`failed to initialize: ${(err as Error)?.message ?? err}`);
     }
+  } else {
+    warnFallback('package not installed');
   }
 
   // Fallback to in-memory
@@ -149,6 +152,17 @@ export async function createVectorStorage(options: StorageFactoryOptions): Promi
     backend: 'memory',
     minimemoryAvailable: available,
   };
+}
+
+/**
+ * Logs which vector storage backend ended up active. `auto` silently
+ * degrading from HNSW to brute-force in-memory search is exactly the
+ * failure mode this module exists to prevent — surface it instead of
+ * staying quiet, mirroring just-bash/factory.ts's warnFallback().
+ */
+function warnFallback(reason: string): void {
+  // eslint-disable-next-line no-console
+  console.error(`[agent-shell] minimemory backend not available (${reason}); vector search will use the slower in-memory brute-force fallback.`);
 }
 
 /**
