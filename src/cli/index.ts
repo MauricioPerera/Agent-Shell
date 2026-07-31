@@ -16,9 +16,15 @@ import { CommandRegistry } from '../command-registry/index.js';
 import { registerSkills, registerShellSkills } from '../skills/index.js';
 import { createShellAdapter } from '../just-bash/factory.js';
 import { InMemoryStorageAdapter, SessionScopedContextStore } from '../context-store/index.js';
-import { AuditLogger } from '../security/audit-logger.js';
 import { RBAC } from '../security/rbac.js';
-import type { RBACConfig } from '../security/rbac-types.js';
+import {
+  VALID_SHELL_ADAPTERS,
+  isValidShellAdapter,
+  validatePortShape,
+  validateCommonConfigFields,
+  createAuditLoggerToStderr,
+  type ShellAdapterPreference,
+} from '../shared/config-validation.js';
 import { AGENT_PROFILES, resolveAgentPermissions } from '../core/agent-profiles.js';
 import type { AgentProfile } from '../core/agent-profiles.js';
 import { readFileSync, existsSync } from 'node:fs';
@@ -97,9 +103,6 @@ export function validateProfile(raw: string | undefined): AgentProfile | undefin
   return raw as AgentProfile;
 }
 
-const VALID_SHELL_ADAPTERS = ['native', 'just-bash', 'auto'] as const;
-type ShellAdapterPreference = (typeof VALID_SHELL_ADAPTERS)[number];
-
 /**
  * Validates a raw --shell-adapter/AGENT_SHELL_ADAPTER/config value. An
  * unrecognized value (e.g. a typo like 'jsut-bash') previously fell through
@@ -110,11 +113,11 @@ type ShellAdapterPreference = (typeof VALID_SHELL_ADAPTERS)[number];
  */
 export function validateShellAdapter(raw: string | undefined): ShellAdapterPreference | undefined {
   if (raw === undefined) return undefined;
-  if (!VALID_SHELL_ADAPTERS.includes(raw as ShellAdapterPreference)) {
+  if (!isValidShellAdapter(raw)) {
     console.error(`Invalid shell adapter: '${raw}'. Valid values: ${VALID_SHELL_ADAPTERS.join(', ')}`);
     process.exit(1);
   }
-  return raw as ShellAdapterPreference;
+  return raw;
 }
 
 /**
@@ -132,118 +135,32 @@ export function warnIfUnrestricted(profile: AgentProfile | undefined): void {
 /**
  * Validates the parsed config file against expected types, dropping (with a
  * warning) any field that doesn't match instead of letting it propagate
- * unchecked — e.g. a non-numeric `port` used to reach `parseInt()` and
- * silently become NaN instead of failing with a clear message.
+ * unchecked, or aborting the process for access-control fields — see
+ * shared/config-validation.ts's validateCommonConfigFields for the shape
+ * logic; this wrapper only supplies cli/index.ts's failure convention
+ * (process.exit(1), since config parsing here has no wrapping catch).
  */
 export function validateConfigFile(raw: Record<string, any>, configPath: string): Record<string, any> {
-  const config: Record<string, any> = {};
-  const warn = (field: string, expected: string) =>
-    console.error(`Warning: ${configPath} field '${field}' should be ${expected}, ignoring it.`);
-
-  if (raw.port !== undefined) {
-    if (typeof raw.port === 'number' && Number.isInteger(raw.port)) config.port = raw.port;
-    else warn('port', 'an integer');
-  }
-  if (raw.host !== undefined) {
-    if (typeof raw.host === 'string') config.host = raw.host;
-    else warn('host', 'a string');
-  }
-  if (raw.corsOrigin !== undefined) {
-    if (typeof raw.corsOrigin === 'string' || (Array.isArray(raw.corsOrigin) && raw.corsOrigin.every((o: any) => typeof o === 'string'))) {
-      config.corsOrigin = raw.corsOrigin;
-    } else warn('corsOrigin', 'a string or array of strings');
-  }
-  // agentProfile scopes what the agent can do: warn-and-drop (like the
-  // fields above) would silently fall through to "no profile configured" =
-  // unrestricted access — the opposite of what a bad config author
-  // intended. Fail closed instead, matching validateProfile/validatePort.
-  if (raw.agentProfile !== undefined) {
-    if (typeof raw.agentProfile === 'string') config.agentProfile = raw.agentProfile;
-    else {
-      console.error(`${configPath} field 'agentProfile' should be a string, refusing to start with an ambiguous access-control config.`);
+  return validateCommonConfigFields(raw, configPath, {
+    fail: (message: string): never => {
+      console.error(message);
       process.exit(1);
-    }
-  }
-  if (raw.auth?.bearerToken !== undefined) {
-    if (typeof raw.auth.bearerToken === 'string') config.auth = { bearerToken: raw.auth.bearerToken };
-    else warn('auth.bearerToken', 'a string');
-  }
-  // jailRoot scopes what paths file:*/git:*/workspace:* can touch: same
-  // reasoning as agentProfile above — silently dropping a wrong-typed value
-  // would fall through to "no jail configured" (unrestricted filesystem
-  // access), the opposite of what a bad config author intended.
-  if (raw.jailRoot !== undefined) {
-    if (typeof raw.jailRoot === 'string') config.jailRoot = raw.jailRoot;
-    else {
-      console.error(`${configPath} field 'jailRoot' should be a string, refusing to start with an ambiguous access-control config.`);
-      process.exit(1);
-    }
-  }
-  // permissions/rbac scope what the agent can do — same fail-closed
-  // reasoning as agentProfile/jailRoot above.
-  if (raw.permissions !== undefined) {
-    if (Array.isArray(raw.permissions) && raw.permissions.every((p: any) => typeof p === 'string')) {
-      config.permissions = raw.permissions;
-    } else {
-      console.error(`${configPath} field 'permissions' should be an array of strings, refusing to start with an ambiguous access-control config.`);
-      process.exit(1);
-    }
-  }
-  if (raw.rbac !== undefined) {
-    config.rbac = validateRbacConfig(raw.rbac, configPath);
-  }
-  if (raw.shellAdapter !== undefined) {
-    if (typeof raw.shellAdapter === 'string') config.shellAdapter = raw.shellAdapter;
-    else warn('shellAdapter', 'a string');
-  }
-  return config;
-}
-
-/**
- * Validates a raw `rbac` config value into an RBACConfig, exiting on any
- * malformed shape — same fail-closed reasoning as validateConfigFile's other
- * access-control fields: a wrong-typed rbac config is a security-relevant
- * error, not something to silently drop.
- */
-function validateRbacConfig(raw: any, configPath: string): RBACConfig {
-  const fail = (msg: string): never => {
-    console.error(`${configPath} field 'rbac' ${msg}, refusing to start with an ambiguous access-control config.`);
-    process.exit(1);
-  };
-  if (typeof raw !== 'object' || raw === null || Array.isArray(raw) || !Array.isArray(raw.roles)) {
-    fail("must be an object with a 'roles' array");
-  }
-  const roles = (raw.roles as any[]).map((r, i) => {
-    if (typeof r !== 'object' || r === null || typeof r.name !== 'string' || r.name.length === 0) {
-      fail(`roles[${i}] must be an object with a non-empty string 'name'`);
-    }
-    if (!Array.isArray(r.permissions) || !r.permissions.every((p: any) => typeof p === 'string')) {
-      fail(`roles[${i}] ('${r.name}') 'permissions' must be an array of strings`);
-    }
-    if (r.inherits !== undefined && (!Array.isArray(r.inherits) || !r.inherits.every((p: any) => typeof p === 'string'))) {
-      fail(`roles[${i}] ('${r.name}') 'inherits' must be an array of strings`);
-    }
-    return r.inherits ? { name: r.name, permissions: r.permissions, inherits: r.inherits } : { name: r.name, permissions: r.permissions };
+    },
+    warn: (field: string, expected: string) =>
+      console.error(`Warning: ${configPath} field '${field}' should be ${expected}, ignoring it.`),
   });
-  if (raw.defaultRole !== undefined && typeof raw.defaultRole !== 'string') {
-    fail("'defaultRole' must be a string");
-  }
-  return raw.defaultRole ? { roles, defaultRole: raw.defaultRole } : { roles };
 }
 
 /**
- * Validates a raw --port/AGENT_SHELL_PORT/config value. An unparseable
- * value (e.g. a typo) previously reached parseInt() unchecked, became NaN,
- * and only surfaced later as Node's cryptic
- * "options.port should be >= 0 and < 65536" from server.listen().
+ * Validates a raw --port/AGENT_SHELL_PORT/config value — see
+ * shared/config-validation.ts's validatePortShape for the shape logic;
+ * this wrapper only supplies cli/index.ts's failure convention.
  */
 export function validatePort(raw: string): number {
-  const port = parseInt(raw, 10);
-  if (!Number.isInteger(port) || String(port) !== raw.trim() || port < 0 || port > 65535) {
-    console.error(`Invalid port: '${raw}'. Must be an integer between 0 and 65535.`);
+  return validatePortShape(raw, (message: string): never => {
+    console.error(message);
     process.exit(1);
-  }
-  return port;
+  });
 }
 
 function loadConfigFile(): Record<string, any> {
@@ -256,22 +173,6 @@ function loadConfigFile(): Record<string, any> {
     console.error(`Warning: Failed to parse ${configPath}:`, (err as Error).message);
     return {};
   }
-}
-
-/**
- * Constructs an AuditLogger wired to write structured JSON lines to
- * stderr — never stdout, which on the stdio transport is the JSON-RPC
- * protocol stream itself; writing anything else there would corrupt it.
- * Executor has had audit events since it existed; Core never emitted any
- * until now, so this was the only entry point missing a visible security
- * audit trail.
- */
-function createAuditLogger(): AuditLogger {
-  const auditLogger = new AuditLogger('default');
-  auditLogger.onAudit('*', (event) => {
-    console.error(`[audit] ${JSON.stringify(event)}`);
-  });
-  return auditLogger;
 }
 
 function buildRegistry(args: string[], agentPermissions?: string[] | null, jailRoot?: string, shellAdapterPreference?: ShellAdapterPreference): CommandRegistry {
@@ -315,7 +216,7 @@ function serveStdio(args: string[]): void {
   // disabled: it needs a real EmbeddingAdapter, which nothing in this
   // codebase provides.
   coreConfig.contextStore = new SessionScopedContextStore(new InMemoryStorageAdapter());
-  coreConfig.auditLogger = createAuditLogger();
+  coreConfig.auditLogger = createAuditLoggerToStderr();
 
   const core = new Core(coreConfig);
   const server = new McpServer({ core, version: VERSION });
@@ -357,7 +258,7 @@ async function serveHttp(args: string[]): Promise<void> {
   // threaded per-call now, so this is safe for HttpSseTransport's
   // concurrent sessions too (each gets its own isolated context).
   coreConfig.contextStore = new SessionScopedContextStore(new InMemoryStorageAdapter());
-  coreConfig.auditLogger = createAuditLogger();
+  coreConfig.auditLogger = createAuditLoggerToStderr();
 
   const core = new Core(coreConfig);
   const mcpServer = new McpServer({ core, version: VERSION });

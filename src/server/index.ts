@@ -25,9 +25,14 @@ import { registerSkills, registerShellSkills } from '../skills/index.js';
 import { createShellAdapter } from '../just-bash/factory.js';
 import { InMemoryStorageAdapter, SessionScopedContextStore } from '../context-store/index.js';
 import { AGENT_PROFILES, resolveAgentPermissions } from '../core/agent-profiles.js';
-import { AuditLogger } from '../security/audit-logger.js';
 import { RBAC } from '../security/rbac.js';
 import type { RBACConfig } from '../security/rbac-types.js';
+import {
+  VALID_SHELL_ADAPTERS,
+  validatePortShape,
+  validateCommonConfigFields,
+  createAuditLoggerToStderr,
+} from '../shared/config-validation.js';
 import type { AgentProfile } from '../core/agent-profiles.js';
 import { readFileSync, existsSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -50,50 +55,6 @@ interface ServerConfig {
 }
 
 /**
- * Validates a raw `rbac` config value into an RBACConfig, throwing on any
- * malformed shape — same fail-closed reasoning as agentProfile/permissions/
- * jailRoot below: a wrong-typed rbac config is a security-relevant error,
- * not something to silently drop and fall back to "no rbac configured".
- */
-function validateRbacConfig(raw: any, configPath: string): RBACConfig {
-  const fail = (msg: string): never => {
-    throw new Error(`${configPath} field 'rbac' ${msg}, refusing to start with an ambiguous access-control config.`);
-  };
-  if (typeof raw !== 'object' || raw === null || Array.isArray(raw) || !Array.isArray(raw.roles)) {
-    fail("must be an object with a 'roles' array");
-  }
-  const roles = (raw.roles as any[]).map((r, i) => {
-    if (typeof r !== 'object' || r === null || typeof r.name !== 'string' || r.name.length === 0) {
-      fail(`roles[${i}] must be an object with a non-empty string 'name'`);
-    }
-    if (!Array.isArray(r.permissions) || !r.permissions.every((p: any) => typeof p === 'string')) {
-      fail(`roles[${i}] ('${r.name}') 'permissions' must be an array of strings`);
-    }
-    if (r.inherits !== undefined && (!Array.isArray(r.inherits) || !r.inherits.every((p: any) => typeof p === 'string'))) {
-      fail(`roles[${i}] ('${r.name}') 'inherits' must be an array of strings`);
-    }
-    return r.inherits ? { name: r.name, permissions: r.permissions, inherits: r.inherits } : { name: r.name, permissions: r.permissions };
-  });
-  if (raw.defaultRole !== undefined && typeof raw.defaultRole !== 'string') {
-    fail("'defaultRole' must be a string");
-  }
-  return raw.defaultRole ? { roles, defaultRole: raw.defaultRole } : { roles };
-}
-
-/**
- * Validates the parsed config file against expected types, dropping (with a
- * warning) any field that doesn't match instead of letting it propagate
- * unchecked — e.g. a non-numeric `port` used to reach parseInt() territory
- * indirectly via HttpSseTransport and fail with a confusing internal error
- * instead of a clear one here.
- */
-/**
- * Validates a raw port value from AGENT_SHELL_PORT. An unparseable value
- * previously reached parseInt() unchecked, became NaN, and only surfaced
- * later as Node's cryptic "options.port should be >= 0 and < 65536" error
- * from server.listen() instead of a message pointing at the actual cause.
- */
-/**
  * Masks a bearer token for the startup log, revealing only a short suffix
  * scaled to the token's length instead of a fixed first-4/last-4 window —
  * for a short/medium token (e.g. a hand-typed 9-12 char value) first-4+last-4
@@ -107,79 +68,38 @@ export function maskToken(token: string): string {
 }
 
 /**
- * Constructs an AuditLogger wired to write structured JSON lines to stderr,
- * keeping it separate from the operational logging on stdout above.
+ * Validates a raw --port/AGENT_SHELL_PORT/config value — see
+ * shared/config-validation.ts's validatePortShape for the shape logic;
+ * this wrapper only supplies server/index.ts's failure convention (throw,
+ * caught by main().catch() at the bottom of this file).
  */
-function createAuditLogger(): AuditLogger {
-  const auditLogger = new AuditLogger('default');
-  auditLogger.onAudit('*', (event) => {
-    console.error(`[audit] ${JSON.stringify(event)}`);
-  });
-  return auditLogger;
-}
-
 export function validatePort(raw: string): number {
-  const port = parseInt(raw, 10);
-  if (!Number.isInteger(port) || String(port) !== raw.trim() || port < 0 || port > 65535) {
-    throw new Error(`Invalid port: '${raw}'. Must be an integer between 0 and 65535.`);
-  }
-  return port;
+  return validatePortShape(raw, (message: string): never => {
+    throw new Error(message);
+  });
 }
 
+/**
+ * Validates the parsed config file against expected types — see
+ * shared/config-validation.ts's validateCommonConfigFields for the shape
+ * logic (port/host/corsOrigin/agentProfile/auth/jailRoot/permissions/rbac/
+ * shellAdapter); this wrapper adds server-only fields (`skills`) and
+ * supplies server/index.ts's failure convention.
+ */
 export function validateConfigFile(raw: Record<string, any>, configPath: string): Record<string, any> {
-  const config: Record<string, any> = {};
-  const warn = (field: string, expected: string) =>
-    console.error(`Warning: ${configPath} field '${field}' should be ${expected}, ignoring it.`);
+  const config = validateCommonConfigFields(raw, configPath, {
+    fail: (message: string): never => {
+      throw new Error(message);
+    },
+    warn: (field: string, expected: string) =>
+      console.error(`Warning: ${configPath} field '${field}' should be ${expected}, ignoring it.`),
+  });
 
-  if (raw.port !== undefined) {
-    if (typeof raw.port === 'number' && Number.isInteger(raw.port)) config.port = raw.port;
-    else warn('port', 'an integer');
-  }
-  if (raw.host !== undefined) {
-    if (typeof raw.host === 'string') config.host = raw.host;
-    else warn('host', 'a string');
-  }
-  if (raw.auth?.bearerToken !== undefined) {
-    if (typeof raw.auth.bearerToken === 'string') config.auth = { bearerToken: raw.auth.bearerToken };
-    else warn('auth.bearerToken', 'a string');
-  }
-  // agentProfile/permissions scope what the agent can do: dropping a
-  // wrong-typed value here (like the warn-and-ignore fields above) would
-  // silently fall through to loadConfig()'s "no profile = unrestricted"
-  // default — the opposite of what a bad config author intended. Fail
-  // closed instead.
-  if (raw.agentProfile !== undefined) {
-    if (typeof raw.agentProfile === 'string') config.agentProfile = raw.agentProfile;
-    else throw new Error(`${configPath} field 'agentProfile' should be a string, refusing to start with an ambiguous access-control config.`);
-  }
-  if (raw.permissions !== undefined) {
-    if (Array.isArray(raw.permissions) && raw.permissions.every((p: any) => typeof p === 'string')) config.permissions = raw.permissions;
-    else throw new Error(`${configPath} field 'permissions' should be an array of strings, refusing to start with an ambiguous access-control config.`);
-  }
-  // jailRoot scopes what paths file:*/git:*/workspace:* can touch: same
-  // reasoning as agentProfile/permissions above — a wrong-typed value must
-  // abort startup rather than silently fall through to "no jail configured".
-  if (raw.jailRoot !== undefined) {
-    if (typeof raw.jailRoot === 'string') config.jailRoot = raw.jailRoot;
-    else throw new Error(`${configPath} field 'jailRoot' should be a string, refusing to start with an ambiguous access-control config.`);
-  }
-  // rbac defines the role graph that `permissions` (below) resolves against
-  // — same fail-closed reasoning as agentProfile/permissions/jailRoot above.
-  if (raw.rbac !== undefined) {
-    config.rbac = validateRbacConfig(raw.rbac, configPath);
-  }
-  if (raw.corsOrigin !== undefined) {
-    if (typeof raw.corsOrigin === 'string' || (Array.isArray(raw.corsOrigin) && raw.corsOrigin.every((o: any) => typeof o === 'string'))) {
-      config.corsOrigin = raw.corsOrigin;
-    } else warn('corsOrigin', 'a string or array of strings');
-  }
+  // skills is server-only: cli/index.ts has no config-file equivalent, only
+  // --no-cli-skills/--no-shell-skills flags.
   if (raw.skills !== undefined) {
     if (typeof raw.skills === 'object' && raw.skills !== null) config.skills = raw.skills;
-    else warn('skills', 'an object');
-  }
-  if (raw.shellAdapter !== undefined) {
-    if (typeof raw.shellAdapter === 'string') config.shellAdapter = raw.shellAdapter;
-    else warn('shellAdapter', 'a string');
+    else console.error(`Warning: ${configPath} field 'skills' should be an object, ignoring it.`);
   }
   return config;
 }
@@ -268,8 +188,7 @@ async function main() {
   // 'auto' resolves to (typically the unsandboxed native backend), with no
   // indication the value was misspelled. Same fail-closed reasoning as the
   // agentProfile check above.
-  const VALID_SHELL_ADAPTERS = ['native', 'just-bash', 'auto'];
-  if (!VALID_SHELL_ADAPTERS.includes(config.shellAdapter)) {
+  if (!(VALID_SHELL_ADAPTERS as readonly string[]).includes(config.shellAdapter)) {
     throw new Error(`Invalid shellAdapter: '${config.shellAdapter}'. Valid values: ${VALID_SHELL_ADAPTERS.join(', ')}`);
   }
 
@@ -337,7 +256,7 @@ async function main() {
   // ContextStore instance (see SessionScopedContextStore), not one shared
   // instance. `search`/vectorIndex stays disabled — see the module docstring.
   coreConfig.contextStore = new SessionScopedContextStore(new InMemoryStorageAdapter());
-  coreConfig.auditLogger = createAuditLogger();
+  coreConfig.auditLogger = createAuditLoggerToStderr();
   const core = new Core(coreConfig);
 
   // MCP Server
