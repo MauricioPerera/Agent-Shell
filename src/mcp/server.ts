@@ -28,7 +28,17 @@ import {
   INTERNAL_ERROR,
 } from './types.js';
 
-/** Definiciones de las 2 tools expuestas por Agent Shell. */
+/**
+ * Definiciones de las 2 tools expuestas por Agent Shell.
+ *
+ * No describe comandos individuales del registry (esos se descubren en
+ * runtime via `cli_exec("search ...")`/`describe ...`) — son texto libre a
+ * mano sobre la gramatica FIJA que Core.exec() acepta. Si cambia esa
+ * gramatica (flags globales en src/parser/types.ts's GlobalFlags, o la
+ * sintaxis de comandos que search/describe ilustran en su descripcion),
+ * actualizar el texto de estas 2 descripciones tambien — no hay ninguna
+ * fuente unica de la que esto se auto-genere.
+ */
 const TOOLS: McpToolDefinition[] = [
   {
     name: 'cli_help',
