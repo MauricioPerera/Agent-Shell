@@ -291,6 +291,22 @@ export class HttpSseTransport {
       // (one Core serving concurrent callers previously mixed everyone's
       // cwd/env together), at the cost of no persistence for callers that
       // haven't adopted the header yet.
+      //
+      // KNOWN LIMITATION (documented, not fixed): this value is entirely
+      // client-chosen and has no relationship to authentication. This
+      // server authenticates with one bearer token shared by the whole
+      // deployment, not per-principal identity — any caller who knows that
+      // token can supply ANOTHER caller's X-Session-Id (guessed, observed,
+      // or just reused) and read/mutate that caller's workspace:* state
+      // (stashed env vars, cwd, history), or force its eviction by cycling
+      // through enough fresh ids (WorkspaceSessionStore's 200-entry FIFO
+      // cap). This only prevents ACCIDENTAL cross-talk between concurrent
+      // legitimate callers sharing one token — it is not a security
+      // boundary between mutually-untrusting principals on the same
+      // deployment. See contracts/http-transport.md §1.6 for the full
+      // writeup. A real fix needs either per-principal tokens or a
+      // server-issued, client-unspoofable session id; neither is
+      // implemented.
       const sessionId = (req.headers['x-session-id'] as string | undefined) || randomUUID();
 
       try {

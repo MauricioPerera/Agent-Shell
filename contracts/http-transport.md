@@ -166,7 +166,12 @@ Tipos de evento:
 - Cada conexion SSE recibe un `sessionId` unico (UUID v4 generado con `crypto.randomUUID()`)
 - El sessionId se incluye en el evento `connected` inicial
 - Los clientes PUEDEN enviar header `X-Session-Id` en requests POST `/rpc` para asociar requests a una sesion SSE
-- Si no se envia `X-Session-Id`, el request se procesa sin asociacion a sesion
+- Si no se envia `X-Session-Id`, `handleRpc` genera uno nuevo (`randomUUID()`) por request — nunca cae en una sesion compartida por default
+- Este mismo `sessionId` (recibido o generado) es el que aisla el estado por-sesion de `workspace:*` (`WorkspaceSessionStore`, ver `src/skills/workspace.ts`) — cada sessionId distinto obtiene su propio `cwd`/env/history, evitando que un caller HTTP concurrente vea el estado de otro
+
+**LIMITACION DE SEGURIDAD CONOCIDA (no resuelta a proposito):** `X-Session-Id` es un valor elegido por el CLIENTE, sin ninguna relacion con la autenticacion. Este servidor autentica con un unico bearer token compartido por todo el deployment (no hay identidad por-principal) — CUALQUIER caller que conozca ese token puede enviar el `X-Session-Id` de OTRO caller (adivinado, observado, o simplemente reusado) y leer/mutar el estado de `workspace:*` de esa sesion ajena (env vars que el otro caller haya guardado con `workspace:env --set`, su `cwd`, su historial), o forzar su reset. La eviccion FIFO del `WorkspaceSessionStore` (acotado a 200 entradas) ademas permite que cualquier caller fuerce la eviccion de la sesion de otro enviando suficientes `X-Session-Id` nuevos.
+
+Esto es una mejora respecto al estado previo a la introduccion de `WorkspaceSessionStore` (donde TODOS los callers compartian un unico `WorkspaceState` sin excepcion), pero NO es un limite de seguridad entre distintos tenants que comparten el mismo bearer token — solo evita el cruce ACCIDENTAL de estado entre requests concurrentes legitimos. Si dos o mas principals mutuamente no confiables van a compartir un mismo deployment/token, este mecanismo NO los aisla entre si. Arreglarlo de forma robusta requiere identidad por-principal (tokens separados) o un sessionId emitido por el servidor y no falsificable por el cliente — ninguno de los dos esta implementado; ver la discusion en la sesion de auditoria correspondiente (commit `21b6b15..HEAD`, ronda de "session/transport plumbing").
 
 ### 1.7 CORS
 
