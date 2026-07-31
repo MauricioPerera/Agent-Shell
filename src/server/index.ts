@@ -161,6 +161,13 @@ function loadConfig(): ServerConfig {
   if (process.env.AGENT_SHELL_CORS_ORIGIN) config.corsOrigin = process.env.AGENT_SHELL_CORS_ORIGIN;
   if (process.env.AGENT_SHELL_ADAPTER) config.shellAdapter = process.env.AGENT_SHELL_ADAPTER as any;
   if (process.env.AGENT_SHELL_JAIL_ROOT) config.jailRoot = process.env.AGENT_SHELL_JAIL_ROOT;
+  // Every other ServerConfig field has an env-var override; skills was the
+  // one exception, reachable only by hand-editing agent-shell.config.json —
+  // unlike cli/index.ts, this file has no CLI flags at all (env/config only,
+  // see the module docstring), so an env var is this file's equivalent of
+  // cli/index.ts's --no-cli-skills/--no-shell-skills.
+  if (process.env.AGENT_SHELL_SKILLS_CLI !== undefined) config.skills.cli = process.env.AGENT_SHELL_SKILLS_CLI === 'true';
+  if (process.env.AGENT_SHELL_SKILLS_SHELL !== undefined) config.skills.shell = process.env.AGENT_SHELL_SKILLS_SHELL === 'true';
 
   return config;
 }

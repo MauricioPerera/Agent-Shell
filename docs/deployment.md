@@ -45,6 +45,9 @@ export AGENT_SHELL_TOKEN=your-secret-token-here
 export AGENT_SHELL_PROFILE=operator
 export AGENT_SHELL_CORS_ORIGIN=*
 export AGENT_SHELL_ADAPTER=native  # or "just-bash" for sandboxed
+export AGENT_SHELL_JAIL_ROOT=/opt/agent-workspace  # confine file:*/git:*/workspace:* to this directory
+export AGENT_SHELL_SKILLS_CLI=true    # set to "false" to skip CLI-creation skills (scaffold, wizard...)
+export AGENT_SHELL_SKILLS_SHELL=true  # set to "false" to skip system shell skills (shell:*, file:*, git:*...)
 ```
 
 ### Config File
