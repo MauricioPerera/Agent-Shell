@@ -350,7 +350,10 @@ describe('Core Permission Enforcement', () => {
 
     const res = await core.exec(`confirm ${token}`);
     expect(res.code).toBe(0);
-    expect(res.data).toEqual({ deleted: '1' });
+    // id is declared type:'int' — Core now converts it before it reaches
+    // the handler (see core/index.ts's convertArgTypes), so it's the
+    // number 1, not the raw string '1' the parser originally produced.
+    expect(res.data).toEqual({ deleted: 1 });
   });
 });
 

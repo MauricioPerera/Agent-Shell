@@ -25,6 +25,18 @@ export type { CoreResponse, CoreConfig, CoreRegistry, CoreVectorIndex, CoreConte
 
 const LOG_LEVELS: Record<string, number> = { DEBUG: 0, INFO: 1, WARN: 2, ERROR: 3 };
 
+/** Calcula la profundidad maxima de un valor JSON. Ported from executor/index.ts's getJsonDepth. */
+function getJsonDepth(value: any, current: number = 0): number {
+  if (value === null || typeof value !== 'object') return current;
+  if (Array.isArray(value)) {
+    if (value.length === 0) return current + 1;
+    return Math.max(...value.map(item => getJsonDepth(item, current + 1)));
+  }
+  const keys = Object.keys(value);
+  if (keys.length === 0) return current + 1;
+  return Math.max(...keys.map(k => getJsonDepth(value[k], current + 1)));
+}
+
 class CoreLogger {
   private readonly level: number;
   private readonly onLog: ((entry: LogEntry) => void) | null;
@@ -364,11 +376,6 @@ class Core {
       return { _error: { code: 3, error: `Permission denied: ${namespace}:${command}` } };
     }
 
-    // Validate mode: check required params
-    if (flags.validate) {
-      return this.validateCommand(registeredCmd, args);
-    }
-
     // Build handler args
     const handlerArgs: Record<string, any> = { ...args.named };
     // Map positional args to params
@@ -380,9 +387,23 @@ class Core {
       });
     }
 
+    // Convert declared param types and check constraints (min/max/enum/
+    // etc.) — unconditional, same as Executor: a bad type/constraint is an
+    // error regardless of mode, not just under --validate.
+    const typeCheck = registeredCmd.params ? this.convertArgTypes(handlerArgs, registeredCmd.params) : { ok: true as const, args: handlerArgs };
+    if (!typeCheck.ok) {
+      return { _error: { code: 1, error: typeCheck.error } };
+    }
+    const typedArgs = typeCheck.args;
+
+    // Validate mode: check required params (types already checked above)
+    if (flags.validate) {
+      return this.validateCommand(registeredCmd, args);
+    }
+
     // Dry-run mode: return simulated data without calling handler
     if (flags.dryRun) {
-      return { dryRun: true, command: `${namespace}:${command}`, args: handlerArgs };
+      return { dryRun: true, command: `${namespace}:${command}`, args: typedArgs };
     }
 
     // Confirm mode: stash the resolved handler+args (already permission-
@@ -393,7 +414,7 @@ class Core {
     // check flags.dryRun/validate/confirm at all (a pre-existing, broader
     // gap left out of scope here).
     if (flags.confirm) {
-      return this.requestConfirmation(namespace, command, registeredCmd, handlerArgs, sessionId);
+      return this.requestConfirmation(namespace, command, registeredCmd, typedArgs, sessionId);
     }
 
     // Execute handler. Every skill handler follows the { success, data, error }
@@ -402,7 +423,7 @@ class Core {
     // silently discarding `error` and reporting success with null data.
     // The 3rd arg unifies what Core and Executor each used to pass ad hoc
     // (see src/shared/handler-context.ts).
-    const result = await registeredCmd.handler(handlerArgs, null, { sessionId, signal });
+    const result = await registeredCmd.handler(typedArgs, null, { sessionId, signal });
     if (result && typeof result === 'object' && result.success === false) {
       return { _error: { code: 1, error: result.error || `Command failed: ${namespace}:${command}` } };
     }
@@ -561,6 +582,140 @@ class Core {
     }
   }
 
+  /**
+   * Converts a raw (string/boolean, as parsed from CLI args) value to its
+   * declared param type and checks constraints (min/max/minLength/enum/
+   * etc.) — documented in contracts/executor.md and already implemented by
+   * Executor, but Core (the engine cli/index.ts and server/index.ts
+   * actually construct) never read param.type/constraints/enumValues at
+   * all: a param declared type:'int' with constraints {min,max}, or
+   * type:'enum', passed straight through to the handler as a raw string.
+   * Ported verbatim from Executor.convertType. Several skill handlers
+   * (shell-http.ts, workspace.ts, wizard.ts, scaffold.ts) already guard
+   * their 'json' params with `typeof x === 'string' ? JSON.parse(x) : x`,
+   * anticipating exactly this — pre-parsing here is a no-op for them, not
+   * a behavior change.
+   */
+  private convertType(value: any, def: any): { value?: any; error?: string } {
+    if (def.type === 'array') {
+      const arr = Array.isArray(value) ? value : [value];
+      if (def.constraints) {
+        if (def.constraints.minItems !== undefined && arr.length < def.constraints.minItems) {
+          return { error: `Argument '--${def.name}' violates constraint: minItems ${def.constraints.minItems}` };
+        }
+        if (def.constraints.maxItems !== undefined && arr.length > def.constraints.maxItems) {
+          return { error: `Argument '--${def.name}' violates constraint: maxItems ${def.constraints.maxItems}` };
+        }
+      }
+      return { value: arr };
+    }
+
+    if (def.type === 'string') {
+      const str = String(value);
+      if (def.constraints) {
+        if (def.constraints.minLength !== undefined && str.length < def.constraints.minLength) {
+          return { error: `Argument '--${def.name}' violates constraint: minLength ${def.constraints.minLength}` };
+        }
+        if (def.constraints.maxLength !== undefined && str.length > def.constraints.maxLength) {
+          return { error: `Argument '--${def.name}' violates constraint: maxLength ${def.constraints.maxLength}` };
+        }
+      }
+      return { value: str };
+    }
+
+    if (def.type === 'int') {
+      const num = Number(value);
+      if (isNaN(num) || !Number.isInteger(num)) {
+        return { error: `Argument '--${def.name}' expects int, got '${value}'` };
+      }
+      if (def.constraints) {
+        if (def.constraints.min !== undefined && num < def.constraints.min) {
+          return { error: `Argument '--${def.name}' violates constraint: min ${def.constraints.min}` };
+        }
+        if (def.constraints.max !== undefined && num > def.constraints.max) {
+          return { error: `Argument '--${def.name}' violates constraint: max ${def.constraints.max}` };
+        }
+      }
+      return { value: num };
+    }
+
+    if (def.type === 'float') {
+      const num = Number(value);
+      if (isNaN(num)) {
+        return { error: `Argument '--${def.name}' expects float, got '${value}'` };
+      }
+      if (def.constraints) {
+        if (def.constraints.min !== undefined && num < def.constraints.min) {
+          return { error: `Argument '--${def.name}' violates constraint: min ${def.constraints.min}` };
+        }
+        if (def.constraints.max !== undefined && num > def.constraints.max) {
+          return { error: `Argument '--${def.name}' violates constraint: max ${def.constraints.max}` };
+        }
+      }
+      return { value: num };
+    }
+
+    if (def.type === 'bool') {
+      if (value === 'true' || value === true) return { value: true };
+      if (value === 'false' || value === false) return { value: false };
+      return { error: `Argument '--${def.name}' expects bool, got '${value}'` };
+    }
+
+    if (def.type === 'date') {
+      const date = new Date(value);
+      if (isNaN(date.getTime())) {
+        return { error: `Argument '--${def.name}' expects date, got '${value}'` };
+      }
+      return { value: date };
+    }
+
+    if (def.type === 'json') {
+      try {
+        const parsed = typeof value === 'string' ? JSON.parse(value) : value;
+        const maxDepth = def.constraints?.maxDepth ?? 10;
+        const depth = getJsonDepth(parsed);
+        if (depth > maxDepth) {
+          return { error: `Argument '--${def.name}' JSON exceeds max depth of ${maxDepth} (found ${depth})` };
+        }
+        return { value: parsed };
+      } catch {
+        return { error: `Argument '--${def.name}' expects valid JSON` };
+      }
+    }
+
+    if (def.type === 'enum') {
+      const allowed = def.enumValues || [];
+      if (!allowed.includes(value)) {
+        return { error: `Argument '--${def.name}' must be one of: ${allowed.join(', ')}` };
+      }
+      return { value };
+    }
+
+    // Unknown type - pass through
+    return { value };
+  }
+
+  /**
+   * Runs convertType() over every param present in handlerArgs, leaving
+   * absent params untouched (Core doesn't apply param.default anywhere —
+   * a separate, pre-existing gap out of scope here) and required-param
+   * presence unenforced (still handled separately by validateCommand(),
+   * --validate mode only).
+   */
+  private convertArgTypes(handlerArgs: Record<string, any>, params: any[]): { ok: true; args: Record<string, any> } | { ok: false; error: string } {
+    const result: Record<string, any> = { ...handlerArgs };
+    for (const def of params) {
+      const rawValue = handlerArgs[def.name];
+      if (rawValue === undefined || rawValue === null) continue;
+      const converted = this.convertType(rawValue, def);
+      if (converted.error) {
+        return { ok: false, error: converted.error };
+      }
+      result[def.name] = converted.value;
+    }
+    return { ok: true, args: result };
+  }
+
   private validateCommand(registeredCmd: any, args: any): any {
     const errors: string[] = [];
 
@@ -642,7 +797,14 @@ class Core {
         });
       }
 
-      const result = await registeredCmd.handler(handlerArgs, previousData, { sessionId, signal });
+      // Convert declared param types and check constraints — same as the
+      // single-command path (executeCommand), applied per pipeline step.
+      const typeCheck = registeredCmd.params ? this.convertArgTypes(handlerArgs, registeredCmd.params) : { ok: true as const, args: handlerArgs };
+      if (!typeCheck.ok) {
+        return { _error: { code: 1, error: `Pipeline failed at ${namespace}:${command}: ${typeCheck.error}` } };
+      }
+
+      const result = await registeredCmd.handler(typeCheck.args, previousData, { sessionId, signal });
       if (!result.success) {
         const detail = result.error ? `: ${result.error}` : '';
         return { _error: { code: 1, error: `Pipeline failed at ${namespace}:${command}${detail}` } };

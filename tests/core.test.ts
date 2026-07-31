@@ -123,6 +123,21 @@ function createMockRegistry() {
     undoable: false,
   });
 
+  commands.set('users:setProfile', {
+    namespace: 'users',
+    name: 'setProfile',
+    version: '1.0.0',
+    description: 'Actualiza el perfil de un usuario (para tests de type/constraint validation)',
+    params: [
+      { name: 'age', type: 'int', required: true, constraints: { min: 0, max: 150 } },
+      { name: 'role', type: 'enum', required: true, enumValues: ['admin', 'user'] },
+    ],
+    handler: async (args: any) => {
+      return { success: true, data: args };
+    },
+    undoable: false,
+  });
+
   commands.set('echo:args', {
     namespace: 'echo',
     name: 'args',
@@ -374,7 +389,10 @@ describe('Core', () => {
       expect(response.meta.mode).toBe('confirm');
       expect(response.data.confirmRequired).toBe(true);
       expect(response.data.preview.command).toBe('users:delete');
-      expect(response.data.preview.args).toEqual({ id: '5' });
+      // id is declared type:'int' — Core converts it before building the
+      // preview (see core/index.ts's convertArgTypes), so it's the number
+      // 5, not the raw string '5' the parser originally produced.
+      expect(response.data.preview.args).toEqual({ id: 5 });
       expect(typeof response.data.confirmToken).toBe('string');
 
       // El handler NO debe haber corrido: confirmar eso via el propio
@@ -390,7 +408,7 @@ describe('Core', () => {
       const response = await core.exec(`confirm ${token}`);
 
       expect(response.code).toBe(0);
-      expect(response.data).toEqual({ deleted: '5' });
+      expect(response.data).toEqual({ deleted: 5 });
     });
 
     it('T06d: un token invalido o ya usado retorna error, no ejecuta nada', async () => {
@@ -551,6 +569,74 @@ describe('Core', () => {
 
       expect(response.code).toBe(0);
       // El primer paso no tiene input previo; el literal llega tal cual.
+    });
+  });
+
+  /**
+   * Regresion: Core (el motor que cli/index.ts y server/index.ts realmente
+   * cablean) nunca leia param.type/constraints/enumValues — solo chequeaba
+   * presencia de params requeridos bajo --validate. Un param declarado
+   * type:'int' con constraints {min,max}, o type:'enum', pasaba como string
+   * crudo al handler sin ninguna conversion ni chequeo. Executor (nunca
+   * cableado a un entry point real) siempre hizo esta conversion via
+   * convertType(); ahora Core la porta y la aplica sin condicionar al modo
+   * (--validate, --dry-run, --confirm o ejecucion normal).
+   */
+  describe('Conversion de tipos y constraints de params', () => {
+    it('convierte un param type:int a numero antes de llegar al handler', async () => {
+      const response = await core.exec('users:setProfile --age 30 --role admin');
+
+      expect(response.code).toBe(0);
+      expect(response.data.age).toBe(30);
+      expect(typeof response.data.age).toBe('number');
+    });
+
+    it('rechaza un param type:int no numerico con E_TYPE_MISMATCH (code=1)', async () => {
+      const response = await core.exec('users:setProfile --age abc --role admin');
+
+      expect(response.code).toBe(1);
+      expect(response.error).toContain("expects int");
+    });
+
+    it('rechaza un param que viola su constraint min/max', async () => {
+      const response = await core.exec('users:setProfile --age 200 --role admin');
+
+      expect(response.code).toBe(1);
+      expect(response.error).toContain('constraint: max');
+    });
+
+    it('rechaza un valor fuera de enumValues para un param type:enum', async () => {
+      const response = await core.exec('users:setProfile --age 30 --role superadmin');
+
+      expect(response.code).toBe(1);
+      expect(response.error).toContain('must be one of');
+    });
+
+    it('aplica la conversion de tipos tambien bajo --dry-run', async () => {
+      const response = await core.exec('users:setProfile --age 30 --role admin --dry-run');
+
+      expect(response.code).toBe(0);
+      expect(response.meta.mode).toBe('dry-run');
+      expect(response.data.args.age).toBe(30);
+    });
+
+    it('rechaza el type mismatch incluso bajo --dry-run (no llega a simular)', async () => {
+      const response = await core.exec('users:setProfile --age abc --role admin --dry-run');
+
+      expect(response.code).toBe(1);
+    });
+
+    it('aplica la conversion de tipos por cada paso de un pipeline', async () => {
+      const response = await core.exec('users:setProfile --age 30 --role admin >> echo:args --user-id 1');
+
+      expect(response.code).toBe(0);
+    });
+
+    it('un type mismatch en un paso intermedio del pipeline aborta con code=1', async () => {
+      const response = await core.exec('users:setProfile --age notanumber --role admin >> echo:args --user-id 1');
+
+      expect(response.code).toBe(1);
+      expect(response.error).toContain('expects int');
     });
   });
 

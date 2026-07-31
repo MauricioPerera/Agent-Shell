@@ -291,7 +291,10 @@ describe('Scalability Promise: 2 tools + ~600 constant tokens', () => {
       });
       const execData = JSON.parse(execRes!.result.content[0].text);
       expect(execData.code).toBe(0);
-      expect(execData.data.id).toBe('42');
+      // id is declared type:'int' — Core converts it before it reaches the
+      // handler (see core/index.ts's convertArgTypes), so it's the number
+      // 42, not the raw string '42' the parser originally produced.
+      expect(execData.data.id).toBe(42);
     });
 
     it('S12: agent can discover across namespaces without knowing them in advance', async () => {
