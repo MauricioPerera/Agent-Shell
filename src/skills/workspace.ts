@@ -22,10 +22,14 @@ import { createPathJail } from '../security/path-jail.js';
 const MAX_HISTORY = 100;
 
 export class WorkspaceState {
-  cwd: string = process.cwd();
+  cwd: string;
   env: Record<string, string> = {};
   history: Array<{ command: string; exitCode: number; duration_ms: number; timestamp: string }> = [];
   initialized = false;
+
+  constructor(initialCwd?: string) {
+    this.cwd = initialCwd ?? process.cwd();
+  }
 
   mergedEnv(): Record<string, string> {
     return { ...process.env, ...this.env } as Record<string, string>;
@@ -57,11 +61,28 @@ const MAX_SESSIONS = 200;
  * parameter) maps to one shared DEFAULT_SESSION bucket, preserving the
  * original single-shared-instance behavior exactly. A real sessionId
  * (HttpSseTransport always supplies one) gets its own isolated instance.
+ *
+ * Regresion 2: a brand-new (never-seen) session got a WorkspaceState whose
+ * cwd defaulted to process.cwd() regardless of any configured jailRoot — if
+ * a caller's FIRST call in a session was workspace:run (never calling
+ * workspace:init first), it executed outside the jail with no check at
+ * all, even though init/cd both validate correctly. A freshly-created
+ * state now starts with jailRootAbs as cwd when a jail is configured.
+ *
+ * KNOWN LIMITATION (documented, not fixed — see contracts/http-transport.md
+ * §1.6): the sessionId keying this store is whatever HttpSseTransport read
+ * from the client-supplied X-Session-Id header, with no tie to
+ * authentication. On a deployment with the (only) shared bearer token, any
+ * caller who knows that token can supply another caller's session id and
+ * read/mutate that session's state, or force its eviction by cycling
+ * through MAX_SESSIONS fresh ids. This only prevents ACCIDENTAL cross-talk
+ * between concurrent legitimate callers — it is not isolation between
+ * mutually-untrusting principals sharing one token.
  */
 class WorkspaceSessionStore {
   private readonly sessions = new Map<string, WorkspaceState>();
 
-  constructor(seed?: WorkspaceState) {
+  constructor(private readonly jailRootAbs: string | null, seed?: WorkspaceState) {
     if (seed) this.sessions.set(DEFAULT_SESSION, seed);
   }
 
@@ -76,7 +97,7 @@ class WorkspaceSessionStore {
         const oldestKey = this.sessions.keys().next().value;
         if (oldestKey !== undefined) this.sessions.delete(oldestKey);
       }
-      state = new WorkspaceState();
+      state = new WorkspaceState(this.jailRootAbs ?? undefined);
       this.sessions.set(key, state);
     }
     return state;
@@ -167,10 +188,10 @@ resetDef.requiredPermissions = ['workspace:write'];
  * with that unjailed directory as cwd.
  */
 export function createWorkspaceCommands(state?: WorkspaceState, adapter?: ShellAdapter, jailRoot?: string): SkillEntry[] {
-  const store = new WorkspaceSessionStore(state);
   const shellAdapter = adapter || new NativeShellAdapter();
   const assertInsideJail = createPathJail(jailRoot);
   const jailRootAbs = jailRoot ? resolve(jailRoot) : null;
+  const store = new WorkspaceSessionStore(jailRootAbs, state);
 
   return [
     {
@@ -212,6 +233,15 @@ export function createWorkspaceCommands(state?: WorkspaceState, adapter?: ShellA
       definition: runDef,
       handler: async (args: any, _previousData?: any, sessionId?: string) => {
         const ws = store.get(sessionId);
+
+        // Defense in depth: init/cd already validate ws.cwd before
+        // committing it, and a freshly-created state now seeds cwd from
+        // jailRootAbs — but re-checking the value actually used here means
+        // a future code path that mutates ws.cwd without going through
+        // those two handlers can't silently reopen the jail.
+        const jailCheck = assertInsideJail(ws.cwd);
+        if (!jailCheck.ok) return { success: false, data: null, error: jailCheck.error };
+
         const cmd = args.command as string;
         const timeout = args.timeout ?? 120_000;
         const start = Date.now();

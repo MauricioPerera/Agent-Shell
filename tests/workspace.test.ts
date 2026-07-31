@@ -377,6 +377,33 @@ describe('Workspace jailRoot containment', () => {
 
     expect(res.success).toBe(true);
   });
+
+  /**
+   * Regresion (auditoria post-jail): una sesion NUEVA (nunca vista) recibia
+   * un WorkspaceState con cwd = process.cwd() sin importar el jailRoot
+   * configurado. Si el PRIMER comando de esa sesion era workspace:run (sin
+   * workspace:init antes), ejecutaba fuera del jail sin ningun chequeo —
+   * a diferencia de init/cd, que si validaban. No pasar `state` a
+   * createWorkspaceCommands fuerza a store.get() a crear una sesion
+   * genuinamente nueva, reproduciendo el escenario real.
+   */
+  it('WSJ08: workspace:run como primer comando de una sesion nueva (sin init previo) arranca DENTRO del jail, no en process.cwd()', async () => {
+    const jailedCmds = createWorkspaceCommands(undefined, undefined, jailDir);
+    const run = findHandler(jailedCmds, 'workspace', 'run');
+    const res = await run({ command: 'echo hi' });
+
+    expect(res.success).toBe(true);
+    expect(res.data.cwd).toBe(jailDir);
+  });
+
+  it('WSJ09: workspace:status como primer comando de una sesion nueva tambien refleja el jailRoot, no process.cwd()', async () => {
+    const jailedCmds = createWorkspaceCommands(undefined, undefined, jailDir);
+    const status = findHandler(jailedCmds, 'workspace', 'status');
+    const res = await status({});
+
+    expect(res.data.cwd).toBe(jailDir);
+    expect(res.data.initialized).toBe(false); // aun no se llamo workspace:init
+  });
 });
 
 // ===========================================================================
