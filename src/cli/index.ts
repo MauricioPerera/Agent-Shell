@@ -16,6 +16,7 @@ import { CommandRegistry } from '../command-registry/index.js';
 import { registerSkills, registerShellSkills } from '../skills/index.js';
 import { createShellAdapter } from '../just-bash/factory.js';
 import { InMemoryStorageAdapter, SessionScopedContextStore } from '../context-store/index.js';
+import { AuditLogger } from '../security/audit-logger.js';
 import { AGENT_PROFILES, resolveAgentPermissions } from '../core/agent-profiles.js';
 import type { AgentProfile } from '../core/agent-profiles.js';
 import { readFileSync, existsSync } from 'node:fs';
@@ -190,6 +191,22 @@ function loadConfigFile(): Record<string, any> {
   }
 }
 
+/**
+ * Constructs an AuditLogger wired to write structured JSON lines to
+ * stderr — never stdout, which on the stdio transport is the JSON-RPC
+ * protocol stream itself; writing anything else there would corrupt it.
+ * Executor has had audit events since it existed; Core never emitted any
+ * until now, so this was the only entry point missing a visible security
+ * audit trail.
+ */
+function createAuditLogger(): AuditLogger {
+  const auditLogger = new AuditLogger('default');
+  auditLogger.onAudit('*', (event) => {
+    console.error(`[audit] ${JSON.stringify(event)}`);
+  });
+  return auditLogger;
+}
+
 function buildRegistry(args: string[], agentPermissions?: string[] | null, jailRoot?: string, shellAdapterPreference?: string): CommandRegistry {
   const registry = new CommandRegistry();
 
@@ -225,6 +242,7 @@ function serveStdio(args: string[]): void {
   // disabled: it needs a real EmbeddingAdapter, which nothing in this
   // codebase provides.
   coreConfig.contextStore = new SessionScopedContextStore(new InMemoryStorageAdapter());
+  coreConfig.auditLogger = createAuditLogger();
 
   const core = new Core(coreConfig);
   const server = new McpServer({ core, version: VERSION });
@@ -260,6 +278,7 @@ async function serveHttp(args: string[]): Promise<void> {
   // threaded per-call now, so this is safe for HttpSseTransport's
   // concurrent sessions too (each gets its own isolated context).
   coreConfig.contextStore = new SessionScopedContextStore(new InMemoryStorageAdapter());
+  coreConfig.auditLogger = createAuditLogger();
 
   const core = new Core(coreConfig);
   const mcpServer = new McpServer({ core, version: VERSION });

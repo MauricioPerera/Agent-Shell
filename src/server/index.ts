@@ -25,6 +25,7 @@ import { registerSkills, registerShellSkills } from '../skills/index.js';
 import { createShellAdapter } from '../just-bash/factory.js';
 import { InMemoryStorageAdapter, SessionScopedContextStore } from '../context-store/index.js';
 import { AGENT_PROFILES, resolveAgentPermissions } from '../core/agent-profiles.js';
+import { AuditLogger } from '../security/audit-logger.js';
 import type { AgentProfile } from '../core/agent-profiles.js';
 import { readFileSync, existsSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -69,6 +70,18 @@ export function maskToken(token: string): string {
   if (token.length <= 8) return '***';
   const visibleChars = Math.min(4, Math.floor(token.length / 4));
   return `${'*'.repeat(token.length - visibleChars)}${token.slice(-visibleChars)}`;
+}
+
+/**
+ * Constructs an AuditLogger wired to write structured JSON lines to stderr,
+ * keeping it separate from the operational logging on stdout above.
+ */
+function createAuditLogger(): AuditLogger {
+  const auditLogger = new AuditLogger('default');
+  auditLogger.onAudit('*', (event) => {
+    console.error(`[audit] ${JSON.stringify(event)}`);
+  });
+  return auditLogger;
 }
 
 export function validatePort(raw: string): number {
@@ -262,6 +275,7 @@ async function main() {
   // ContextStore instance (see SessionScopedContextStore), not one shared
   // instance. `search`/vectorIndex stays disabled — see the module docstring.
   coreConfig.contextStore = new SessionScopedContextStore(new InMemoryStorageAdapter());
+  coreConfig.auditLogger = createAuditLogger();
   const core = new Core(coreConfig);
 
   // MCP Server

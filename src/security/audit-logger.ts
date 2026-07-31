@@ -10,19 +10,30 @@ import { EventEmitter } from 'node:events';
 import type { AuditEvent, AuditEventType, AuditListener } from './types.js';
 
 export class AuditLogger extends EventEmitter {
-  private readonly sessionId: string;
+  private readonly defaultSessionId: string;
 
   constructor(sessionId: string) {
     super();
-    this.sessionId = sessionId;
+    this.defaultSessionId = sessionId;
   }
 
-  /** Emite un evento de auditoria tipado. */
-  audit(type: AuditEventType, data: Record<string, any>): void {
+  /**
+   * Emite un evento de auditoria tipado.
+   *
+   * @param sessionId - Sobreescribe el sessionId fijado en el constructor
+   *   para este evento puntual. Necesario para Core, que atiende muchas
+   *   sesiones concurrentes con UNA sola instancia de AuditLogger (a
+   *   diferencia de Executor, que se construye de nuevo por sesion/request
+   *   y por eso le alcanza con el sessionId fijo del constructor). No hay
+   *   estado por sesion que aislar aca — AuditLogger solo emite eventos,
+   *   asi que compartir una instancia entre sesiones es seguro; lo unico
+   *   que cambiaba por llamada era la etiqueta.
+   */
+  audit(type: AuditEventType, data: Record<string, any>, sessionId?: string): void {
     const event: AuditEvent = {
       type,
       timestamp: new Date().toISOString(),
-      sessionId: this.sessionId,
+      sessionId: sessionId ?? this.defaultSessionId,
       data,
     };
     this.emit(type, event);

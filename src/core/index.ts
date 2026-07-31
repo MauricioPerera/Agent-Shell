@@ -14,6 +14,7 @@ import { maskSecrets } from '../security/secret-patterns.js';
 import { resolveAgentPermissions } from './agent-profiles.js';
 import { PendingConfirmStore } from '../shared/pending-confirm-store.js';
 import { SlidingWindowRateLimiter } from '../shared/sliding-window-rate-limiter.js';
+import type { AuditLogger } from '../security/audit-logger.js';
 import type { ParseResult, ParsedCommand, ParseError } from '../parser/index.js';
 import type { CoreResponse, CoreConfig, CoreRegistry, CoreVectorIndex, CoreContextStore, LogEntry } from './types.js';
 
@@ -115,6 +116,7 @@ class Core {
   private readonly registry: CoreRegistry;
   private readonly vectorIndex: CoreVectorIndex | null;
   private readonly contextStore: CoreContextStore | null;
+  private readonly auditLogger: AuditLogger | null;
   private readonly agentPermissions: string[] | null;
   private readonly logger: CoreLogger;
   private readonly history: Array<{ command: string; code: number; timestamp: string }> = [];
@@ -147,6 +149,7 @@ class Core {
     this.registry = config.registry;
     this.vectorIndex = config.vectorIndex || null;
     this.contextStore = config.contextStore || null;
+    this.auditLogger = config.auditLogger || null;
     this.agentPermissions = resolveAgentPermissions(config);
     this.logger = new CoreLogger(config.logging);
   }
@@ -200,6 +203,7 @@ class Core {
 
     // Rate limit check
     if (!this.checkRateLimit()) {
+      this.auditLogger?.audit('permission:denied', { command: cmd.slice(0, 50), reason: 'rate-limit' }, sessionId);
       return this.buildResponse(3, null, 'Rate limit exceeded', cmd.slice(0, 50), mode, startTime);
     }
 
@@ -215,6 +219,7 @@ class Core {
     try {
       return await this.withTimeout(this.execInternal(cmd, startTime, sessionId, controller.signal), globalTimeout, 'Request', controller);
     } catch (err: any) {
+      this.auditLogger?.audit('error:timeout', { command: cmd.slice(0, 50), timeout_ms: globalTimeout }, sessionId);
       return this.buildResponse(1, null, err.message || 'Request timed out', cmd.slice(0, 50), mode, startTime);
     }
   }
@@ -222,7 +227,6 @@ class Core {
   private async execInternal(cmd: string, startTime: number, sessionId?: string, signal?: AbortSignal): Promise<CoreResponse> {
     let mode = 'execute';
     this.logger.log('INFO', 'core', 'exec', { command: cmd.slice(0, 100) });
-    this.cleanExpiredConfirms();
 
     try {
       // Parse
@@ -241,6 +245,21 @@ class Core {
       if (firstCmd?.flags.dryRun) mode = 'dry-run';
       if (firstCmd?.flags.validate) mode = 'validate';
       if (firstCmd?.flags.confirm) mode = 'confirm';
+
+      // Proactive sweep of stale pending-confirm tokens — skipped
+      // specifically when THIS request is itself resolving a confirm token
+      // (bare `confirm <token>`). The sweep and resolveConfirmation() use
+      // the same Date.now()-based staleness check, and the sweep always
+      // runs first in this single-threaded call chain, so leaving it
+      // unconditional would make it impossible for resolveConfirmation()
+      // to ever observe (and audit) an 'expired' token itself — it'd
+      // always already be gone. resolveConfirmation() consumes (deletes)
+      // whatever it resolves regardless of outcome, so skipping the sweep
+      // here doesn't leave anything unswept for longer than one request.
+      const isConfirmResolution = firstCmd?.namespace === null && firstCmd?.command === 'confirm';
+      if (!isConfirmResolution) {
+        this.cleanExpiredConfirms();
+      }
 
       // Route based on parse result type
       let data: any;
@@ -262,6 +281,10 @@ class Core {
       // Handle error responses from executeCommand
       if (data && typeof data === 'object' && '_error' in data) {
         const { code, error } = data._error;
+        // code 3 is reserved exclusively for permission/rate-limit denial
+        // across Core (see HELP_TEXT: "code 3: Permission denied / rate
+        // limit") — every other code here is a lookup/handler failure.
+        this.auditLogger?.audit(code === 3 ? 'permission:denied' : 'error:handler', { command: cmd.slice(0, 100), code, error }, sessionId);
         this.recordHistory(cmd, code);
         return this.buildResponse(code, null, error, cmd, mode, startTime);
       }
@@ -292,8 +315,10 @@ class Core {
       }
 
       this.recordHistory(cmd, 0);
+      this.auditLogger?.audit('command:executed', { command: cmd.slice(0, 100), duration_ms: Date.now() - startTime }, sessionId);
       return this.buildResponse(0, data, null, cmd, mode, startTime);
     } catch (err: any) {
+      this.auditLogger?.audit('error:handler', { command: cmd.slice(0, 100), error: err.message }, sessionId);
       return this.buildResponse(1, null, err.message || 'Unknown error', cmd, mode, startTime);
     }
   }
@@ -393,6 +418,7 @@ class Core {
     sessionId?: string
   ): any {
     const token = this.pendingConfirms.create({ namespace, command, registeredCmd, handlerArgs, sessionId });
+    this.auditLogger?.audit('confirm:requested', { command: `${namespace}:${command}`, token }, sessionId);
 
     return {
       confirmRequired: true,
@@ -409,6 +435,11 @@ class Core {
   /** Looks up a pending confirmation by token and, if still valid, runs the stashed command. */
   private async resolveConfirmation(token: string, signal?: AbortSignal): Promise<any> {
     const resolved = this.pendingConfirms.resolve(token);
+    if (resolved.status === 'expired') {
+      const pending = resolved.payload;
+      this.auditLogger?.audit('confirm:expired', { command: `${pending.namespace}:${pending.command}`, token }, pending.sessionId);
+      return { _error: { code: 2, error: 'Invalid or expired confirmation token' } };
+    }
     if (resolved.status !== 'ok') {
       return { _error: { code: 2, error: 'Invalid or expired confirmation token' } };
     }
@@ -418,6 +449,7 @@ class Core {
     if (result && typeof result === 'object' && result.success === false) {
       return { _error: { code: 1, error: result.error || `Command failed: ${pending.namespace}:${pending.command}` } };
     }
+    this.auditLogger?.audit('confirm:executed', { command: `${pending.namespace}:${pending.command}`, token }, pending.sessionId);
     return result.data;
   }
 

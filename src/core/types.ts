@@ -65,6 +65,19 @@ export interface CoreConfig {
   registry: CoreRegistry;
   vectorIndex?: CoreVectorIndex;
   contextStore?: CoreContextStore;
+  /**
+   * Emits typed security events (command:executed, permission:denied,
+   * confirm:*, error:timeout, error:handler) — see security/audit-logger.ts.
+   * Executor has had this wired in since it existed; Core never did, so
+   * every real deployment (cli/index.ts, server/index.ts only ever
+   * construct Core, never Executor) silently had no audit trail at all.
+   * Unlike Executor (constructed fresh per session/request, so a
+   * constructor-fixed sessionId is fine), Core is one long-lived instance
+   * serving many concurrent sessions — each call site here passes the
+   * caller's actual sessionId per event instead of relying on the
+   * AuditLogger's own constructor default.
+   */
+  auditLogger?: import('../security/audit-logger.js').AuditLogger;
   /** Agent permissions for this Core instance. If set, enforces access control. */
   permissions?: string[];
   /** Optional RBAC instance for role-based permission resolution. */
