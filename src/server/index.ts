@@ -262,6 +262,17 @@ async function main() {
     throw new Error(`Invalid agentProfile: '${config.agentProfile}'. Valid values: ${Object.keys(AGENT_PROFILES).join(', ')}`);
   }
 
+  // An unrecognized shellAdapter (typo in config/env) previously fell
+  // through createShellAdapter()'s prefer checks unnoticed into the 'auto'
+  // branch — silently swapping an intended forced sandbox for whatever
+  // 'auto' resolves to (typically the unsandboxed native backend), with no
+  // indication the value was misspelled. Same fail-closed reasoning as the
+  // agentProfile check above.
+  const VALID_SHELL_ADAPTERS = ['native', 'just-bash', 'auto'];
+  if (!VALID_SHELL_ADAPTERS.includes(config.shellAdapter)) {
+    throw new Error(`Invalid shellAdapter: '${config.shellAdapter}'. Valid values: ${VALID_SHELL_ADAPTERS.join(', ')}`);
+  }
+
   console.log('Agent Shell Server starting...');
   console.log(`  Port: ${config.port}`);
   console.log(`  Host: ${config.host}`);

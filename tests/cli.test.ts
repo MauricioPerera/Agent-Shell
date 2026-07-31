@@ -14,7 +14,7 @@
  */
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { validateProfile, warnIfUnrestricted, validateConfigFile, validatePort } from '../src/cli/index.js';
+import { validateProfile, warnIfUnrestricted, validateConfigFile, validatePort, validateShellAdapter } from '../src/cli/index.js';
 
 describe('CLI profile validation', () => {
   afterEach(() => {
@@ -53,6 +53,41 @@ describe('CLI profile validation', () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     warnIfUnrestricted('restricted' as any);
     expect(errorSpy).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Regresion: un --shell-adapter/AGENT_SHELL_ADAPTER/config con un typo (ej.
+ * 'jsut-bash') caia sin avisar en la rama 'auto' de createShellAdapter() —
+ * exactamente el modo de falla "typo debilita en silencio la postura de
+ * seguridad" que validateProfile/validatePort ya evitan en este mismo
+ * archivo, pero shellAdapter no lo tenia.
+ */
+describe('CLI shell adapter validation', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('CLI22: validateShellAdapter acepta los 3 valores conocidos', () => {
+    for (const name of ['native', 'just-bash', 'auto']) {
+      expect(validateShellAdapter(name)).toBe(name);
+    }
+  });
+
+  it('CLI23: validateShellAdapter retorna undefined si no se paso nada', () => {
+    expect(validateShellAdapter(undefined)).toBeUndefined();
+  });
+
+  it('CLI24: validateShellAdapter con un valor invalido loguea y termina el proceso (exit 1)', () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+      throw new Error(`__process_exit_${code}__`);
+    }) as any);
+
+    expect(() => validateShellAdapter('jsut-bash')).toThrow('__process_exit_1__');
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("Invalid shell adapter: 'jsut-bash'"));
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('native, just-bash, auto'));
   });
 });
 

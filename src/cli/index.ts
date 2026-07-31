@@ -97,6 +97,26 @@ export function validateProfile(raw: string | undefined): AgentProfile | undefin
   return raw as AgentProfile;
 }
 
+const VALID_SHELL_ADAPTERS = ['native', 'just-bash', 'auto'] as const;
+type ShellAdapterPreference = (typeof VALID_SHELL_ADAPTERS)[number];
+
+/**
+ * Validates a raw --shell-adapter/AGENT_SHELL_ADAPTER/config value. An
+ * unrecognized value (e.g. a typo like 'jsut-bash') previously fell through
+ * createShellAdapter()'s prefer checks unnoticed into the 'auto' branch —
+ * silently swapping an intended forced sandbox for whatever 'auto' resolves
+ * to (typically the unsandboxed native backend), with no indication the
+ * flag was misspelled. Same fail-closed reasoning as validateProfile above.
+ */
+export function validateShellAdapter(raw: string | undefined): ShellAdapterPreference | undefined {
+  if (raw === undefined) return undefined;
+  if (!VALID_SHELL_ADAPTERS.includes(raw as ShellAdapterPreference)) {
+    console.error(`Invalid shell adapter: '${raw}'. Valid values: ${VALID_SHELL_ADAPTERS.join(', ')}`);
+    process.exit(1);
+  }
+  return raw as ShellAdapterPreference;
+}
+
 /**
  * No profile configured means unrestricted access to every registered
  * command (documented, backward-compatible default) — worth a warning as
@@ -254,7 +274,7 @@ function createAuditLogger(): AuditLogger {
   return auditLogger;
 }
 
-function buildRegistry(args: string[], agentPermissions?: string[] | null, jailRoot?: string, shellAdapterPreference?: string): CommandRegistry {
+function buildRegistry(args: string[], agentPermissions?: string[] | null, jailRoot?: string, shellAdapterPreference?: ShellAdapterPreference): CommandRegistry {
   const registry = new CommandRegistry();
 
   if (!hasFlag(args, '--no-cli-skills')) {
@@ -262,7 +282,7 @@ function buildRegistry(args: string[], agentPermissions?: string[] | null, jailR
   }
 
   if (!hasFlag(args, '--no-shell-skills')) {
-    const adapter = createShellAdapter({ prefer: shellAdapterPreference as any });
+    const adapter = createShellAdapter({ prefer: shellAdapterPreference });
     registerShellSkills(registry, adapter, jailRoot);
   }
 
@@ -274,7 +294,7 @@ function serveStdio(args: string[]): void {
   const profile = validateProfile(parseFlag(args, '--profile') || process.env.AGENT_SHELL_PROFILE || fileConfig.agentProfile);
   warnIfUnrestricted(profile);
   const jailRoot = parseFlag(args, '--jail-root') || process.env.AGENT_SHELL_JAIL_ROOT || fileConfig.jailRoot;
-  const shellAdapterPreference = parseFlag(args, '--shell-adapter') || process.env.AGENT_SHELL_ADAPTER || fileConfig.shellAdapter;
+  const shellAdapterPreference = validateShellAdapter(parseFlag(args, '--shell-adapter') || process.env.AGENT_SHELL_ADAPTER || fileConfig.shellAdapter);
   // rbac/permissions are config-file only (no flag/env var), same as on
   // server/index.ts. When rbac is set, permissions is treated as role names
   // instead of literal permission strings — see resolveAgentPermissions().
@@ -319,7 +339,7 @@ async function serveHttp(args: string[]): Promise<void> {
   // loopback-with-no-auth deployment. Opt in explicitly via --cors-origin.
   const corsOrigin = parseFlag(args, '--cors-origin') || process.env.AGENT_SHELL_CORS_ORIGIN || fileConfig.corsOrigin;
   const jailRoot = parseFlag(args, '--jail-root') || process.env.AGENT_SHELL_JAIL_ROOT || fileConfig.jailRoot;
-  const shellAdapterPreference = parseFlag(args, '--shell-adapter') || process.env.AGENT_SHELL_ADAPTER || fileConfig.shellAdapter;
+  const shellAdapterPreference = validateShellAdapter(parseFlag(args, '--shell-adapter') || process.env.AGENT_SHELL_ADAPTER || fileConfig.shellAdapter);
   // rbac/permissions are config-file only (no flag/env var), same as on
   // server/index.ts. When rbac is set, permissions is treated as role names
   // instead of literal permission strings — see resolveAgentPermissions().
