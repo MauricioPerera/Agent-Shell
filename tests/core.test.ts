@@ -111,6 +111,30 @@ function createMockRegistry() {
     undoable: false,
   });
 
+  commands.set('users:get', {
+    namespace: 'users',
+    name: 'get',
+    version: '1.0.0',
+    description: 'Obtiene un usuario (para tests de $input.field en pipelines)',
+    params: [{ name: 'id', type: 'int', required: true }],
+    handler: async () => {
+      return { success: true, data: { id: 7, name: 'Referenced' } };
+    },
+    undoable: false,
+  });
+
+  commands.set('echo:args', {
+    namespace: 'echo',
+    name: 'args',
+    version: '1.0.0',
+    description: 'Devuelve los args recibidos tal cual (para verificar resolucion de $input.field)',
+    params: [{ name: 'user-id', type: 'string' }],
+    handler: async (args: any) => {
+      return { success: true, data: args };
+    },
+    undoable: false,
+  });
+
   return {
     get(namespace: string, name: string) {
       const key = `${namespace}:${name}`;
@@ -496,6 +520,37 @@ describe('Core', () => {
 
       expect(response.code).not.toBe(0);
       expect(response.error).toContain('Something specific went wrong');
+    });
+
+    /**
+     * Regresion: Executor (el motor NO cableado a ningun entry point real)
+     * resuelve referencias $input.campo en pipelines desde siempre; Core (el
+     * motor que cli/index.ts y server/index.ts SI cablean) nunca lo hacia —
+     * un pipeline como `users:get --id 1 >> echo:args --user-id $input.id`
+     * mandaba el string literal "$input.id" al segundo paso en vez del id
+     * real resuelto del output del primero.
+     */
+    it('resuelve referencias $input.campo del output del paso anterior', async () => {
+      const response = await core.exec('users:get --id 1 >> echo:args --user-id $input.id');
+
+      expect(response.code).toBe(0);
+      // echo:args devuelve los args que recibio: user-id debe ser el id
+      // real (7, del mock de users:get), no el string literal "$input.id".
+      expect(response.data['user-id']).toBe('7');
+    });
+
+    it('deja el literal $input.campo intacto cuando el campo no existe en el output previo', async () => {
+      const response = await core.exec('users:get --id 1 >> echo:args --user-id $input.nonexistent');
+
+      expect(response.code).toBe(0);
+      expect(response.data['user-id']).toBe('$input.nonexistent');
+    });
+
+    it('no intenta resolver $input.campo en el primer paso del pipeline (no hay output previo)', async () => {
+      const response = await core.exec('echo:args --user-id $input.id >> users:get --id 1');
+
+      expect(response.code).toBe(0);
+      // El primer paso no tiene input previo; el literal llega tal cual.
     });
   });
 

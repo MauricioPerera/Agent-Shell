@@ -579,6 +579,32 @@ class Core {
     return { valid: true, command: `${registeredCmd.namespace}:${registeredCmd.name}` };
   }
 
+  /**
+   * Resolves `$input.field` string references in a pipeline step's named
+   * args against the previous step's output — documented in
+   * contracts/executor.md/parser.md and already implemented by Executor,
+   * but Core (the engine cli/index.ts and server/index.ts actually wire
+   * up) never read it: a pipeline like `users:get --id 1 >> orders:list
+   * --user-id $input.id` sent the literal string "$input.id" to the
+   * second step instead of the resolved id. Mirrors Executor's exact
+   * behavior, including its fallback: a missing/undefined field on the
+   * input leaves the literal "$input.field" string in place rather than
+   * erroring (Executor doesn't emit E_INPUT_RESOLUTION for this case
+   * either, despite the contract naming it).
+   */
+  private resolveInputRefs(named: Record<string, any>, input: any): Record<string, any> {
+    const resolved: Record<string, any> = {};
+    for (const [key, value] of Object.entries(named)) {
+      if (typeof value === 'string' && value.startsWith('$input.')) {
+        const field = value.substring('$input.'.length);
+        resolved[key] = input?.[field] !== undefined ? String(input[field]) : value;
+      } else {
+        resolved[key] = value;
+      }
+    }
+    return resolved;
+  }
+
   private async executePipeline(commands: ParsedCommand[], sessionId?: string, signal?: AbortSignal): Promise<any> {
     const maxDepth = 10;
     if (commands.length > maxDepth) {
@@ -586,6 +612,7 @@ class Core {
     }
 
     let previousData: any = null;
+    let isFirstStep = true;
 
     for (const cmd of commands) {
       const { namespace, command, args, flags } = cmd;
@@ -605,7 +632,8 @@ class Core {
         return { _error: { code: 3, error: `Permission denied at pipeline step: ${namespace}:${command}` } };
       }
 
-      const handlerArgs: Record<string, any> = { ...args.named };
+      const namedArgs = isFirstStep ? args.named : this.resolveInputRefs(args.named, previousData);
+      const handlerArgs: Record<string, any> = { ...namedArgs };
       if (registeredCmd.params) {
         registeredCmd.params.forEach((p: any, idx: number) => {
           if (args.positional[idx] !== undefined && !(p.name in handlerArgs)) {
@@ -621,6 +649,7 @@ class Core {
       }
 
       previousData = result.data;
+      isFirstStep = false;
     }
 
     return previousData;
