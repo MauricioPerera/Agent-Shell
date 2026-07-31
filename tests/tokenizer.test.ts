@@ -149,6 +149,45 @@ describe('quoteArg() — embebido seguro de valores arbitrarios', () => {
   });
 
   /**
+   * Regresion (auditoria post-tokenizer-fix): un valor terminado en
+   * backslash literal SIEMPRE se fusiona con la comilla de cierre que
+   * quoteArg agrega (scanQuoteChar decide char-por-char, sin contar pares —
+   * no distingue "mi comilla de cierre" de "la apertura del siguiente
+   * argumento"). Si el comando tenia MAS comillas mas adelante (el caso
+   * normal al embeber 2+ campos no confiables en el mismo comando),
+   * la region "abierta" absorbia en silencio flags/argumentos posteriores
+   * como texto inerte — parse() devolvia un ParseResult exitoso, SIN
+   * ParseError, con la estructura corrupta. Ahora quoteArg lanza en vez
+   * de emitir ese output.
+   */
+  describe('QA08: valores terminados en backslash literal', () => {
+    it('quoteArg lanza si el valor termina en un backslash', () => {
+      expect(() => quoteArg('evil\\')).toThrow(/backslash/);
+    });
+
+    it('quoteArg lanza sin importar cuantos backslashes finales tenga (no es par/impar)', () => {
+      expect(() => quoteArg('a\\')).toThrow();
+      expect(() => quoteArg('a\\\\')).toThrow();
+      expect(() => quoteArg('a\\\\\\')).toThrow();
+    });
+
+    it('un valor que SOLO termina en backslash en el MEDIO (no al final) sigue funcionando', () => {
+      const raw = 'C:\\Users\\name'; // no termina en backslash
+      expect(() => quoteArg(raw)).not.toThrow();
+    });
+
+    it('reproduce el escenario exacto reportado: dos campos con quoteArg en el mismo comando ya NO corrompe la estructura', () => {
+      const title = 'evil\\'; // termina en backslash — antes del fix, esto se combinaba
+      // con la comilla de cierre y dejaba la region abierta.
+      expect(() => quoteArg(title)).toThrow();
+
+      // Con el guard, el caller se entera EN quoteArg(), antes de construir
+      // un comando corrupto — nunca llega a parse() con --confirm/--content
+      // tragados en silencio.
+    });
+  });
+
+  /**
    * Documenta el proposito real de este fix: agrega la CAPACIDAD de
    * embeber un valor arbitrario de forma segura (quoteArg), pero no
    * "arregla" retroactivamente a un caller que interpola texto crudo sin
@@ -222,5 +261,28 @@ describe('Consistencia tokenizer <-> segmentadores de parser/index.ts', () => {
     expect(result.type).toBe('single');
     expect(result.commands[0].jqFilter).toBeNull();
     expect(result.commands[0].args.named.note).toBe(raw);
+  });
+
+  /**
+   * Regresion (auditoria post-tokenizer-fix): el escenario real reportado
+   * era embeber DOS campos no confiables con quoteArg en el MISMO comando.
+   * Antes del guard de backslash final (QA08), si el primer campo terminaba
+   * en backslash, su region quedaba "abierta" y absorbia en silencio el
+   * flag --confirm y el segundo argumento --content, sin ningun ParseError.
+   * Con ambos campos SIN backslash final, la estructura debe mantenerse
+   * intacta: --confirm sigue siendo flag real, --content sigue siendo su
+   * propio argumento.
+   */
+  it('CQ05: dos campos con quoteArg en el mismo comando no se mezclan entre si ni tragan flags posteriores', () => {
+    const title = 'evil quote " inside';
+    const content = 'a"b with more "quotes" here';
+    const cmd = `notes:delete --title ${quoteArg(title)} --confirm --content ${quoteArg(content)}`;
+    const result = parse(cmd) as any;
+
+    expect(result.type).toBe('single');
+    const parsed = result.commands[0];
+    expect(parsed.args.named.title).toBe(title);
+    expect(parsed.args.named.content).toBe(content);
+    expect(parsed.flags.confirm).toBe(true);
   });
 });

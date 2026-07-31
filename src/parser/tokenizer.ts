@@ -183,17 +183,43 @@ export function tokenize(input: string, baseOffset: number = 0): Token[] | Parse
  * gramatica propia de agent-shell, de `shellQuoteSingle` en
  * just-bash/adapter.ts para POSIX shell.
  *
- * Limitacion: un `value` que termine en un backslash literal justo antes
- * de donde se agrega la comilla de cierre no se puede representar sin
- * ambiguedad — ver la limitacion documentada en `scanQuoteChar`.
+ * Lanza si `value` termina en un backslash literal: `scanQuoteChar` decide
+ * puramente char-por-char ("¿el SIGUIENTE caracter es el delimitador?"),
+ * sin contar pares — no distingue "backslash escapando MI comilla de
+ * cierre" de "backslash seguido de la comilla de apertura del siguiente
+ * argumento en el mismo comando". Un backslash final SIEMPRE se fusiona
+ * con la comilla de cierre que este helper esta por agregar, dejando el
+ * string abierto. Si el comando tiene mas comillas mas adelante (el caso
+ * normal al embeber mas de un campo no confiable con quoteArg en el MISMO
+ * comando), esa region "abierta" absorbe en silencio todo hasta la
+ * siguiente comilla suelta — tragandose flags/argumentos posteriores como
+ * texto inerte, SIN ParseError, en vez de fallar con un simple "comilla
+ * sin cerrar" (que era la limitacion documentada originalmente; la
+ * consecuencia real es peor: corrupcion silenciosa de la estructura, no
+ * un error). Ya que quoteArg es un encoder programatico (no texto tipeado
+ * a mano, a diferencia de tokenize()), es seguro fallar fuerte aca en vez
+ * de emitir un output que "se ve" seguro pero no lo es de forma
+ * autocontenida — el caller debe transformar el backslash final antes de
+ * llamar a quoteArg.
  *
  * @example
  * ```ts
  * quoteArg('she said "hi"'); // '"she said \\"hi\\""'
  * `--note ${quoteArg(untrustedValue)}` // seguro de interpolar
+ * quoteArg('C:\\path\\'); // throws — termina en backslash literal
  * ```
  */
 export function quoteArg(value: string, quoteChar: '"' | "'" = '"'): string {
+  if (value.endsWith('\\')) {
+    throw new Error(
+      `quoteArg: cannot safely quote a value ending in a literal backslash ` +
+      `(...${JSON.stringify(value.slice(-20))}) — the trailing backslash would fuse with the ` +
+      `closing quote this function is about to append, leaving the quoted region open and, ` +
+      `if the surrounding command has further quotes later, silently absorbing subsequent ` +
+      `flags/arguments instead of failing with a parse error. Strip or otherwise transform ` +
+      `the trailing backslash before calling quoteArg.`
+    );
+  }
   const escaped = value.split(quoteChar).join(`\\${quoteChar}`);
   return `${quoteChar}${escaped}${quoteChar}`;
 }

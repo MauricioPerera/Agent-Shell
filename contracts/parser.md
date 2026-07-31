@@ -93,7 +93,15 @@ backslash comun se preserve tal cual.
 
 Limitacion conocida: un valor que deba terminar en un backslash literal
 justo antes de la comilla de cierre no se puede representar sin
-ambiguedad (el mismo problema que tienen shells reales como cmd.exe).
+ambiguedad tipeando comillas a mano (el mismo problema que tienen shells
+reales como cmd.exe) — `scanQuoteChar` decide char-por-char sin contar
+pares, asi que ese backslash final SIEMPRE se fusiona con la comilla de
+cierre. `quoteArg()` (el encoder programatico para embeber valores no
+confiables) detecta este caso especificamente y LANZA una excepcion en
+vez de emitir un string cuya seguridad dependeria de que no haya mas
+comillas mas adelante en el mismo comando — de lo contrario la region
+"abierta" absorbe en silencio el resto del comando (flags/argumentos
+posteriores) sin ningun ParseError.
 
 Ver `src/parser/tokenizer.ts` (`scanQuoteChar`, `quoteArg`) para la
 implementacion y el helper de embebido seguro.
