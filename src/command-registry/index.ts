@@ -8,7 +8,7 @@
  */
 
 import type { CommandDefinition, CommandParam, RegisteredCommand, RegistryError, Result } from './types.js';
-import { BASE_PARAM_TYPES, ENUM_TYPE_PATTERN, ARRAY_TYPE_PATTERN } from './types.js';
+import { NAME_PATTERN, isValidParamType } from './types.js';
 
 export { type CommandDefinition, type CommandParam, type RegisteredCommand, type RegistryError, type Result } from './types.js';
 
@@ -307,7 +307,7 @@ export class CommandRegistry {
     if (!def.namespace || typeof def.namespace !== 'string') {
       return { code: 'INVALID_DEFINITION', message: 'Namespace is required and must be a non-empty string' };
     }
-    if (!/^[a-z][a-z0-9-]{0,49}$/.test(def.namespace)) {
+    if (!NAME_PATTERN.test(def.namespace)) {
       return { code: 'INVALID_DEFINITION', message: `Namespace '${def.namespace}' must match ^[a-z][a-z0-9-]{0,49}$` };
     }
 
@@ -315,7 +315,7 @@ export class CommandRegistry {
     if (!def.name || typeof def.name !== 'string') {
       return { code: 'INVALID_DEFINITION', message: 'Name is required and must be a non-empty string' };
     }
-    if (!/^[a-z][a-z0-9-]{0,49}$/.test(def.name)) {
+    if (!NAME_PATTERN.test(def.name)) {
       return { code: 'INVALID_DEFINITION', message: `Name '${def.name}' must match ^[a-z][a-z0-9-]{0,49}$` };
     }
 
@@ -370,14 +370,6 @@ function formatParam(param: CommandParam): string {
   }
 
   return line;
-}
-
-/** Valida que un tipo de parametro es reconocido. */
-function isValidParamType(type: string): boolean {
-  if (BASE_PARAM_TYPES.includes(type)) return true;
-  if (ENUM_TYPE_PATTERN.test(type)) return true;
-  if (ARRAY_TYPE_PATTERN.test(type)) return true;
-  return false;
 }
 
 /** Compara dos versiones semver. Retorna positivo si a > b, negativo si a < b. */

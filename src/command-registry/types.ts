@@ -65,3 +65,14 @@ export const ENUM_TYPE_PATTERN = /^enum\(.+\)$/;
 
 /** Patron para validar tipos array: array<tipo> */
 export const ARRAY_TYPE_PATTERN = /^array<.+>$/;
+
+/** Patron para namespace/name de un comando: minusculas, digitos, guiones, empieza con letra. */
+export const NAME_PATTERN = /^[a-z][a-z0-9-]{0,49}$/;
+
+/** Valida que un tipo de parametro es reconocido (base, enum(), o array<>). */
+export function isValidParamType(type: string): boolean {
+  if (BASE_PARAM_TYPES.includes(type)) return true;
+  if (ENUM_TYPE_PATTERN.test(type)) return true;
+  if (ARRAY_TYPE_PATTERN.test(type)) return true;
+  return false;
+}

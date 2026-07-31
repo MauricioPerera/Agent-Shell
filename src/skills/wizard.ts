@@ -8,23 +8,14 @@
 
 import { command } from '../command-builder/index.js';
 import type { CommandDefinition, CommandParam } from '../command-registry/types.js';
-import { BASE_PARAM_TYPES, ENUM_TYPE_PATTERN, ARRAY_TYPE_PATTERN } from '../command-registry/types.js';
+import { NAME_PATTERN, isValidParamType } from '../command-registry/types.js';
 import type { SkillEntry } from './scaffold.js';
 
-const NAME_REGEX = /^[a-z][a-z0-9-]{0,49}$/;
-
 function validateName(value: string, label: string): string | null {
-  if (!NAME_REGEX.test(value)) {
+  if (!NAME_PATTERN.test(value)) {
     return `Invalid ${label}: '${value}' must match ^[a-z][a-z0-9-]{0,49}$`;
   }
   return null;
-}
-
-function isValidParamType(type: string): boolean {
-  if (BASE_PARAM_TYPES.includes(type)) return true;
-  if (ENUM_TYPE_PATTERN.test(type)) return true;
-  if (ARRAY_TYPE_PATTERN.test(type)) return true;
-  return false;
 }
 
 function buildDefinition(

@@ -8,13 +8,12 @@
 
 import { command } from '../command-builder/index.js';
 import type { CommandDefinition } from '../command-registry/types.js';
+import { NAME_PATTERN } from '../command-registry/types.js';
 
 export type SkillEntry = { definition: CommandDefinition; handler: Function };
 
-const NAME_REGEX = /^[a-z][a-z0-9-]{0,49}$/;
-
 function validateName(value: string, label: string): string | null {
-  if (!NAME_REGEX.test(value)) {
+  if (!NAME_PATTERN.test(value)) {
     return `Invalid ${label}: '${value}' must match ^[a-z][a-z0-9-]{0,49}$`;
   }
   return null;
