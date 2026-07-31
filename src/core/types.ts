@@ -62,6 +62,8 @@ export interface CoreConfig {
   /** Predefined agent profile. Takes precedence over permissions[]. */
   agentProfile?: import('./agent-profiles.js').AgentProfile;
   maxInputLength?: number;
+  /** How long a --confirm token stays valid, in ms. Default 300_000 (5 min). */
+  confirmTTL_ms?: number;
   timeouts?: {
     parser_ms?: number;
     search_ms?: number;

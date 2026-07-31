@@ -335,6 +335,84 @@ describe('Core', () => {
     });
   });
 
+  /**
+   * Regresion: HELP_TEXT ya documentaba "--confirm: Preview before
+   * executing" y "code 4: Requires confirmation", pero executeCommand()
+   * solo etiquetaba mode='confirm' y ejecutaba el handler igual — el flag
+   * no hacia nada. Ahora --confirm devuelve una preview + token (code 4)
+   * SIN ejecutar, y solo corre via el nuevo builtin `confirm <token>`.
+   */
+  describe('Confirmacion en dos pasos (--confirm)', () => {
+    it('T06b: --confirm NO ejecuta el handler, retorna preview + token con code=4', async () => {
+      const response = await core.exec('users:delete --id 5 --confirm');
+
+      expect(response.code).toBe(4);
+      expect(response.meta.mode).toBe('confirm');
+      expect(response.data.confirmRequired).toBe(true);
+      expect(response.data.preview.command).toBe('users:delete');
+      expect(response.data.preview.args).toEqual({ id: '5' });
+      expect(typeof response.data.confirmToken).toBe('string');
+
+      // El handler NO debe haber corrido: confirmar eso via el propio
+      // resultado, ya que el mock no tiene side effects observables aparte
+      // de su valor de retorno — el siguiente test prueba que SI corre
+      // recien al confirmar.
+    });
+
+    it('T06c: confirm <token> ejecuta el comando pendiente y retorna su resultado real', async () => {
+      const preview = await core.exec('users:delete --id 5 --confirm');
+      const token = preview.data.confirmToken;
+
+      const response = await core.exec(`confirm ${token}`);
+
+      expect(response.code).toBe(0);
+      expect(response.data).toEqual({ deleted: '5' });
+    });
+
+    it('T06d: un token invalido o ya usado retorna error, no ejecuta nada', async () => {
+      const preview = await core.exec('users:delete --id 5 --confirm');
+      const token = preview.data.confirmToken;
+
+      await core.exec(`confirm ${token}`); // consume el token
+      const second = await core.exec(`confirm ${token}`); // reintento
+
+      expect(second.code).toBe(2);
+      expect(second.error).toContain('Invalid or expired');
+    });
+
+    it('T06e: un token que nunca existio retorna error', async () => {
+      const response = await core.exec('confirm not-a-real-token');
+
+      expect(response.code).toBe(2);
+      expect(response.error).toContain('Invalid or expired');
+    });
+
+    it('T06f: confirm sin token retorna error de uso', async () => {
+      const response = await core.exec('confirm');
+
+      expect(response.code).toBe(1);
+      expect(response.error).toContain('Usage: confirm');
+    });
+
+    it('T06g: un token expirado (TTL vencido) retorna error', async () => {
+      const shortTtlCore = new Core({
+        registry: createMockRegistry(),
+        vectorIndex: createMockVectorIndex(),
+        contextStore: createMockContextStore(),
+        confirmTTL_ms: 1,
+      });
+
+      const preview = await shortTtlCore.exec('users:delete --id 5 --confirm');
+      const token = preview.data.confirmToken;
+
+      await new Promise(resolve => setTimeout(resolve, 20));
+
+      const response = await shortTtlCore.exec(`confirm ${token}`);
+      expect(response.code).toBe(2);
+      expect(response.error).toContain('Invalid or expired');
+    });
+  });
+
   // ----------------------------------------------------------
   // Seccion 5: Pipeline (Pipe >>)
   // ----------------------------------------------------------

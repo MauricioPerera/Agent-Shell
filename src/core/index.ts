@@ -7,6 +7,7 @@
  * y retorna respuestas en formato estandar.
  */
 
+import { randomUUID } from 'node:crypto';
 import { parse } from '../parser/index.js';
 import { applyFilter } from '../jq-filter/index.js';
 import { matchPermissions } from '../security/permission-matcher.js';
@@ -81,6 +82,7 @@ The LLM agent interacts with the system using exactly 2 tools:
 == History ==
   history                          View command history
   undo <id>                        Revert a command
+  confirm <token>                  Execute a command previously requested with --confirm
 
 == Output ==
   --format json|table|csv          Output format
@@ -98,6 +100,16 @@ The LLM agent interacts with the system using exactly 2 tools:
  *
  * Expone exactamente 2 entry points publicos: help() y exec().
  */
+/** A command resolved and permission-checked, stashed pending a confirm token. */
+interface PendingConfirm {
+  namespace: string;
+  command: string;
+  registeredCmd: any;
+  handlerArgs: Record<string, any>;
+  sessionId?: string;
+  createdAt: number;
+}
+
 class Core {
   private readonly config: CoreConfig;
   private readonly registry: CoreRegistry;
@@ -108,6 +120,15 @@ class Core {
   private readonly history: Array<{ command: string; code: number; timestamp: string }> = [];
   private static readonly MAX_HISTORY = 10_000;
   private rateLimitTimestamps: number[] = [];
+  // --confirm support: HELP_TEXT documents 'code 4: Requires confirmation'
+  // and a 'confirm <token>' builtin, but executeCommand used to just tag
+  // mode='confirm' and run the handler anyway — this Map is what actually
+  // makes the two-step preview-then-confirm workflow real. Not scoped by
+  // sessionId (mirrors Executor's own single Map, which has no session
+  // concept at all): the token itself is an unguessable UUID, so the risk
+  // this session-scoping would close (a caller guessing another caller's
+  // identifier) doesn't apply the same way it did for workspace:* state.
+  private readonly pendingConfirms: Map<string, PendingConfirm> = new Map();
 
   constructor(config: CoreConfig) {
     this.config = config;
@@ -198,6 +219,7 @@ class Core {
   private async execInternal(cmd: string, startTime: number, sessionId?: string): Promise<CoreResponse> {
     let mode = 'execute';
     this.logger.log('INFO', 'core', 'exec', { command: cmd.slice(0, 100) });
+    this.cleanExpiredConfirms();
 
     try {
       // Parse
@@ -239,6 +261,16 @@ class Core {
         const { code, error } = data._error;
         this.recordHistory(cmd, code);
         return this.buildResponse(code, null, error, cmd, mode, startTime);
+      }
+
+      // Handle --confirm: not an error, but not a completed execution either.
+      // code 4 (documented in HELP_TEXT) signals "pending" so callers can
+      // tell it apart from a normal success without inspecting response
+      // shape. Skips jq/format/pagination below — those apply to a real
+      // result, not a preview of one.
+      if (data && typeof data === 'object' && data.confirmRequired === true) {
+        this.recordHistory(cmd, 4);
+        return this.buildResponse(4, data, null, cmd, mode, startTime);
       }
 
       // Apply JQ filter if present
@@ -327,6 +359,17 @@ class Core {
       return { dryRun: true, command: `${namespace}:${command}`, args: handlerArgs };
     }
 
+    // Confirm mode: stash the resolved handler+args (already permission-
+    // checked above) and return a preview + token instead of running it —
+    // the caller must re-submit via the `confirm <token>` builtin to
+    // actually execute. Only single commands and batch items go through
+    // this method; executePipeline has its own separate loop that doesn't
+    // check flags.dryRun/validate/confirm at all (a pre-existing, broader
+    // gap left out of scope here).
+    if (flags.confirm) {
+      return this.requestConfirmation(namespace, command, registeredCmd, handlerArgs, sessionId);
+    }
+
     // Execute handler. Every skill handler follows the { success, data, error }
     // convention — on failure, propagate it as the same _error shape the caller
     // (execInternal) already checks for lookup/permission failures, instead of
@@ -336,6 +379,62 @@ class Core {
       return { _error: { code: 1, error: result.error || `Command failed: ${namespace}:${command}` } };
     }
     return result.data;
+  }
+
+  /** Stashes an already permission-checked command and returns its preview + confirm token. */
+  private requestConfirmation(
+    namespace: string,
+    command: string,
+    registeredCmd: any,
+    handlerArgs: Record<string, any>,
+    sessionId?: string
+  ): any {
+    const token = randomUUID();
+    this.pendingConfirms.set(token, {
+      namespace,
+      command,
+      registeredCmd,
+      handlerArgs,
+      sessionId,
+      createdAt: Date.now(),
+    });
+
+    return {
+      confirmRequired: true,
+      preview: {
+        command: `${namespace}:${command}`,
+        args: handlerArgs,
+        effect: registeredCmd.longDescription || registeredCmd.description,
+        reversible: registeredCmd.reversible === true,
+      },
+      confirmToken: token,
+    };
+  }
+
+  /** Looks up a pending confirmation by token and, if still valid, runs the stashed command. */
+  private async resolveConfirmation(token: string): Promise<any> {
+    const pending = this.pendingConfirms.get(token);
+    if (!pending) {
+      return { _error: { code: 2, error: 'Invalid or expired confirmation token' } };
+    }
+    this.pendingConfirms.delete(token);
+
+    const result = await pending.registeredCmd.handler(pending.handlerArgs, null, pending.sessionId);
+    if (result && typeof result === 'object' && result.success === false) {
+      return { _error: { code: 1, error: result.error || `Command failed: ${pending.namespace}:${pending.command}` } };
+    }
+    return result.data;
+  }
+
+  /** Evicts confirm tokens older than confirmTTL_ms (default 5 min). Runs once per exec() call. */
+  private cleanExpiredConfirms(): void {
+    const ttl = this.config.confirmTTL_ms ?? 300_000;
+    const now = Date.now();
+    for (const [token, pending] of this.pendingConfirms) {
+      if (now - pending.createdAt > ttl) {
+        this.pendingConfirms.delete(token);
+      }
+    }
   }
 
   private async executeBuiltin(command: string, args: any): Promise<any> {
@@ -392,6 +491,12 @@ class Core {
 
       case 'undo': {
         return { _error: { code: 1, error: 'Undo not implemented in core standalone mode' } };
+      }
+
+      case 'confirm': {
+        const token = args.positional[0] || '';
+        if (!token) return { _error: { code: 1, error: 'Usage: confirm <token>' } };
+        return this.resolveConfirmation(token);
       }
 
       case 'help': {
@@ -516,6 +621,8 @@ class Core {
         const data = await this.executeCommand(cmd, sessionId);
         if (data && typeof data === 'object' && '_error' in data) {
           results.push({ code: data._error.code, data: null, error: data._error.error });
+        } else if (data && typeof data === 'object' && data.confirmRequired === true) {
+          results.push({ code: 4, data, error: null });
         } else {
           results.push({ code: 0, data, error: null });
         }

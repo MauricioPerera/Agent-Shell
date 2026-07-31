@@ -325,6 +325,33 @@ describe('Core Permission Enforcement', () => {
     const raw = JSON.stringify(res.data);
     expect(raw).not.toContain('abc123def456ghi789jkl0123456789');
   });
+
+  /**
+   * Regresion: --confirm ahora deja un comando pendiente en un token — debe
+   * seguir pasando por el MISMO chequeo de permisos que la ejecucion normal
+   * ANTES de crear ese token, no despues. Sin esto, un agente sin
+   * users:delete podria "reservar" una eliminacion via --confirm aunque
+   * nunca pudiera resolverla — informacion que no deberia poder generar.
+   */
+  it('PE12: --confirm sin el permiso requerido es denegado, no genera token pendiente', async () => {
+    const core = new Core({ registry, vectorIndex, permissions: ['users:read'] });
+    const res = await core.exec('users:delete --id 1 --confirm');
+
+    expect(res.code).toBe(3);
+    expect(res.data).toBeNull();
+  });
+
+  it('PE13: con el permiso requerido, --confirm genera el token y confirm lo ejecuta', async () => {
+    const core = new Core({ registry, vectorIndex, permissions: ['users:delete'] });
+    const preview = await core.exec('users:delete --id 1 --confirm');
+
+    expect(preview.code).toBe(4);
+    const token = preview.data.confirmToken;
+
+    const res = await core.exec(`confirm ${token}`);
+    expect(res.code).toBe(0);
+    expect(res.data).toEqual({ deleted: '1' });
+  });
 });
 
 // ===========================================================================
