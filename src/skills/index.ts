@@ -107,7 +107,7 @@ export function registerShellSkills(registry: CommandRegistry, shellAdapter?: Sh
   for (const { definition, handler } of createFileCommands(adapter, jailRoot)) {
     registry.register(definition, handler);
   }
-  for (const { definition, handler } of createShellCommands(adapter)) {
+  for (const { definition, handler } of createShellCommands(adapter, jailRoot)) {
     registry.register(definition, handler);
   }
   for (const { definition, handler } of envCommands) {

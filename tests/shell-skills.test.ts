@@ -548,6 +548,63 @@ describe('Shell Exec Skills', () => {
   });
 });
 
+/**
+ * Regresion (ronda 26 del audit): a diferencia de file:*, git:*, workspace:*,
+ * process:*, y cron:*, createShellCommands() no aceptaba jailRoot en absoluto
+ * — shell:exec's --cwd (y por lo tanto de-facto process.cwd() del comando)
+ * nunca se validaba pese a que jailRoot estuviera configurado. Esta
+ * contencion es necesariamente parcial (el comando en si puede `cd` a
+ * cualquier lado): acota el default/caso accidental, no sandboxea el
+ * comando — mismo alcance que process:spawn/cron:schedule ya tienen para
+ * su propio --cwd.
+ */
+describe('Shell Exec Jail (opt-in path containment)', () => {
+  let jailDir: string;
+  let outsideDir: string;
+  let jailed: SkillEntry[];
+
+  beforeEach(() => {
+    jailDir = mkdtempSync(join(tmpdir(), 'shelljail-'));
+    outsideDir = mkdtempSync(join(tmpdir(), 'shelljail-outside-'));
+    jailed = createShellCommands(nativeAdapter, jailDir);
+  });
+
+  afterEach(() => {
+    rmSync(jailDir, { recursive: true, force: true });
+    rmSync(outsideDir, { recursive: true, force: true });
+  });
+
+  it('SHJ01: --cwd inside the jail works normally', async () => {
+    const handler = findHandler(jailed, 'shell', 'exec');
+    const res = await handler({ command: 'echo hi', cwd: jailDir });
+    expect(res.success).toBe(true);
+  });
+
+  it('SHJ02: --cwd pointing outside the jail is blocked', async () => {
+    const handler = findHandler(jailed, 'shell', 'exec');
+    const res = await handler({ command: 'echo hi', cwd: outsideDir });
+    expect(res.success).toBe(false);
+    expect(res.error).toMatch(/jail|outside/i);
+  });
+
+  it('SHJ03: no --cwd defaults inside the jail, not process.cwd()', async () => {
+    // Uses node's own process.cwd() rather than a shell builtin (pwd/cd):
+    // exec's underlying spawn runs via the OS default shell (cmd.exe on
+    // native Windows, not a POSIX shell) — same reasoning as PJ03 in
+    // infra-complete.test.ts.
+    const handler = findHandler(jailed, 'shell', 'exec');
+    const res = await handler({ command: 'node -e "console.log(process.cwd())"' });
+    expect(res.success).toBe(true);
+    expect(res.data.stdout.trim().toLowerCase()).toBe(jailDir.toLowerCase());
+  });
+
+  it('SHJ04: without jailRoot, --cwd is unrestricted (legacy shellCommands export)', async () => {
+    const handler = findHandler(shellCommands, 'shell', 'exec');
+    const res = await handler({ command: 'echo hi', cwd: outsideDir });
+    expect(res.success).toBe(true);
+  });
+});
+
 // ===========================================================================
 // File Skills (test with temp directory)
 // ===========================================================================

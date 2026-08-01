@@ -8,6 +8,8 @@ import { command } from '../command-builder/index.js';
 import { NativeShellAdapter } from '../just-bash/adapter.js';
 import type { ShellAdapter } from '../just-bash/types.js';
 import type { SkillEntry } from './scaffold.js';
+import { createPathJail } from '../security/path-jail.js';
+import { resolve, isAbsolute } from 'node:path';
 
 const execDef = command('shell', 'exec')
   .version('1.0.0')
@@ -33,15 +35,39 @@ whichDef.requiredPermissions = ['shell:read'];
 /**
  * Creates shell command entries bound to a ShellAdapter.
  * Called by registerShellSkills() with the active adapter.
+ *
+ * An optional `jailRoot` constrains shell:exec's `--cwd` the same way
+ * file:*, git:*, workspace:*, process:*, and cron:* are constrained — but this is
+ * necessarily partial containment: the command STRING itself can `cd`
+ * elsewhere or reference absolute paths directly, and nothing here (or
+ * anywhere) restricts what an arbitrary shell command can touch once
+ * running. shell:exec's whole purpose is unrestricted command execution;
+ * jailing --cwd narrows the accidental/default case without pretending to
+ * sandbox the command itself — the same caveat process:spawn/cron:schedule
+ * already carry, which is why both require shell:exec as a co-permission
+ * rather than treating their own cwd jail as sufficient on its own.
  */
-export function createShellCommands(adapter: ShellAdapter): SkillEntry[] {
+export function createShellCommands(adapter: ShellAdapter, jailRoot?: string): SkillEntry[] {
+  const assertInsideJail = createPathJail(jailRoot);
+  const jailRootAbs = jailRoot ? resolve(jailRoot) : null;
+
+  function resolveCwd(rawCwd: string | undefined): { ok: true; cwd: string | undefined } | { ok: false; error: string } {
+    if (!jailRootAbs) return { ok: true, cwd: rawCwd || undefined };
+    const base = rawCwd ? (isAbsolute(rawCwd) ? rawCwd : resolve(jailRootAbs, rawCwd)) : jailRootAbs;
+    const check = assertInsideJail(base);
+    if (!check.ok) return { ok: false, error: check.error };
+    return { ok: true, cwd: check.resolved };
+  }
+
   return [
     {
       definition: execDef,
       handler: async (args: any) => {
         try {
+          const cwdCheck = resolveCwd(args.cwd || undefined);
+          if (!cwdCheck.ok) return { success: false, data: null, error: cwdCheck.error };
           const result = await adapter.exec(args.command, {
-            cwd: args.cwd || undefined,
+            cwd: cwdCheck.cwd,
             timeout: args.timeout ?? 30000,
           });
           return {
