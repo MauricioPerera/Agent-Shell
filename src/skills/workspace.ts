@@ -161,7 +161,13 @@ const resetDef = command('workspace', 'reset')
   .build();
 
 initDef.requiredPermissions = ['workspace:write'];
-runDef.requiredPermissions = ['workspace:write'];
+// workspace:run reaches the exact same ShellAdapter.exec() sink as
+// shell:exec — same reasoning as cron:schedule's requiredPermissions
+// (see cron.ts): without shell:exec here too, a role granted
+// workspace:write but deliberately not shell:exec (e.g. "can manage a
+// workspace's cwd/env but not run ad-hoc commands") gets arbitrary
+// command execution anyway via workspace:run.
+runDef.requiredPermissions = ['workspace:write', 'shell:exec'];
 envDef.requiredPermissions = ['workspace:write'];
 cdDef.requiredPermissions = ['workspace:write'];
 statusDef.requiredPermissions = ['workspace:read'];

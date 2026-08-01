@@ -82,7 +82,13 @@ writeDef.requiredPermissions = ['file:write'];
 listDef.requiredPermissions = ['file:read'];
 mkdirDef.requiredPermissions = ['file:write'];
 deleteDef.requiredPermissions = ['file:delete'];
-renameDef.requiredPermissions = ['file:write'];
+// If `to` already exists, rename() silently overwrites and destroys its
+// prior contents with no undo — same blast radius as file:delete (the
+// reasoning that got this command requiresConfirmation()'d). A caller
+// granted file:write but deliberately not file:delete ("can edit files
+// but not remove them") could otherwise still destroy a file by
+// renaming another one over it.
+renameDef.requiredPermissions = ['file:write', 'file:delete'];
 chmodDef.requiredPermissions = ['file:write'];
 
 /**

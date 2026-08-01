@@ -188,7 +188,13 @@ const logsDef = command('process', 'logs').version('1.0.0')
   .example('process:logs --name devserver')
   .tags('process', 'read').build();
 
-spawnDef.requiredPermissions = ['process:write'];
+// process:spawn runs an arbitrary shell command via child_process.spawn
+// with shell:true — the same command-execution sink as shell:exec.
+// Same reasoning as cron:schedule's requiredPermissions (see cron.ts):
+// without shell:exec here too, a role granted process:write but
+// deliberately not shell:exec gets arbitrary command execution anyway
+// via process:spawn (readable back via process:logs).
+spawnDef.requiredPermissions = ['process:write', 'shell:exec'];
 listDef.requiredPermissions = ['process:read'];
 killDef.requiredPermissions = ['process:write'];
 logsDef.requiredPermissions = ['process:read'];

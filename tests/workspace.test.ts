@@ -34,6 +34,18 @@ describe('Workspace Skills', () => {
     rmSync(tempDir, { recursive: true, force: true });
   });
 
+  /**
+   * Regresion (ronda 21 del audit): workspace:run alcanza el mismo sink de
+   * ejecucion que shell:exec (via ShellAdapter.exec()), pero solo exigia
+   * workspace:write — un caller con ese permiso pero deliberadamente sin
+   * shell:exec conseguia ejecucion arbitraria de comandos igual. Mismo
+   * razonamiento ya aplicado a cron:schedule (ver cron.ts).
+   */
+  it('WS00: workspace:run exige tambien shell:exec, no solo workspace:write', () => {
+    const runDef = cmds.find(c => c.definition.name === 'run')!.definition;
+    expect(runDef.requiredPermissions).toEqual(expect.arrayContaining(['workspace:write', 'shell:exec']));
+  });
+
   // -----------------------------------------------------------------------
   // workspace:init
   // -----------------------------------------------------------------------

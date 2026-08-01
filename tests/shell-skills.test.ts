@@ -695,6 +695,17 @@ describe('requiresConfirmation tagging on dangerous commands', () => {
     expect(renameDef.requiresConfirmation).toBe(true);
   });
 
+  /**
+   * Regresion (ronda 21 del audit): file:rename tenia el mismo blast radius
+   * que file:delete (rename() sobreescribe el destino sin undo si ya
+   * existe), pero solo exigia file:write, no file:delete.
+   */
+  it('DG01b: file:rename exige tambien file:delete, no solo file:write', () => {
+    const fileCmds = createFileCommands(nativeAdapter);
+    const renameDef = fileCmds.find(c => c.definition.name === 'rename')!.definition;
+    expect(renameDef.requiredPermissions).toEqual(expect.arrayContaining(['file:write', 'file:delete']));
+  });
+
   it('DG02: http:post y http:request requieren confirmacion, http:get no', () => {
     const postDef = httpCommands.find(c => c.definition.name === 'post')!.definition;
     const requestDef = httpCommands.find(c => c.definition.name === 'request')!.definition;

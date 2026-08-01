@@ -858,6 +858,17 @@ describe('Process Manager Skills', () => {
   afterEach(async () => { await pm.destroy(); });
 
   /**
+   * Regresion (ronda 21 del audit): process:spawn alcanza el mismo sink de
+   * ejecucion que shell:exec (child_process.spawn con shell:true), pero
+   * solo exigia process:write — mismo patron ya corregido para
+   * cron:schedule (ver cron.ts) y workspace:run.
+   */
+  it('PM00b: process:spawn exige tambien shell:exec, no solo process:write', () => {
+    const spawnDef = cmds.find(c => c.definition.name === 'spawn')!.definition;
+    expect(spawnDef.requiredPermissions).toEqual(expect.arrayContaining(['process:write', 'shell:exec']));
+  });
+
+  /**
    * Regresion: sin bound, spawnear procesos bajo nombres unicos (timestamps/
    * UUIDs, un patron normal de devops) dejaba una entrada en memoria para
    * siempre — kill()/close nunca borraban del Map, solo re-spawnear el MISMO
