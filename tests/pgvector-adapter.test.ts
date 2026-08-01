@@ -193,6 +193,26 @@ describe('PgVectorStorageAdapter', () => {
     expect(c.queries).toHaveLength(0);
   });
 
+  /**
+   * Regresion (ronda 25 del audit): tableName ya estaba validado (ronda 2,
+   * previene SQL injection en la DDL) pero dimensions/hnswOptions.m/
+   * efConstruction — interpolados igual de directo en la misma DDL via
+   * vector(${dimensions}) / WITH (m = ..., ef_construction = ...) —
+   * no tenian ninguna validacion en tiempo de ejecucion pese a venir del
+   * mismo config publico no confiable.
+   */
+  it('T02b: dimensions/hnswOptions invalidos lanzan error al construir', () => {
+    const c = new MockPgClient();
+    expect(() => new PgVectorStorageAdapter({ client: c, dimensions: 0 })).toThrow(/Invalid dimensions/);
+    expect(() => new PgVectorStorageAdapter({ client: c, dimensions: -1 })).toThrow(/Invalid dimensions/);
+    expect(() => new PgVectorStorageAdapter({ client: c, dimensions: 1.5 })).toThrow(/Invalid dimensions/);
+    expect(() => new PgVectorStorageAdapter({ client: c, dimensions: 4097 })).toThrow(/Invalid dimensions/);
+    expect(() => new PgVectorStorageAdapter({ client: c, dimensions: 3, hnswOptions: { m: 0, efConstruction: 64 } })).toThrow(/Invalid hnswOptions\.m/);
+    expect(() => new PgVectorStorageAdapter({ client: c, dimensions: 3, hnswOptions: { m: 16, efConstruction: -1 } })).toThrow(/Invalid hnswOptions\.efConstruction/);
+    // Valid values still construct fine.
+    expect(() => new PgVectorStorageAdapter({ client: c, dimensions: 768, hnswOptions: { m: 16, efConstruction: 64 } })).not.toThrow();
+  });
+
   it('T03: upsert sin initialize lanza error', async () => {
     const a = new PgVectorStorageAdapter({ client: new MockPgClient(), dimensions: 3 });
     await expect(a.upsert(createSampleEntry('test:cmd'))).rejects.toThrow('not initialized');

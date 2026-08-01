@@ -41,14 +41,29 @@ export class PgVectorStorageAdapter implements VectorStorageAdapter {
         `Invalid tableName '${this.tableName}': must match ^[a-zA-Z_][a-zA-Z0-9_]{0,62}$ to be safely used as a SQL identifier`
       );
     }
+    // Same reasoning as tableName above: these are interpolated directly
+    // into DDL in initialize() (vector(${dimensions}), WITH (m = ...,
+    // ef_construction = ...)) via the simple query protocol, which allows
+    // multiple ';'-separated statements per call — an unvalidated numeric
+    // config value from an untrusted source (this constructor is a public
+    // export) is exactly as exploitable as the unvalidated tableName this
+    // class already hardens against.
+    if (!Number.isInteger(config.dimensions) || config.dimensions < 1 || config.dimensions > 4096) {
+      throw new Error(`Invalid dimensions '${config.dimensions}': must be an integer between 1 and 4096`);
+    }
+    const m = config.hnswOptions?.m ?? 16;
+    const efConstruction = config.hnswOptions?.efConstruction ?? 64;
+    if (!Number.isInteger(m) || m < 1) {
+      throw new Error(`Invalid hnswOptions.m '${m}': must be a positive integer`);
+    }
+    if (!Number.isInteger(efConstruction) || efConstruction < 1) {
+      throw new Error(`Invalid hnswOptions.efConstruction '${efConstruction}': must be a positive integer`);
+    }
     this.dimensions = config.dimensions;
     this.distanceType = config.distanceType ?? 'cosine';
     this.autoMigrate = config.autoMigrate ?? true;
     this.createIndex = config.createIndex ?? true;
-    this.hnswOptions = {
-      m: config.hnswOptions?.m ?? 16,
-      efConstruction: config.hnswOptions?.efConstruction ?? 64,
-    };
+    this.hnswOptions = { m, efConstruction };
     // Validated above against a strict identifier regex; double-quoted for reserved-word safety.
     this.tableIdent = `"${this.tableName}"`;
   }
