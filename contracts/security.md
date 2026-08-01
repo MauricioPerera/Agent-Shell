@@ -49,15 +49,15 @@ class AuditLogger extends EventEmitter {
 | Tipo | Cuando se emite | Datos tipicos |
 |------|-----------------|---------------|
 | `command:executed` | Comando ejecutado exitosamente | `{command, args, duration_ms}` |
-| `command:failed` | Handler lanza excepcion o timeout | `{command, error, duration_ms}` |
+| `command:failed` | Reservado — declarado en el tipo pero ningun path de Core/Executor lo emite hoy; una excepcion del handler emite `error:handler` (ver abajo) | — |
 | `permission:denied` | Contexto sin permisos requeridos | `{command, required, actual}` |
 | `confirm:requested` | Modo --confirm genera token | `{command, token}` |
 | `confirm:executed` | Token de confirmacion usado | `{command, token}` |
 | `confirm:expired` | Token expira sin ser usado | `{token, elapsed_ms}` |
-| `session:created` | Nueva sesion iniciada | `{sessionId}` |
-| `session:expired` | Sesion expira por TTL | `{sessionId, elapsed_ms}` |
-| `error:handler` | Error no controlado en handler | `{command, error}` |
-| `error:timeout` | Handler excede timeout | `{command, timeout_ms}` |
+| `session:created` | Reservado — declarado en el tipo pero ningun path lo emite hoy | — |
+| `session:expired` | Reservado — declarado en el tipo pero ningun path lo emite hoy (ver `SessionExpiredError` en context-store, que no llega al AuditLogger) | — |
+| `error:handler` | Handler lanza excepcion, o retorna `success: false` | `{command, error}` |
+| `error:timeout` | Handler o request completo excede timeout | `{command, timeout_ms}` |
 
 **Estructura del evento emitido:**
 

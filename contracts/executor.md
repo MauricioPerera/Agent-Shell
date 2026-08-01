@@ -434,7 +434,7 @@ Cuando `context.auditLogger` esta presente, el Executor emite eventos en puntos 
 | Punto del pipeline | Evento emitido | Datos |
 |--------------------|---------------|-------|
 | Ejecucion exitosa (paso 7) | `command:executed` | `{command, args, duration_ms, mode}` |
-| Handler lanza excepcion | `command:failed` | `{command, error: message}` |
+| Handler lanza excepcion | `error:handler` | `{command, error: message}` |
 | Permisos insuficientes (paso 3) | `permission:denied` | `{command, required, actual}` |
 | Modo confirm genera token | `confirm:requested` | `{command, token}` |
 | Token confirmado | `confirm:executed` | `{command, token}` |
