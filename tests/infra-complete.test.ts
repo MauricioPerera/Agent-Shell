@@ -670,6 +670,32 @@ describe('Secret Store Skills', () => {
     cmds = createSecretCommands(store);
   });
 
+  /**
+   * Regresion: sin bound, secret:set bajo nombres unicos crecia el Map para
+   * siempre durante la vida del proceso. Mismo patron que ProcessManager
+   * (MAX_PROCESSES), WorkspaceSessionStore/SessionScopedContextStore
+   * (MAX_SESSIONS).
+   */
+  it('SE00: acota la cantidad de secretos en memoria (evict del mas viejo)', () => {
+    for (let i = 0; i < 205; i++) {
+      store.set(`SECRET_${i}`, `value-${i}`);
+    }
+    expect(store.size).toBeLessThanOrEqual(200);
+    expect(store.has('SECRET_0')).toBe(false);
+    expect(store.has('SECRET_204')).toBe(true);
+  });
+
+  it('SE00b: sobreescribir un nombre existente no dispara eviction', () => {
+    for (let i = 0; i < 200; i++) {
+      store.set(`SECRET_${i}`, `value-${i}`);
+    }
+    expect(store.size).toBe(200);
+    store.set('SECRET_0', 'updated-value'); // overwrite, not a new key
+    expect(store.size).toBe(200);
+    expect(store.has('SECRET_0')).toBe(true);
+    expect(store.get('SECRET_0')).toBe('updated-value');
+  });
+
   it('SE01: secret:set + secret:get roundtrip', async () => {
     const set = findHandler(cmds, 'secret', 'set');
     const get = findHandler(cmds, 'secret', 'get');

@@ -12,6 +12,13 @@ import type { SkillEntry } from './scaffold.js';
 // SecretStore
 // ---------------------------------------------------------------------------
 
+// Same bounded-Map + oldest-eviction pattern as ProcessManager
+// (MAX_PROCESSES), WorkspaceSessionStore/SessionScopedContextStore
+// (MAX_SESSIONS), and cron's MAX_HISTORY_PER_TASK: secret:set under
+// unique names would otherwise grow this map for the life of the
+// process with no cap.
+const MAX_SECRETS = 200;
+
 export class SecretStore {
   private secrets: Map<string, { iv: string; tag: string; encrypted: string }> = new Map();
   private readonly key: Buffer;
@@ -29,6 +36,14 @@ export class SecretStore {
   }
 
   set(name: string, value: string): void {
+    // Bound BEFORE inserting a genuinely new name — an overwrite of an
+    // existing name doesn't grow the map, so it shouldn't trigger eviction.
+    // Map iteration order is insertion order, so this evicts the oldest.
+    if (!this.secrets.has(name) && this.secrets.size >= MAX_SECRETS) {
+      const oldestKey = this.secrets.keys().next().value;
+      if (oldestKey !== undefined) this.secrets.delete(oldestKey);
+    }
+
     const iv = randomBytes(12);
     const cipher = createCipheriv('aes-256-gcm', this.key, iv) as CipherGCM;
     // Bind the ciphertext to the name it's stored under (same reasoning as
