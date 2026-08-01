@@ -104,6 +104,28 @@ describe('PendingConfirmStore', () => {
     expect(store.resolve(oldToken)).toEqual({ status: 'not_found' });
   });
 
+  /**
+   * Regresion (ronda 28 del audit): sweepExpired() descartaba las entradas
+   * barridas en silencio (retorno void) — sin forma de que el caller
+   * (Core/Executor) auditara confirm:expired para el caso comun (nadie
+   * reenvia el token vencido, simplemente expira solo).
+   */
+  it('T08b: sweepExpired() retorna las entradas barridas (token, payload, ageMs)', () => {
+    vi.useFakeTimers();
+    const store = new PendingConfirmStore<string>(1000);
+
+    const oldToken = store.create('old');
+    vi.advanceTimersByTime(1500);
+    store.create('fresh');
+
+    const swept = store.sweepExpired();
+
+    expect(swept).toHaveLength(1);
+    expect(swept[0].token).toBe(oldToken);
+    expect(swept[0].payload).toBe('old');
+    expect(swept[0].ageMs).toBeGreaterThan(1000);
+  });
+
   it('T09: payloads arbitrarios (objetos con handlers/funciones) se preservan por referencia', () => {
     const handler = async () => ({ success: true, data: null });
     const store = new PendingConfirmStore<{ handler: Function; args: Record<string, any> }>(60_000);

@@ -25,6 +25,13 @@ export type ResolveResult<T> =
   | { status: 'not_found' }
   | { status: 'expired'; ageMs: number; ttlMs: number; payload: T };
 
+/** Una entrada barrida por sweepExpired(), para que el caller pueda auditarla. */
+export interface SweptEntry<T> {
+  token: string;
+  payload: T;
+  ageMs: number;
+}
+
 /**
  * Store de tokens pendientes, parametrizado por el tipo de payload que cada
  * caller necesite guardar (Core y Executor guardan formas distintas — este
@@ -80,13 +87,24 @@ export class PendingConfirmStore<T> {
     return count;
   }
 
-  /** Barre tokens mas viejos que el TTL configurado. Pensado para llamarse una vez por request entrante. */
-  sweepExpired(): void {
+  /**
+   * Barre tokens mas viejos que el TTL configurado. Pensado para llamarse
+   * una vez por request entrante. Retorna las entradas barridas — antes se
+   * descartaban en silencio, dejando la ruta comun de expiracion (nadie
+   * reenvia el token vencido, simplemente nunca vuelve) sin ningun rastro
+   * de auditoria; solo el reenvio explicito de un token ya vencido, o
+   * revoke(), generaban un evento confirm:expired.
+   */
+  sweepExpired(): SweptEntry<T>[] {
     const now = Date.now();
+    const swept: SweptEntry<T>[] = [];
     for (const [token, entry] of this.entries) {
-      if (now - entry.createdAt > this.ttlMs) {
+      const ageMs = now - entry.createdAt;
+      if (ageMs > this.ttlMs) {
         this.entries.delete(token);
+        swept.push({ token, payload: entry.payload, ageMs });
       }
     }
+    return swept;
   }
 }

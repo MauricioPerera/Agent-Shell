@@ -546,7 +546,10 @@ export class Executor {
   }
 
   private cleanExpiredConfirms(): void {
-    this.pendingConfirms.sweepExpired();
+    const swept = this.pendingConfirms.sweepExpired();
+    for (const { token, payload, ageMs } of swept) {
+      this.context.auditLogger?.audit('confirm:expired', { command: `${payload.namespace}:${payload.command}`, token, reason: 'ttl-sweep', ageMs });
+    }
   }
 
   private hasPermissions(required: string[], args?: Record<string, any>): boolean {
