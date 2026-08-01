@@ -333,10 +333,16 @@ export class HttpSseTransport {
       } catch (err: any) {
         if (aborted) return;
         clearTimeout(timeout);
+        // Catch-all for unexpected exceptions (bugs), not the structured
+        // command-failure path Core.exec() already returns as data —
+        // err.message here can be an arbitrary Node error (e.g. an fs
+        // error naming an absolute path), so it's logged server-side
+        // instead of echoed to the remote caller.
+        console.error('[agent-shell] Internal error handling /rpc request:', err);
         this.sendJson(res, 500, {
           jsonrpc: '2.0',
           id: request.id ?? null,
-          error: { code: -32603, message: `Internal error: ${err.message || 'unknown'}` },
+          error: { code: -32603, message: 'Internal error' },
         });
       }
     });

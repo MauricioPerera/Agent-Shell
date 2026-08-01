@@ -232,12 +232,13 @@ describe('McpServer', () => {
       expect(response!.result.isError).toBe(true);
     });
 
-    it('T12: maneja excepciones del handler sin crashear', async () => {
+    it('T12: maneja excepciones del handler sin crashear, sin filtrar el mensaje interno al caller', async () => {
       const throwCore = createMockCore({
         exec: async () => { throw new Error('unexpected failure'); },
       });
       const throwServer = new McpServer({ core: throwCore });
       await initializeServer(throwServer);
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
       const response = await sendMessage(throwServer, {
         jsonrpc: '2.0',
@@ -247,7 +248,11 @@ describe('McpServer', () => {
       });
 
       expect(response!.result.isError).toBe(true);
-      expect(response!.result.content[0].text).toContain('unexpected failure');
+      expect(response!.result.content[0].text).toBe('Internal error');
+      expect(response!.result.content[0].text).not.toContain('unexpected failure');
+      // Logged server-side instead, so an operator can still diagnose it.
+      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('Internal error'), expect.any(Error));
+      errorSpy.mockRestore();
     });
   });
 

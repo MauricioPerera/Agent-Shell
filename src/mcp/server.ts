@@ -180,8 +180,14 @@ export class McpServer {
           };
       }
     } catch (err: any) {
+      // This is the catch-all for unexpected exceptions (bugs), not the
+      // structured command-failure path Core.exec() already returns as
+      // data — err.message here can be an arbitrary Node error (e.g. an fs
+      // error naming an absolute path), so it's logged server-side instead
+      // of echoed to the remote caller.
+      console.error('[agent-shell] Internal error in cli_exec:', err);
       toolResult = {
-        content: [{ type: 'text', text: `Internal error: ${err.message || 'unknown'}` }],
+        content: [{ type: 'text', text: 'Internal error' }],
         isError: true,
       };
     }

@@ -5,7 +5,7 @@
  * SSE streaming, CORS, error handling, y session management.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { request as httpRequest } from 'node:http';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -394,10 +394,11 @@ describe('HttpSseTransport', () => {
       expect(status).toBe(204);
     });
 
-    it('T12: retorna 500 si handler lanza error', async () => {
+    it('T12: retorna 500 si handler lanza error, sin filtrar el mensaje interno al caller', async () => {
       await transport.stop();
       transport = new HttpSseTransport({ port: 0 });
       transport.onMessage(createMockHandler({ throws: true }));
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
       await transport.start();
 
       const { status, body } = await rpcRequest(transport.port, {
@@ -408,7 +409,11 @@ describe('HttpSseTransport', () => {
 
       expect(status).toBe(500);
       expect(body.error.code).toBe(-32603);
-      expect(body.error.message).toContain('handler exploded');
+      expect(body.error.message).toBe('Internal error');
+      expect(body.error.message).not.toContain('handler exploded');
+      // Logged server-side instead, so an operator can still diagnose it.
+      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('Internal error'), expect.any(Error));
+      errorSpy.mockRestore();
     });
 
     it('T13: retorna 500 si no hay handler registrado', async () => {
