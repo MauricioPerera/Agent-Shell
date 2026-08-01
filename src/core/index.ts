@@ -307,6 +307,10 @@ class Core {
       // shape. Skips jq/format/pagination below — those apply to a real
       // result, not a preview of one.
       if (data && typeof data === 'object' && data.confirmRequired === true) {
+        // `mode` was set from flags.confirm above; a command auto-upgraded
+        // to the confirm flow via requiresConfirmation (no --confirm flag
+        // passed) would otherwise still report meta.mode: 'execute'.
+        mode = 'confirm';
         this.recordHistory(cmd, 4);
         return this.buildResponse(4, data, null, cmd, mode, startTime);
       }
@@ -413,7 +417,15 @@ class Core {
     // this method; executePipeline has its own separate loop that doesn't
     // check flags.dryRun/validate/confirm at all (a pre-existing, broader
     // gap left out of scope here).
-    if (flags.confirm) {
+    //
+    // registeredCmd.requiresConfirmation (documented in contracts/
+    // command-registry.md as "Si requiere --confirm por defecto") makes
+    // this trigger even when the CALLER never passed --confirm — command
+    // authors (e.g. file:delete, tagged 'dangerous') opt a command into
+    // always previewing first. Before this, the field was persisted
+    // end-to-end (command-builder, sqlite-registry-adapter) but nothing
+    // ever read it: only the caller-supplied --confirm flag had any effect.
+    if (flags.confirm || registeredCmd.requiresConfirmation) {
       return this.requestConfirmation(namespace, command, registeredCmd, typedArgs, sessionId);
     }
 

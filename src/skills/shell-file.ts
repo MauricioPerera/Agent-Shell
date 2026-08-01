@@ -52,6 +52,7 @@ const deleteDef = command('file', 'delete')
   .optionalParam('recursive', 'bool', false)
   .example('file:delete --path ./tmp/cache --recursive true')
   .tags('file', 'write', 'filesystem', 'dangerous')
+  .requiresConfirmation()
   .build();
 
 const renameDef = command('file', 'rename')

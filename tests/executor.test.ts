@@ -263,6 +263,15 @@ describe('Executor', () => {
         },
         handler: async (args: any) => ({ deleted: true }),
       },
+      'users:purge': {
+        definition: {
+          namespace: 'users', command: 'purge',
+          args: [{ name: 'id', type: 'int', required: true }],
+          description: 'Elimina permanentemente todos los datos de un usuario', effect: 'Purga irreversible',
+          reversible: false, requiredPermissions: [], requiresConfirmation: true,
+        },
+        handler: async (args: any) => ({ purged: true, id: Number(args.id) }),
+      },
       'orders:list': {
         definition: {
           namespace: 'orders', command: 'list',
@@ -616,6 +625,44 @@ describe('Executor', () => {
 
       expect(result.code).toBe(2);
       expect(result.error!.type).toBe('E_CONFIRM_INVALID');
+    });
+
+    /**
+     * Regresion: definition.requiresConfirmation (documentado en
+     * contracts/command-registry.md como "Si requiere --confirm por
+     * defecto") nunca se leia — solo el --confirm que pasaba el CALLER
+     * disparaba la preview. Un comando marcado requiresConfirmation
+     * ejecutaba directo sin preview, exactamente el escenario que ese flag
+     * existe para prevenir.
+     */
+    it('T12b: un comando con requiresConfirmation pide preview aunque el caller NO pase --confirm', async () => {
+      const parsed = createSingleParseResult('users', 'purge', { id: '9' });
+      const result = await executor.execute(parsed) as ExecutionResult;
+
+      expect(result.code).toBe(4);
+      expect(result.meta.mode).toBe('confirm');
+      expect(result.data.confirmToken).toBeDefined();
+      expect(result.data.preview).toBeDefined();
+    });
+
+    it('T12c: confirmar el token de un comando requiresConfirmation lo ejecuta de verdad', async () => {
+      const parsed = createSingleParseResult('users', 'purge', { id: '9' });
+      const preview = await executor.execute(parsed) as ExecutionResult;
+      const token = preview.data.confirmToken;
+
+      const result = await executor.confirm(token);
+
+      expect(result.code).toBe(0);
+      expect(result.success).toBe(true);
+      expect(result.data).toEqual({ purged: true, id: 9 });
+    });
+
+    it('T12d: --dry-run sigue teniendo prioridad sobre requiresConfirmation (no pide preview)', async () => {
+      const parsed = createSingleParseResult('users', 'purge', { id: '9' }, { dryRun: true });
+      const result = await executor.execute(parsed) as ExecutionResult;
+
+      expect(result.code).toBe(0);
+      expect(result.meta.mode).toBe('dry-run');
     });
   });
 

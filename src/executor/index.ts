@@ -195,7 +195,16 @@ export class Executor {
     }
 
     // 4. APPLY MODE
-    const mode = this.getMode(cmd.flags);
+    // definition.requiresConfirmation (documented in contracts/
+    // command-registry.md as "Si requiere --confirm por defecto") upgrades
+    // 'normal' mode to 'confirm' even when the caller never passed
+    // --confirm — command authors opt a command into always previewing
+    // first. validate/dry-run (more specific, explicitly requested by the
+    // caller) still take priority, same ordering as before.
+    let mode = this.getMode(cmd.flags);
+    if (mode === 'normal' && definition.requiresConfirmation) {
+      mode = 'confirm';
+    }
 
     if (mode === 'validate') {
       return {

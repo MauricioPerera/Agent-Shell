@@ -75,6 +75,19 @@ function createMockRegistry() {
     undoable: true,
   });
 
+  commands.set('users:purge', {
+    namespace: 'users',
+    name: 'purge',
+    version: '1.0.0',
+    description: 'Elimina permanentemente todos los datos de un usuario (para tests de requiresConfirmation)',
+    params: [{ name: 'id', type: 'int', required: true }],
+    handler: async (args: any) => {
+      return { success: true, data: { purged: args.id } };
+    },
+    requiresConfirmation: true,
+    undoable: false,
+  });
+
   commands.set('users:export', {
     namespace: 'users',
     name: 'export',
@@ -452,6 +465,43 @@ describe('Core', () => {
       const response = await shortTtlCore.exec(`confirm ${token}`);
       expect(response.code).toBe(2);
       expect(response.error).toContain('Invalid or expired');
+    });
+
+    /**
+     * Regresion: registeredCmd.requiresConfirmation (documentado en
+     * contracts/command-registry.md como "Si requiere --confirm por
+     * defecto") esta persistido end-to-end (command-builder,
+     * sqlite-registry-adapter) desde siempre, pero Core nunca lo leia — solo
+     * el --confirm que pasaba el CALLER disparaba la preview. Un comando
+     * marcado requiresConfirmation ejecutaba directo sin ningun preview,
+     * exactamente el escenario que ese flag existe para prevenir.
+     */
+    it('T06i: un comando con requiresConfirmation pide preview aunque el caller NO pase --confirm', async () => {
+      const response = await core.exec('users:purge --id 9');
+
+      expect(response.code).toBe(4);
+      expect(response.meta.mode).toBe('confirm');
+      expect(response.data.confirmRequired).toBe(true);
+      expect(response.data.preview.command).toBe('users:purge');
+      expect(typeof response.data.confirmToken).toBe('string');
+    });
+
+    it('T06j: confirmar el token de un comando requiresConfirmation lo ejecuta de verdad', async () => {
+      const preview = await core.exec('users:purge --id 9');
+      const token = preview.data.confirmToken;
+
+      const response = await core.exec(`confirm ${token}`);
+
+      expect(response.code).toBe(0);
+      expect(response.data).toEqual({ purged: 9 });
+    });
+
+    it('T06k: --dry-run sigue teniendo prioridad sobre requiresConfirmation (no pide preview)', async () => {
+      const response = await core.exec('users:purge --id 9 --dry-run');
+
+      expect(response.code).toBe(0);
+      expect(response.meta.mode).toBe('dry-run');
+      expect(response.data.dryRun).toBe(true);
     });
   });
 
