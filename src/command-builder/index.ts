@@ -22,6 +22,7 @@
  */
 
 import type { CommandDefinition, CommandParam, OutputShape } from '../command-registry/types.js';
+import { GLOBAL_FLAG_NAMES } from '../parser/types.js';
 
 /** Builder for a single parameter. */
 export class ParamBuilder {
@@ -113,11 +114,20 @@ export class CommandBuilder {
 
   /**
    * Throws on a duplicate param name instead of letting the last
-   * definition silently win over an earlier one with no warning.
+   * definition silently win over an earlier one with no warning. Also
+   * rejects the 6 global flag names (format/limit/offset/confirm/
+   * validate/dry-run) — the parser (parser/index.ts) always intercepts
+   * these before a command's own args, so a command-level param sharing
+   * one of those names is silently unreachable dead code (found in
+   * registry:list's 'format' param: its documented example threw
+   * E_INVALID_FORMAT instead of reaching the handler at all).
    */
   private _claimParamName(name: string): void {
     if (this._paramNames.has(name)) {
       throw new Error(`CommandBuilder: duplicate parameter name '${name}' for ${this._namespace}:${this._name}`);
+    }
+    if ((GLOBAL_FLAG_NAMES as readonly string[]).includes(name)) {
+      throw new Error(`CommandBuilder: parameter name '${name}' for ${this._namespace}:${this._name} collides with a reserved global flag (${GLOBAL_FLAG_NAMES.join(', ')}) and would never be reachable through the parser`);
     }
     this._paramNames.add(name);
   }

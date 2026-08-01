@@ -293,7 +293,7 @@ describe('Registry Admin Skills', () => {
 
   it('RA01: registry:list returns all commands', async () => {
     const handler = findHandler(adminEntries, 'registry', 'list');
-    const result = await handler({ format: 'full' });
+    const result = await handler({ view: 'full' });
 
     expect(result.success).toBe(true);
     expect(result.data.commandCount).toBe(9); // 3 scaffold + 2 wizard + 4 registry
@@ -304,7 +304,7 @@ describe('Registry Admin Skills', () => {
 
   it('RA02: registry:list filters by namespace', async () => {
     const handler = findHandler(adminEntries, 'registry', 'list');
-    const result = await handler({ namespace: 'scaffold', format: 'full' });
+    const result = await handler({ namespace: 'scaffold', view: 'full' });
 
     expect(result.success).toBe(true);
     expect(result.data.commandCount).toBe(3);
@@ -315,7 +315,7 @@ describe('Registry Admin Skills', () => {
 
   it('RA03: registry:list compact format returns text', async () => {
     const handler = findHandler(adminEntries, 'registry', 'list');
-    const result = await handler({ format: 'compact' });
+    const result = await handler({ view: 'compact' });
 
     expect(result.success).toBe(true);
     expect(typeof result.data.commands).toBe('string');
@@ -423,7 +423,7 @@ describe('Registry Admin Skills', () => {
     it('RA11: registry:list solo devuelve comandos que el caller puede ejecutar', async () => {
       const entries = buildFilteredEntries();
       const handler = findHandler(entries, 'registry', 'list');
-      const result = await handler({ format: 'full' });
+      const result = await handler({ view: 'full' });
 
       expect(result.success).toBe(true);
       // scaffold:* y wizard:* requieren permisos que readerPerms no tiene;
@@ -462,7 +462,7 @@ describe('Registry Admin Skills', () => {
     it('RA13b: registry:list solo lista namespaces con al menos un comando visible', async () => {
       const entries = buildFilteredEntries();
       const handler = findHandler(entries, 'registry', 'list');
-      const result = await handler({ format: 'full' });
+      const result = await handler({ view: 'full' });
 
       expect(result.data.namespaces).toEqual(['registry']);
       expect(result.data.namespaces).not.toContain('scaffold');
@@ -499,7 +499,7 @@ describe('Registry Admin Skills', () => {
       for (const { definition, handler } of entries) reg.register(definition, handler);
 
       const handler = findHandler(entries, 'registry', 'list');
-      const result = await handler({ format: 'full' });
+      const result = await handler({ view: 'full' });
 
       expect(result.data.namespaces).toContain('scaffold');
       expect(result.data.namespaces).not.toContain('wizard');
@@ -514,7 +514,7 @@ describe('Registry Admin Skills', () => {
       for (const { definition, handler } of entries) reg.register(definition, handler);
 
       const handler = findHandler(entries, 'registry', 'list');
-      const result = await handler({ format: 'full' });
+      const result = await handler({ view: 'full' });
       expect(result.data.commandCount).toBe(7); // 3 scaffold + 4 registry
     });
   });

@@ -20,8 +20,13 @@ const listDef = command('registry', 'list')
   .version('1.0.0')
   .description('List all registered commands with optional namespace filter')
   .optionalParam('namespace', 'string', '')
-  .optionalParam('format', 'string', 'compact')
-  .example('registry:list --namespace users --format compact')
+  // Named 'view', not 'format': --format is one of the parser's reserved
+  // global flags (json/table/csv output shaping), always intercepted
+  // before it reaches a command's own args — a command-level param of the
+  // same name was unreachable dead code, and its documented example threw
+  // a parse error (E_INVALID_FORMAT) instead of the value shown here.
+  .optionalParam('view', 'string', 'compact')
+  .example('registry:list --namespace users --view compact')
   .tags('registry', 'introspection', 'listing')
   .build();
 
@@ -93,7 +98,7 @@ export function registryAdminCommands(registry: CommandRegistry, agentPermission
       definition: listDef,
       handler: async (args: Record<string, any>) => {
         const namespace = args.namespace as string | undefined;
-        const format = (args.format as string) || 'compact';
+        const format = (args.view as string) || 'compact';
 
         const allDefs = namespace
           ? registry.listByNamespace(namespace)

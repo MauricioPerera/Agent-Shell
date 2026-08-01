@@ -55,7 +55,7 @@ describe('CommandBuilder', () => {
   it('T05: param() sin callback agrega parametro con defaults', () => {
     const def = command('ns', 'cmd')
       .description('test')
-      .param('limit', 'int')
+      .param('maxResults', 'int')
       .build();
 
     expect(def.params[0].required).toBe(false);
@@ -76,10 +76,10 @@ describe('CommandBuilder', () => {
   it('T07: optionalParam() shorthand con default', () => {
     const def = command('ns', 'cmd')
       .description('test')
-      .optionalParam('limit', 'int', 10, 'Max results')
+      .optionalParam('maxResults', 'int', 10, 'Max results')
       .build();
 
-    expect(def.params[0].name).toBe('limit');
+    expect(def.params[0].name).toBe('maxResults');
     expect(def.params[0].required).toBe(false);
     expect(def.params[0].default).toBe(10);
     expect(def.params[0].description).toBe('Max results');
@@ -211,6 +211,21 @@ describe('CommandBuilder', () => {
         .param('name', 'string')
         .optionalParam('name', 'string', 'default');
     }).toThrow(/duplicate parameter name 'name'/);
+  });
+
+  /**
+   * Regresion: registry:list declaraba un param 'format', pero el parser
+   * intercepta --format como uno de sus 6 flags globales reservados antes
+   * de que llegue a los args del comando — el param quedaba inalcanzable
+   * (dead code) y su .example() documentado tiraba E_INVALID_FORMAT en vez
+   * de parsear. Ver src/skills/registry-admin.ts (renombrado a 'view').
+   */
+  it('T19d: param con nombre de flag global reservado lanza inmediatamente', () => {
+    for (const reserved of ['format', 'limit', 'offset', 'confirm', 'validate', 'dry-run']) {
+      expect(() => {
+        command('ns', 'cmd').description('test').optionalParam(reserved, 'string', '');
+      }).toThrow(/collides with a reserved global flag/);
+    }
   });
 
   it('T20: fluent chain completo produce definicion correcta', () => {
