@@ -809,6 +809,26 @@ describe('Process Manager Skills', () => {
 
   afterEach(async () => { await pm.destroy(); });
 
+  /**
+   * Regresion: sin bound, spawnear procesos bajo nombres unicos (timestamps/
+   * UUIDs, un patron normal de devops) dejaba una entrada en memoria para
+   * siempre — kill()/close nunca borraban del Map, solo re-spawnear el MISMO
+   * nombre lo hacia. Mismo patron que WorkspaceSessionStore/
+   * SessionScopedContextStore (MAX_SESSIONS=200).
+   */
+  it('PM00: acota la cantidad de procesos rastreados (evict del mas viejo)', async () => {
+    for (let i = 0; i < 205; i++) {
+      const res = pm.spawn(`job-${i}`, 'echo hi');
+      expect(res.success).toBe(true);
+    }
+    const list = pm.list();
+    expect(list.length).toBeLessThanOrEqual(200);
+    // The earliest jobs should have been evicted.
+    expect(list.some(p => p.name === 'job-0')).toBe(false);
+    // The most recent ones should still be tracked.
+    expect(list.some(p => p.name === 'job-204')).toBe(true);
+  });
+
   it('PM01: process:spawn starts a process', async () => {
     const handler = findHandler(cmds, 'process', 'spawn');
     const isWindows = process.platform === 'win32';

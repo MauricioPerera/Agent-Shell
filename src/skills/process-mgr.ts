@@ -28,6 +28,15 @@ interface ManagedProcess {
 
 const MAX_OUTPUT_LINES = 200;
 
+// Unlike a finished process (whose entry only holds inert buffered
+// output), an unbounded number of DISTINCT names spawned over the
+// server's lifetime (e.g. timestamp/UUID-suffixed job names, a normal
+// devops pattern) previously accumulated forever — kill()/close never
+// removed a Map entry, only re-spawning the SAME name did. Same
+// bounded-Map + oldest-eviction pattern as WorkspaceSessionStore /
+// SessionScopedContextStore (MAX_SESSIONS=200).
+const MAX_PROCESSES = 200;
+
 export class ProcessManager {
   private processes: Map<string, ManagedProcess> = new Map();
 
@@ -39,6 +48,23 @@ export class ProcessManager {
       }
       // Replace finished process
       this.processes.delete(name);
+    }
+
+    // Bound the map BEFORE inserting. A still-running evictee is killed
+    // first — dropping it from the map alone wouldn't reclaim anything,
+    // since its own stdout/stderr/close listeners keep it referenced (and
+    // the OS process running) for as long as node keeps the ChildProcess
+    // alive. Map iteration order is insertion order, so this evicts the
+    // oldest entry.
+    if (this.processes.size >= MAX_PROCESSES) {
+      const oldestKey = this.processes.keys().next().value;
+      if (oldestKey !== undefined) {
+        const oldest = this.processes.get(oldestKey)!;
+        if (oldest.exitCode === null) {
+          try { oldest.process.kill('SIGTERM'); } catch { /* ignore */ }
+        }
+        this.processes.delete(oldestKey);
+      }
     }
 
     // Pass the whole command as a single string with shell:true so the shell
