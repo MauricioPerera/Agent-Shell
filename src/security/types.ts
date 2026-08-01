@@ -14,7 +14,8 @@ export type AuditEventType =
   | 'session:created'
   | 'session:expired'
   | 'error:handler'
-  | 'error:timeout';
+  | 'error:timeout'
+  | 'auth:failed';
 
 /** Evento de auditoria emitido por el AuditLogger. */
 export interface AuditEvent {

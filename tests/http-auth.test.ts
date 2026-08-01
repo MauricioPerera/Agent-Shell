@@ -4,6 +4,7 @@
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { HttpSseTransport, timingSafeStringEqual } from '../src/mcp/http-transport.js';
+import { AuditLogger } from '../src/security/audit-logger.js';
 import type { JsonRpcRequest, JsonRpcResponse } from '../src/mcp/types.js';
 
 const TEST_TOKEN = 'test-secret-token-12345';
@@ -198,5 +199,79 @@ describe('HTTP Auth: timingSafeStringEqual', () => {
     expect(timingSafeStringEqual('', expected)).toBe(false);
     expect(timingSafeStringEqual(expected, '')).toBe(false);
     expect(timingSafeStringEqual('', '')).toBe(true); // empty == empty
+  });
+});
+
+// ===========================================================================
+// auth:failed audit event (round 29 of the audit)
+// ===========================================================================
+
+describe('HTTP Auth: auth:failed audit event', () => {
+  let transport: HttpSseTransport;
+  let port: number;
+  let auditLogger: AuditLogger;
+  let events: any[];
+
+  beforeAll(async () => {
+    auditLogger = new AuditLogger('http-auth-test');
+    events = [];
+    auditLogger.onAudit('*', (e) => events.push(e));
+
+    transport = new HttpSseTransport({
+      port: TEST_PORT,
+      host: '127.0.0.1',
+      auth: { bearerToken: TEST_TOKEN },
+      auditLogger,
+    });
+    transport.onMessage(async (msg: JsonRpcRequest): Promise<JsonRpcResponse | null> => {
+      return { jsonrpc: '2.0', id: msg.id!, result: {} };
+    });
+    await transport.start();
+    port = transport.port;
+  });
+
+  afterAll(async () => {
+    await transport.stop();
+  });
+
+  /**
+   * Regresion (ronda 29 del audit): la unica superficie de red del proyecto,
+   * y el unico chequeo de seguridad sin ningun rastro de auditoria pese a
+   * ser exactamente la senal que un SIEM de deteccion de brute-force
+   * necesita — HttpSseTransport nunca referenciaba AuditLogger en absoluto.
+   */
+  it('AUTH14: emite auth:failed con reason=missing_header, sin filtrar el token', async () => {
+    events.length = 0;
+    await httpRequest(port, '/rpc', { method: 'POST', body: { jsonrpc: '2.0', id: 1, method: 'initialize' } });
+
+    const evt = events.find(e => e.type === 'auth:failed');
+    expect(evt).toBeDefined();
+    expect(evt.data.reason).toBe('missing_header');
+    expect(evt.data.path).toBe('/rpc');
+    expect(JSON.stringify(evt)).not.toContain(TEST_TOKEN);
+  });
+
+  it('AUTH15: emite auth:failed con reason=invalid_token cuando el Bearer es incorrecto', async () => {
+    events.length = 0;
+    await httpRequest(port, '/rpc', {
+      method: 'POST',
+      body: { jsonrpc: '2.0', id: 1, method: 'initialize' },
+      headers: { Authorization: 'Bearer wrong-token' },
+    });
+
+    const evt = events.find(e => e.type === 'auth:failed');
+    expect(evt).toBeDefined();
+    expect(evt.data.reason).toBe('invalid_token');
+  });
+
+  it('AUTH16: un request autenticado correctamente NO emite auth:failed', async () => {
+    events.length = 0;
+    await httpRequest(port, '/rpc', {
+      method: 'POST',
+      body: { jsonrpc: '2.0', id: 1, method: 'initialize' },
+      headers: { Authorization: `Bearer ${TEST_TOKEN}` },
+    });
+
+    expect(events.find(e => e.type === 'auth:failed')).toBeUndefined();
   });
 });

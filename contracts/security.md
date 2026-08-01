@@ -54,10 +54,11 @@ class AuditLogger extends EventEmitter {
 | `confirm:requested` | Modo --confirm genera token | `{command, token}` |
 | `confirm:executed` | Token de confirmacion usado | `{command, token}` |
 | `confirm:expired` | Token expira sin ser usado | `{token, elapsed_ms}` |
-| `session:created` | Reservado — declarado en el tipo pero ningun path lo emite hoy | — |
-| `session:expired` | Reservado — declarado en el tipo pero ningun path lo emite hoy (ver `SessionExpiredError` en context-store, que no llega al AuditLogger) | — |
+| `session:created` | SessionScopedContextStore asigna un ContextStore nuevo a un sessionId nunca visto (solo para sessionId reales, no el bucket compartido de stdio) | `{sessionId}` |
+| `session:expired` | ContextStore destruye una sesion por TTL — solo dispara si `ttl_ms` esta configurado (opt-in, sin flag/env var propio hoy) | `{sessionId}` |
 | `error:handler` | Handler lanza excepcion, o retorna `success: false` | `{command, error}` |
 | `error:timeout` | Handler o request completo excede timeout | `{command, timeout_ms}` |
+| `auth:failed` | HttpSseTransport rechaza un request por Bearer token ausente o invalido (nunca incluye el token/header ofrecido) | `{path, method, reason: 'missing_header'\|'invalid_token'}` |
 
 **Estructura del evento emitido:**
 

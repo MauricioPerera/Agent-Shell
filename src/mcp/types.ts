@@ -6,6 +6,8 @@
  * para exponer cli_help() y cli_exec() como tools.
  */
 
+import type { AuditLogger } from '../security/audit-logger.js';
+
 // --- JSON-RPC 2.0 ---
 
 export interface JsonRpcRequest {
@@ -126,6 +128,15 @@ export interface HttpTransportConfig {
   maxBodySize?: number;
   /** Clientes SSE concurrentes maximos. Default: 100. Conexiones adicionales reciben 503. */
   maxSseClients?: number;
+  /**
+   * Logger de auditoria opcional. Cuando esta presente, cada rechazo de
+   * autenticacion (401: header ausente o token invalido) emite un evento
+   * auth:failed — antes esta era la unica superficie de red del proyecto
+   * y el unico chequeo de seguridad sin ningun rastro de auditoria, pese
+   * a ser exactamente la senal que un SIEM/deteccion de brute-force
+   * necesita observar.
+   */
+  auditLogger?: AuditLogger;
 }
 
 export interface SseClient {

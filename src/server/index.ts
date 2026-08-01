@@ -264,8 +264,18 @@ async function main() {
   // sessions: sessionId is threaded per-call through to a per-session
   // ContextStore instance (see SessionScopedContextStore), not one shared
   // instance. `search`/vectorIndex stays disabled — see the module docstring.
-  coreConfig.contextStore = new SessionScopedContextStore(new InMemoryStorageAdapter());
-  coreConfig.auditLogger = createAuditLoggerToStderr();
+  const auditLogger = createAuditLoggerToStderr();
+  coreConfig.contextStore = new SessionScopedContextStore(
+    new InMemoryStorageAdapter(),
+    // onExpired only ever fires if a future config also sets ttl_ms (not
+    // currently exposed as a CLI flag/env var — session TTL expiry is
+    // opt-in and unconfigured today). Wired anyway so the audit plumbing
+    // is correct the moment it IS configured, rather than needing this
+    // exact same fix applied a second time later.
+    { onExpired: (sessionId) => auditLogger.audit('session:expired', { sessionId }, sessionId) },
+    (sessionId) => auditLogger.audit('session:created', { sessionId }, sessionId),
+  );
+  coreConfig.auditLogger = auditLogger;
   const core = new Core(coreConfig);
 
   // MCP Server
@@ -277,6 +287,7 @@ async function main() {
     host: config.host,
     corsOrigin: config.corsOrigin,
     auth: config.auth || undefined,
+    auditLogger,
   });
 
   transport.onMessage(async (msg, sessionId) => {

@@ -15,6 +15,7 @@ import { randomUUID, timingSafeEqual, createHash } from 'node:crypto';
 import type { JsonRpcRequest, JsonRpcResponse, HttpTransportConfig, SseClient, HealthResponse } from './types.js';
 import { PARSE_ERROR, INVALID_REQUEST } from './types.js';
 import type { MessageHandler } from './transport.js';
+import type { AuditLogger } from '../security/audit-logger.js';
 
 /**
  * Retorna true SOLO para hosts de loopback conocidos: '127.0.0.1',
@@ -62,6 +63,7 @@ export class HttpSseTransport {
   private readonly authToken: string | null;
   private readonly authExcludePaths: Set<string>;
   private readonly insecureAllowNoAuth: boolean;
+  private readonly auditLogger: AuditLogger | undefined;
 
   constructor(config?: HttpTransportConfig) {
     this._port = config?.port ?? 3000;
@@ -74,6 +76,7 @@ export class HttpSseTransport {
     this.authToken = config?.auth?.bearerToken ?? null;
     this.authExcludePaths = new Set(config?.auth?.excludePaths ?? ['/health']);
     this.insecureAllowNoAuth = config?.insecureAllowNoAuth ?? false;
+    this.auditLogger = config?.auditLogger;
   }
 
   /** Registra el handler de mensajes (misma interfaz que StdioTransport). */
@@ -176,6 +179,16 @@ export class HttpSseTransport {
     if (this.authToken && !this.authExcludePaths.has(url)) {
       const authHeader = req.headers.authorization;
       if (!authHeader || !timingSafeStringEqual(authHeader, `Bearer ${this.authToken}`)) {
+        // The one network-exposed surface in this codebase, and previously
+        // the only security check with zero audit trail — a SIEM watching
+        // for credential-stuffing/brute-force has nothing to observe here.
+        // Never logs the offered token/header value itself, only that one
+        // was missing vs. present-but-wrong.
+        this.auditLogger?.audit('auth:failed', {
+          path: url,
+          method: req.method,
+          reason: authHeader ? 'invalid_token' : 'missing_header',
+        }, (req.headers['x-session-id'] as string | undefined));
         this.sendJson(res, 401, { error: 'Unauthorized', message: 'Valid Bearer token required in Authorization header' });
         return;
       }

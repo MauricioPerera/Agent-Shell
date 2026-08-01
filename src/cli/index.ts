@@ -257,8 +257,18 @@ async function serveHttp(args: string[]): Promise<void> {
   // See the same contextStore comment in serveStdio() above — sessionId is
   // threaded per-call now, so this is safe for HttpSseTransport's
   // concurrent sessions too (each gets its own isolated context).
-  coreConfig.contextStore = new SessionScopedContextStore(new InMemoryStorageAdapter());
-  coreConfig.auditLogger = createAuditLoggerToStderr();
+  const auditLogger = createAuditLoggerToStderr();
+  coreConfig.contextStore = new SessionScopedContextStore(
+    new InMemoryStorageAdapter(),
+    // onExpired only ever fires if a future config also sets ttl_ms (not
+    // currently exposed as a CLI flag/env var — session TTL expiry is
+    // opt-in and unconfigured today). Wired anyway so the audit plumbing
+    // is correct the moment it IS configured, rather than needing this
+    // exact same fix applied a second time later.
+    { onExpired: (sessionId) => auditLogger.audit('session:expired', { sessionId }, sessionId) },
+    (sessionId) => auditLogger.audit('session:created', { sessionId }, sessionId),
+  );
+  coreConfig.auditLogger = auditLogger;
 
   const core = new Core(coreConfig);
   const mcpServer = new McpServer({ core, version: VERSION });
@@ -266,6 +276,7 @@ async function serveHttp(args: string[]): Promise<void> {
   const transport = new HttpSseTransport({
     port, host, corsOrigin,
     auth: token ? { bearerToken: token } : undefined,
+    auditLogger,
   });
 
   transport.onMessage(async (msg, sessionId) => mcpServer.handleMessage(msg, sessionId));
