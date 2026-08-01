@@ -27,6 +27,7 @@
  */
 
 import type { CommandRegistry } from '../command-registry/index.js';
+import type { SkillEntry } from './scaffold.js';
 import type { ShellAdapter } from '../just-bash/types.js';
 import { createShellAdapter } from '../just-bash/factory.js';
 import { scaffoldCommands } from './scaffold.js';
@@ -59,6 +60,31 @@ export { secretCommands, createSecretCommands, SecretStore } from './secret-stor
 export { processCommands, createProcessCommands, ProcessManager } from './process-mgr.js';
 
 /**
+ * Registers every command in `commands`, failing LOUD on the first
+ * collision instead of silently swallowing it.
+ *
+ * Regresion (ronda 35 del audit): registerSkills()/registerShellSkills()
+ * called registry.register() in a bare loop and discarded its Result —
+ * registry.register() itself correctly rejects an exact namespace:name:
+ * version duplicate (COMMAND_ALREADY_EXISTS) rather than silently
+ * overwriting, but nothing here ever surfaced that rejection. Today this
+ * is inert (the 44 shipped namespace:name pairs are all unique, verified
+ * during that audit), but a future skill module accidentally reusing an
+ * existing pair would boot "successfully" with a missing/reduced command
+ * and zero indication why — this throws instead, matching the pattern
+ * scaffold.ts's own generateEntryPoint() already recommends to library
+ * consumers.
+ */
+function registerAll(registry: CommandRegistry, commands: SkillEntry[]): void {
+  for (const { definition, handler } of commands) {
+    const result = registry.register(definition, handler);
+    if (!result.ok) {
+      throw new Error(`Failed to register command ${definition.namespace}:${definition.name}: ${result.error.message}`);
+    }
+  }
+}
+
+/**
  * Registers all CLI creation skills (9 commands).
  *
  * @param agentPermissions - The caller's resolved permission set (same shape
@@ -70,15 +96,9 @@ export { processCommands, createProcessCommands, ProcessManager } from './proces
  *   identity to thread through handlers.
  */
 export function registerSkills(registry: CommandRegistry, agentPermissions?: string[] | null): void {
-  for (const { definition, handler } of scaffoldCommands) {
-    registry.register(definition, handler);
-  }
-  for (const { definition, handler } of wizardCommands) {
-    registry.register(definition, handler);
-  }
-  for (const { definition, handler } of registryAdminCommands(registry, agentPermissions)) {
-    registry.register(definition, handler);
-  }
+  registerAll(registry, scaffoldCommands);
+  registerAll(registry, wizardCommands);
+  registerAll(registry, registryAdminCommands(registry, agentPermissions));
 }
 
 /**
@@ -98,36 +118,16 @@ export function registerSkills(registry: CommandRegistry, agentPermissions?: str
 export function registerShellSkills(registry: CommandRegistry, shellAdapter?: ShellAdapter, jailRoot?: string): void {
   const adapter = shellAdapter || createShellAdapter();
 
-  for (const { definition, handler } of httpCommands) {
-    registry.register(definition, handler);
-  }
-  for (const { definition, handler } of jsonCommands) {
-    registry.register(definition, handler);
-  }
-  for (const { definition, handler } of createFileCommands(adapter, jailRoot)) {
-    registry.register(definition, handler);
-  }
-  for (const { definition, handler } of createShellCommands(adapter, jailRoot)) {
-    registry.register(definition, handler);
-  }
-  for (const { definition, handler } of envCommands) {
-    registry.register(definition, handler);
-  }
-  for (const { definition, handler } of createWorkspaceCommands(undefined, adapter, jailRoot)) {
-    registry.register(definition, handler);
-  }
-  for (const { definition, handler } of createGitCommands(jailRoot)) {
-    registry.register(definition, handler);
-  }
-  for (const { definition, handler } of createCronCommands(undefined, adapter, jailRoot)) {
-    registry.register(definition, handler);
-  }
-  for (const { definition, handler } of createSecretCommands()) {
-    registry.register(definition, handler);
-  }
-  for (const { definition, handler } of createProcessCommands(undefined, jailRoot)) {
-    registry.register(definition, handler);
-  }
+  registerAll(registry, httpCommands);
+  registerAll(registry, jsonCommands);
+  registerAll(registry, createFileCommands(adapter, jailRoot));
+  registerAll(registry, createShellCommands(adapter, jailRoot));
+  registerAll(registry, envCommands);
+  registerAll(registry, createWorkspaceCommands(undefined, adapter, jailRoot));
+  registerAll(registry, createGitCommands(jailRoot));
+  registerAll(registry, createCronCommands(undefined, adapter, jailRoot));
+  registerAll(registry, createSecretCommands());
+  registerAll(registry, createProcessCommands(undefined, jailRoot));
 }
 
 /** Registers ALL skills (CLI creation + shell). */

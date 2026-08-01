@@ -1191,4 +1191,25 @@ describe('Infrastructure Registration', () => {
     expect(ns).toContain('secret');
     expect(ns).toContain('process');
   });
+
+  /**
+   * Regresion (ronda 35 del audit): registerShellSkills() llamaba
+   * registry.register() en un loop desnudo, descartando el Result — si
+   * algun comando colisionaba con uno ya registrado (mismo namespace:
+   * name:version), registry.register() lo rechazaba correctamente
+   * (COMMAND_ALREADY_EXISTS) pero eso nunca llegaba a ningun lado: el
+   * proceso "bootaba bien" con un comando faltante y cero indicacion del
+   * porque. Ahora falla fuerte (throw) en vez de tragarse el error.
+   */
+  it('REG03: registerShellSkills lanza (no se traga el error) si un comando ya esta registrado', () => {
+    const registry = new CommandRegistry();
+    // Pre-registra un 'file:read@1.0.0' de mentira, ocupando exactamente
+    // la misma clave namespace:name:version que el file:read real que
+    // registerShellSkills intenta registrar despues.
+    const fakeDef = command('file', 'read').version('1.0.0').description('fake, ocupa el slot').example('file:read --path x').build();
+    const preRegister = registry.register(fakeDef, async () => ({ success: true, data: null }));
+    expect(preRegister.ok).toBe(true);
+
+    expect(() => registerShellSkills(registry)).toThrow(/file:read/);
+  });
 });
