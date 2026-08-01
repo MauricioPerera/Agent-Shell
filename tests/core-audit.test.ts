@@ -247,4 +247,101 @@ describe('Core + AuditLogger', () => {
     expect(evt.data.command).toContain('users:delete');
     expect(preview.data.confirmToken).toBeTruthy();
   });
+
+  /**
+   * Regresion (ronda 31 del audit): resolveConfirmation() ya auditaba
+   * confirm:executed bajo el nombre real del comando confirmado, pero la
+   * post-procesamiento GENERICA de execInternal() (compartida con todo
+   * comando/pipeline/batch) volvia a auditar la MISMA resolucion una
+   * segunda vez como command:executed, etiquetada con el string literal
+   * "confirm <token>" en vez del comando real. Ahora ese bloque generico
+   * se salta para resoluciones de confirm (isConfirmResolution).
+   */
+  it('AU13: confirmar un token NO duplica el audit trail ni lo etiqueta como "confirm <token>"', async () => {
+    const auditLogger = new AuditLogger('default');
+    const events = collectEvents(auditLogger);
+    const core = new Core({ registry: createMockRegistry() as any, auditLogger, permissions: ['users:delete'] });
+
+    const preview = await core.exec('users:delete --id 5 --confirm', 'session-J');
+    const token = preview.data.confirmToken;
+    events.length = 0; // solo nos interesan los eventos de la resolucion
+
+    await core.exec(`confirm ${token}`, 'session-J');
+
+    const executed = events.filter(e => e.type === 'confirm:executed' || e.type === 'command:executed');
+    expect(executed).toHaveLength(1);
+    expect(executed[0].type).toBe('confirm:executed');
+    expect(executed[0].data.command).toBe('users:delete');
+    expect(events.some(e => e.data?.command === `confirm ${token}`)).toBe(false);
+  });
+
+  /**
+   * Misma regresion que AU13, ahora sobre la resolucion de un historial:
+   * antes se grababa DOS entradas por cada confirm exitoso (una generica
+   * mal etiquetada "confirm <token>", otra — la nueva, correcta — bajo el
+   * comando real). Ahora solo debe quedar UNA entrada, con el nombre real.
+   */
+  it('AU14: confirmar un token graba UNA sola entrada de history, bajo el comando real', async () => {
+    const auditLogger = new AuditLogger('default');
+    const core = new Core({ registry: createMockRegistry() as any, auditLogger, permissions: ['users:delete', 'history'] });
+
+    const preview = await core.exec('users:delete --id 5 --confirm', 'session-K');
+    const token = preview.data.confirmToken;
+    await core.exec(`confirm ${token}`, 'session-K');
+
+    // Una sola llamada a "history" al final: su propia entrada solo se
+    // graba DESPUES de computar la data que devuelve, asi que el snapshot
+    // no se incluye a si mismo. Deben quedar exactamente 2 entradas: la
+    // preview (--confirm) y la resolucion — bajo el comando real, no bajo
+    // el string literal "confirm <token>" (el bug que esto regresiona).
+    const history = await core.exec('history', 'session-K');
+    expect(history.data).toHaveLength(2);
+    expect(history.data[0].command).toBe('users:delete --id 5 --confirm');
+    expect(history.data[1].command).toBe('users:delete');
+  });
+
+  /**
+   * Regresion (ronda 31 del audit): al suprimir el bloque generico de
+   * execInternal para TODA resolucion de confirm, un handler que responde
+   * result.success===false dentro de resolveConfirmation() se quedaba SIN
+   * ningun audit (antes lo cubria, mal etiquetado, el bloque generico
+   * suprimido). Se agrego un audit explicito ahi mismo para no perder la
+   * señal.
+   */
+  it('AU15: un handler confirmado que falla (success:false) SI audita error:handler, bajo el comando real', async () => {
+    const auditLogger = new AuditLogger('default');
+    const events = collectEvents(auditLogger);
+    const failRegistry = {
+      get(namespace: string, name: string) {
+        if (namespace === 'users' && name === 'delete') {
+          return {
+            ok: true,
+            value: {
+              definition: {
+                namespace: 'users', name: 'delete', version: '1.0.0', description: 'Elimina (falla)',
+                params: [{ name: 'id', type: 'int', required: true }],
+                confirm: true, requiredPermissions: ['users:delete'],
+              },
+              handler: async () => ({ success: false, data: null, error: 'delete blocked by policy' }),
+              registeredAt: new Date().toISOString(),
+            },
+          };
+        }
+        return { ok: false, error: { code: 'NOT_FOUND', message: 'not found' } };
+      },
+    };
+    const core = new Core({ registry: failRegistry as any, auditLogger, permissions: ['users:delete'] });
+
+    const preview = await core.exec('users:delete --id 5 --confirm', 'session-L');
+    events.length = 0;
+    const response = await core.exec(`confirm ${preview.data.confirmToken}`, 'session-L');
+
+    expect(response.code).toBe(1);
+    expect(response.error).toContain('delete blocked by policy');
+
+    const failed = events.filter(e => e.type === 'error:handler');
+    expect(failed).toHaveLength(1);
+    expect(failed[0].data.command).toBe('users:delete');
+    expect(failed[0].sessionId).toBe('session-L');
+  });
 });

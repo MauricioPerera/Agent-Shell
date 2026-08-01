@@ -293,11 +293,21 @@ class Core {
       // Handle error responses from executeCommand
       if (data && typeof data === 'object' && '_error' in data) {
         const { code, error } = data._error;
-        // code 3 is reserved exclusively for permission/rate-limit denial
-        // across Core (see HELP_TEXT: "code 3: Permission denied / rate
-        // limit") — every other code here is a lookup/handler failure.
-        this.auditLogger?.audit(code === 3 ? 'permission:denied' : 'error:handler', { command: cmd.slice(0, 100), code, error }, sessionId);
-        this.recordHistory(cmd, code);
+        // Regresion (ronda 31 del audit): resolveConfirmation() ya audita
+        // sus propios fallos (confirm:expired para token vencido; ver
+        // tambien su rama de handler-failure) bajo el nombre REAL del
+        // comando confirmado — este bloque generico volvia a auditar la
+        // MISMA resolucion una segunda vez, etiquetada con el string
+        // literal "confirm <token>" en vez del comando real. Se salta
+        // aca (no para el resto de comandos/pipelines/batch, que no
+        // tienen ningun otro punto de auditoria propio).
+        if (!isConfirmResolution) {
+          // code 3 is reserved exclusively for permission/rate-limit denial
+          // across Core (see HELP_TEXT: "code 3: Permission denied / rate
+          // limit") — every other code here is a lookup/handler failure.
+          this.auditLogger?.audit(code === 3 ? 'permission:denied' : 'error:handler', { command: cmd.slice(0, 100), code, error }, sessionId);
+          this.recordHistory(cmd, code);
+        }
         return this.buildResponse(code, null, error, cmd, mode, startTime);
       }
 
@@ -330,8 +340,14 @@ class Core {
         data = this.applyPagination(data, firstCmd?.flags);
       }
 
-      this.recordHistory(cmd, 0);
-      this.auditLogger?.audit('command:executed', { command: cmd.slice(0, 100), duration_ms: Date.now() - startTime }, sessionId);
+      // Same reasoning as the error branch above: resolveConfirmation()
+      // already recorded history and audited confirm:executed under the
+      // real resolved command name — don't double it here under the
+      // literal "confirm <token>" string.
+      if (!isConfirmResolution) {
+        this.recordHistory(cmd, 0);
+        this.auditLogger?.audit('command:executed', { command: cmd.slice(0, 100), duration_ms: Date.now() - startTime }, sessionId);
+      }
       return this.buildResponse(0, data, null, cmd, mode, startTime);
     } catch (err: any) {
       this.auditLogger?.audit('error:handler', { command: cmd.slice(0, 100), error: err.message }, sessionId);
@@ -481,10 +497,25 @@ class Core {
     const pending = resolved.payload;
 
     const result = await pending.registeredCmd.handler(pending.handlerArgs, null, { sessionId: pending.sessionId, signal });
+    const resolvedCommand = `${pending.namespace}:${pending.command}`;
     if (result && typeof result === 'object' && result.success === false) {
-      return { _error: { code: 1, error: result.error || `Command failed: ${pending.namespace}:${pending.command}` } };
+      const failError = result.error || `Command failed: ${resolvedCommand}`;
+      // The generic execInternal post-processing skips its own audit for
+      // isConfirmResolution (see comment there) — record the failure here
+      // instead, under the resolved command's real name, so this signal
+      // isn't silently dropped.
+      this.auditLogger?.audit('error:handler', { command: resolvedCommand, error: failError }, pending.sessionId);
+      return { _error: { code: 1, error: failError } };
     }
-    this.auditLogger?.audit('confirm:executed', { command: `${pending.namespace}:${pending.command}`, token }, pending.sessionId);
+    this.auditLogger?.audit('confirm:executed', { command: resolvedCommand, token }, pending.sessionId);
+    // Record under the CONFIRMED command's name, not the literal typed
+    // "confirm <token>" string — matches Executor's confirm() (round 31 of
+    // the audit: previously execInternal's generic post-processing also
+    // recorded this request into history, mislabeled as "confirm <token>",
+    // AND audited a second, redundant command:executed event for the
+    // same resolution. That generic path is now skipped entirely for
+    // confirm resolutions (see execInternal's isConfirmResolution check).
+    this.recordHistory(resolvedCommand, 0);
     return result.data;
   }
 
