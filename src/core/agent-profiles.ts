@@ -16,11 +16,22 @@ export const AGENT_PROFILES: Record<AgentProfile, string[]> = {
   /** Full access. No restrictions. */
   admin: ['*'],
 
-  /** Can execute and modify, but not delete or administer. */
+  /**
+   * Can execute and modify, but not delete or administer.
+   *
+   * Regression: this list granted 'file:delete' instead of 'file:write' —
+   * every other namespace here has its own explicit ':write' entry
+   * (http/git/cron/process/scaffold/wizard), file was the one exception,
+   * and the delete grant directly contradicted both this comment and
+   * AP04's `not.toContain('*:delete')` check. Net effect: file:write/
+   * file:mkdir/file:chmod (all gated on file:write) were unreachable for
+   * the profile docs/deployment.md recommends for production ("CRUD"),
+   * while file:delete worked — the opposite of "modify, but not delete".
+   */
   operator: [
     '*:read', '*:list', '*:get', '*:create', '*:update', '*:execute',
     'search', 'describe', 'context', 'history',
-    'http:read', 'http:write', 'json:read', 'file:read', 'file:delete', 'shell:exec', 'shell:read', 'env:read',
+    'http:read', 'http:write', 'json:read', 'file:read', 'file:write', 'shell:exec', 'shell:read', 'env:read',
     'workspace:write', 'workspace:read',
     'git:read', 'git:write', 'cron:read', 'cron:write', 'secret:read', 'process:read', 'process:write',
     'registry:read', 'scaffold:write', 'wizard:write',

@@ -14,6 +14,7 @@ import { Core } from '../src/core/index.js';
 import { resolveAgentPermissions, AGENT_PROFILES } from '../src/core/agent-profiles.js';
 import type { AgentProfile } from '../src/core/agent-profiles.js';
 import { RBAC } from '../src/security/rbac.js';
+import { matchPermission } from '../src/security/permission-matcher.js';
 
 // ---------------------------------------------------------------------------
 // Mock Registry
@@ -138,6 +139,22 @@ describe('Agent Profiles', () => {
     expect(AGENT_PROFILES.operator).toContain('*:create');
     expect(AGENT_PROFILES.operator).not.toContain('*:delete');
     expect(AGENT_PROFILES.restricted).toHaveLength(0);
+  });
+
+  /**
+   * Regresion (ronda 22 del audit): operator listaba 'file:delete' en vez
+   * de 'file:write' — file:write/file:mkdir/file:chmod (todos gateados en
+   * file:write) quedaban inalcanzables para el perfil que docs/deployment.md
+   * recomienda para produccion ("CRUD"), mientras file:delete SI funcionaba
+   * — lo opuesto al propio comentario "modify, but not delete" y a AP04.
+   */
+  it('AP04b: operator puede escribir archivos, no puede borrarlos ni renombrarlos', () => {
+    expect(matchPermission(AGENT_PROFILES.operator, 'file:write')).toBe(true);
+    expect(matchPermission(AGENT_PROFILES.operator, 'file:delete')).toBe(false);
+    // file:rename exige ['file:write', 'file:delete'] (mismo blast radius
+    // que file:delete) — operator tiene el primero pero no el segundo, asi
+    // que sigue sin poder renombrar-sobreescribir, consistente con "not delete".
+    expect(matchPermission(AGENT_PROFILES.operator, 'file:write') && matchPermission(AGENT_PROFILES.operator, 'file:delete')).toBe(false);
   });
 
   it('AP05: agentProfile takes precedence over permissions', () => {
