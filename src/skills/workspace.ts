@@ -32,10 +32,6 @@ export class WorkspaceState {
     this.cwd = initialCwd ?? process.cwd();
   }
 
-  mergedEnv(): Record<string, string> {
-    return { ...process.env, ...this.env } as Record<string, string>;
-  }
-
   recordHistory(cmd: string, exitCode: number, duration_ms: number): void {
     this.history.push({ command: cmd, exitCode, duration_ms, timestamp: new Date().toISOString() });
     while (this.history.length > MAX_HISTORY) this.history.shift();

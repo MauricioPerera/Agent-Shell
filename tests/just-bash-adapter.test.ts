@@ -7,6 +7,17 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+// node:child_process's namespace isn't configurable in ESM (vi.spyOn can't
+// touch it directly) — wrap execFileSync in a trackable vi.fn that still
+// forwards to the real implementation, same pattern this repo already uses
+// for undici's fetch in tests/shell-skills.test.ts. Every other test in
+// this file still exercises the REAL which()/where against the real OS.
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  return { ...actual, execFileSync: vi.fn((...args: Parameters<typeof actual.execFileSync>) => actual.execFileSync(...args)) };
+});
+import { execFileSync as mockedExecFileSync } from 'node:child_process';
 import { NativeShellAdapter, JustBashShellAdapter, clampExecTimeout, MAX_EXEC_TIMEOUT_MS } from '../src/just-bash/adapter.js';
 import { createShellAdapter } from '../src/just-bash/factory.js';
 import { createShellCommands } from '../src/skills/shell-exec.js';
@@ -49,6 +60,33 @@ describe('NativeShellAdapter', () => {
   it('NA05: which returns found=false for nonexistent program', async () => {
     const result = await adapter.which('nonexistent-xyz-12345');
     expect(result.found).toBe(false);
+  });
+
+  /**
+   * Regresion (ronda 27 del audit): exec() ya filtraba process.env via
+   * filterSensitiveEnv() (razon documentada en su propio comentario:
+   * shell:exec/shell:which solo exigen shell:exec/shell:read, no
+   * env:read), pero which() — 2 metodos mas abajo en el mismo archivo —
+   * no pasaba NINGUN `env` a execFileSync, heredando el proceso host
+   * completo sin filtrar. No explotable hoy (which() solo retorna
+   * {program, path, found}, no el env), pero era una violacion real de
+   * la garantia que este mismo archivo documenta explicitamente.
+   */
+  it('NA05b: which filtra env sensible al invocar where/which (no lo hereda sin filtrar)', async () => {
+    const spy = mockedExecFileSync as unknown as ReturnType<typeof vi.fn>;
+    spy.mockClear();
+    const prevToken = process.env.AGENT_SHELL_TEST_TOKEN;
+    process.env.AGENT_SHELL_TEST_TOKEN = 'leak-canary-' + Date.now();
+    try {
+      await adapter.which('node');
+      expect(spy).toHaveBeenCalled();
+      const options = spy.mock.calls[0][2] as any;
+      expect(options?.env).toBeDefined();
+      expect(options.env.AGENT_SHELL_TEST_TOKEN).toBeUndefined();
+    } finally {
+      if (prevToken === undefined) delete process.env.AGENT_SHELL_TEST_TOKEN;
+      else process.env.AGENT_SHELL_TEST_TOKEN = prevToken;
+    }
   });
 
   it('NA06: readFile reads real files', async () => {

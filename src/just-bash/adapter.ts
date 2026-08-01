@@ -213,7 +213,10 @@ export class NativeShellAdapter implements ShellAdapter {
     const isWindows = process.platform === 'win32';
     const bin = isWindows ? 'where' : 'which';
     try {
-      const stdout = execFileSync(bin, [program], { encoding: 'utf-8', timeout: 5000 }) as string;
+      // Same reasoning as exec() above: shell:which only requires
+      // shell:read, not env:read — omitting `env` here would have let this
+      // one call silently inherit the full unfiltered host environment.
+      const stdout = execFileSync(bin, [program], { encoding: 'utf-8', timeout: 5000, env: filterSensitiveEnv(process.env) }) as string;
       const path = stdout.split('\n')[0].trim();
       if (path) return { program, path, found: true };
       return { program, path: null, found: false };
