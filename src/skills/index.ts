@@ -4,7 +4,7 @@
  *
  * Two categories:
  * - **CLI Creation**: scaffold, wizard, registry admin (9 commands)
- * - **Shell**: http, json, file, shell exec, env (12 commands)
+ * - **Shell**: http, json, file, shell exec, env, workspace, git, cron, secret, process (40 commands)
  *
  * Shell skills support pluggable backends via ShellAdapter:
  * - **just-bash**: sandboxed TypeScript interpreter (if installed)
@@ -82,7 +82,8 @@ export function registerSkills(registry: CommandRegistry, agentPermissions?: str
 }
 
 /**
- * Registers all system shell skills (18 commands): http, json, file, shell, env, workspace.
+ * Registers all system shell skills (40 commands): http, json, file, shell, env,
+ * workspace, git, cron, secret, process.
  *
  * @param registry - CommandRegistry to register into
  * @param shellAdapter - Optional ShellAdapter. If not provided, auto-detects
