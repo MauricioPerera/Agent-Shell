@@ -109,12 +109,27 @@ export class ProcessManager {
     return { stdout: proc.stdout.join(''), stderr: proc.stderr.join('') };
   }
 
-  destroy(): void {
+  /**
+   * Terminates all managed processes and waits for each to actually exit
+   * (not just for the kill signal to be sent) before resolving. On Windows,
+   * a child process keeps its `cwd` directory locked until it fully exits —
+   * a caller that deletes that directory right after destroy() (e.g. test
+   * cleanup) previously hit an intermittent EPERM because destroy() only
+   * fired SIGTERM and returned immediately. A per-process timeout guards
+   * against a process that ignores SIGTERM hanging destroy() forever.
+   */
+  async destroy(): Promise<void> {
+    const waits: Promise<void>[] = [];
     for (const proc of this.processes.values()) {
       if (proc.exitCode === null) {
+        waits.push(new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, 2000);
+          proc.process.once('close', () => { clearTimeout(timer); resolve(); });
+        }));
         try { proc.process.kill('SIGTERM'); } catch { /* ignore */ }
       }
     }
+    await Promise.all(waits);
     this.processes.clear();
   }
 }

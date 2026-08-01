@@ -807,7 +807,7 @@ describe('Process Manager Skills', () => {
     cmds = createProcessCommands(pm);
   });
 
-  afterEach(() => { pm.destroy(); });
+  afterEach(async () => { await pm.destroy(); });
 
   it('PM01: process:spawn starts a process', async () => {
     const handler = findHandler(cmds, 'process', 'spawn');
@@ -920,8 +920,8 @@ describe('Process Jail (opt-in path containment)', () => {
     jailed = createProcessCommands(pm, jailDir);
   });
 
-  afterEach(() => {
-    pm.destroy();
+  afterEach(async () => {
+    await pm.destroy();
     rmSync(jailDir, { recursive: true, force: true });
     rmSync(outsideDir, { recursive: true, force: true });
   });
