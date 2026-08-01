@@ -673,6 +673,53 @@ describe('Core', () => {
       expect(response.code).toBe(0);
       expect(response.data).toBeDefined();
     });
+
+    /**
+     * Regresion (ronda 31 del audit): executePipeline() nunca leia
+     * flags.dryRun/flags.validate por paso — un pipeline con --dry-run en
+     * el primer comando ejecutaba TODOS los pasos de verdad mientras la
+     * respuesta final igual reportaba meta.mode='dry-run' (leido aparte
+     * por execInternal). Ahora --dry-run en el primer comando se propaga a
+     * todo el pipeline y cada paso se simula en vez de correr su handler.
+     */
+    it('--dry-run en el primer comando del pipeline se propaga a TODOS los pasos (ninguno ejecuta de verdad)', async () => {
+      const response = await core.exec('users:delete --id 5 --dry-run >> users:export');
+
+      expect(response.code).toBe(0);
+      expect(response.meta.mode).toBe('dry-run');
+      // Si el segundo paso hubiera corrido de verdad, users:export retorna
+      // `input || []` (el resultado real de users:delete, { deleted: 5 }).
+      // En vez de eso, el paso se simulo: la data final es la forma
+      // simulada del ULTIMO paso, no el resultado real de ningun handler.
+      expect(response.data).toEqual({
+        dryRun: true,
+        command: 'users:export',
+        args: {},
+      });
+    });
+
+    /**
+     * Regresion (ronda 31 del audit), misma causa que el test anterior:
+     * --validate en un paso intermedio de un pipeline se ignoraba por
+     * completo — el handler real corria igual. A diferencia de --dry-run,
+     * --validate NO se propaga globalmente desde el primer comando (misma
+     * asimetria que Executor): solo valida el paso que trae su PROPIO flag.
+     */
+    it('--validate en un paso intermedio del pipeline lo simula, no propaga a los demas pasos', async () => {
+      const response = await core.exec('users:list >> users:create --name Ana --email a@b.com --validate');
+
+      expect(response.code).toBe(0);
+      // Si el handler real hubiera corrido, retornaria { id: 42, name:
+      // 'Ana', email: 'a@b.com' } en vez de la forma de validacion.
+      expect(response.data).toEqual({ valid: true, command: 'users:create' });
+    });
+
+    it('un param requerido faltante bajo --validate en un paso de pipeline aborta con code=1', async () => {
+      const response = await core.exec('users:list >> users:create --name Ana --validate');
+
+      expect(response.code).toBe(1);
+      expect(response.error).toContain('email');
+    });
   });
 
   /**

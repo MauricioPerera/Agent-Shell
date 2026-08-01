@@ -793,11 +793,23 @@ class Core {
       return { _error: { code: 1, error: `Pipeline exceeds maximum depth of ${maxDepth} commands` } };
     }
 
+    // Regresion (ronda 31 del audit): --dry-run/--validate en el primer
+    // comando de un pipeline se leian en execInternal solo para setear
+    // meta.mode de la respuesta final — este metodo nunca los chequeaba,
+    // asi que `cmd1 >> file:delete --dry-run` reportaba mode:'dry-run'
+    // mientras file:delete corria de verdad. Mismo tratamiento que ya
+    // hace Executor: --dry-run en el primer comando se propaga a TODOS
+    // los pasos (simula el pipeline entero, no solo el primer token);
+    // --validate NO se propaga globalmente (misma asimetria que
+    // Executor) — un paso solo valida si SU PROPIO flag trae --validate.
+    const globalDryRun = commands[0]?.flags.dryRun || false;
+
     let previousData: any = null;
     let isFirstStep = true;
 
     for (const cmd of commands) {
-      const { namespace, command, args, flags } = cmd;
+      const { namespace, command, args } = cmd;
+      const flags = globalDryRun ? { ...cmd.flags, dryRun: true } : cmd.flags;
 
       if (!namespace) {
         return { _error: { code: 1, error: `Pipeline command must have namespace` } };
@@ -829,6 +841,33 @@ class Core {
       const typeCheck = registeredCmd.params ? this.convertArgTypes(handlerArgs, registeredCmd.params) : { ok: true as const, args: handlerArgs };
       if (!typeCheck.ok) {
         return { _error: { code: 1, error: `Pipeline failed at ${namespace}:${command}: ${typeCheck.error}` } };
+      }
+
+      // Validate mode — same check executeCommand() applies, previously
+      // skipped entirely inside a pipeline (see the round-31 comment
+      // above executePipeline). A missing-required-param failure aborts
+      // the whole pipeline here, same as any other step failure; a
+      // successful validation continues the chain using its {valid,
+      // command} shape as the next step's $input, mirroring Executor's
+      // identical continue-through-validate pipeline semantics.
+      if (flags.validate) {
+        previousData = this.validateCommand(registeredCmd, { named: namedArgs, positional: args.positional });
+        if (previousData && previousData._error) return previousData;
+        isFirstStep = false;
+        continue;
+      }
+
+      // Dry-run mode (own flag, or propagated from the pipeline's first
+      // command — see globalDryRun above) — simulate this step without
+      // invoking its handler, then continue the chain using the
+      // simulated shape as the next step's $input, mirroring Executor's
+      // identical whole-pipeline-simulation semantics. Previously this
+      // flag was read nowhere in this method: a step tagged --dry-run
+      // still ran its handler for real.
+      if (flags.dryRun) {
+        previousData = { dryRun: true, command: `${namespace}:${command}`, args: typeCheck.args };
+        isFirstStep = false;
+        continue;
       }
 
       // Confirm gate — same check executeCommand() applies, previously
