@@ -59,22 +59,11 @@ export function applyFilter(data: any, expression: string): FilterResult {
  * Retorna null si es valido, o FilterError si no.
  */
 function validateInput(data: any): FilterError | null {
-  // Check if data is a string (could be unparsed JSON or invalid)
+  // Any string input is rejected as E002, whether or not it happens to
+  // parse as JSON — the contract (contracts/jq-filter.md §9) documents
+  // accepting a valid JSON string as a pending future addition, not
+  // current behavior.
   if (typeof data === 'string') {
-    // Try to parse as JSON
-    try {
-      JSON.parse(data);
-    } catch {
-      return {
-        success: false,
-        error: {
-          code: 'E002',
-          message: 'Input is not valid JSON. Cannot apply filter.',
-        },
-      };
-    }
-    // If it parses, it's a valid JSON string value - but the contract says
-    // strings passed as data that aren't valid JSON objects/arrays are E002
     return {
       success: false,
       error: {
