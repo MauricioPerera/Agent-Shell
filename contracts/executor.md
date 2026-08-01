@@ -400,7 +400,7 @@ Los tokens de confirmacion generados por modo `--confirm` tienen un ciclo de vid
    -> Buscar token en pendingConfirms
    -> Si existe y no expiro -> ejecutar comando original -> eliminar token
    -> Si no existe -> code=2, E_CONFIRM_INVALID
-   -> Si expiro -> code=2, E_CONFIRM_INVALID (limpiado automatico)
+   -> Si expiro -> code=2, E_CONFIRM_EXPIRED (limpiado automatico, ver 3.15)
 
 3. EXPIRACION: Automatica via confirmTTL_ms
    -> cleanExpiredConfirms() se ejecuta al inicio de cada execute()
@@ -627,7 +627,7 @@ Feature: Conversion de tipos de argumentos
 | T09 | Modo validate fallo | ParseResult(users:get --validate) sin args requeridos | code=1, E_INVALID_ARGS | Alta |
 | T10 | Modo confirm | ParseResult(users:delete --id 5 --confirm) | code=4, data.confirmToken != null | Alta |
 | T11 | Confirmacion con token valido | confirm <valid-token> | code=0, ejecuta comando original | Alta |
-| T12 | Confirmacion con token invalido | confirm <invalid-token> | code=2, E_NOT_FOUND | Media |
+| T12 | Confirmacion con token invalido | confirm <invalid-token> | code=2, E_CONFIRM_INVALID | Media |
 | T13 | Pipeline 2 pasos exitoso | ParseResult(users:get --id 1 >> orders:list --user-id $input.id) | code=0, data=[...orders] | Alta |
 | T14 | Pipeline con fallo en paso 1 | ParseResult(fake:cmd >> orders:list) | code=2, failedAt=0 | Alta |
 | T15 | Pipeline con fallo en paso 2 | ParseResult(users:get --id 1 >> fake:cmd) | code=2, failedAt=1 | Alta |
@@ -856,7 +856,7 @@ code=0: Ejecucion exitosa (todos los modos cuando pasan)
 code=1: E_INVALID_ARGS, E_MISSING_REQUIRED, E_TYPE_MISMATCH, E_CONSTRAINT_VIOLATED,
         E_TIMEOUT, E_HANDLER_ERROR, E_PIPELINE_DEPTH, E_BATCH_SIZE,
         E_UNDO_EXPIRED, E_UNDO_NOT_REVERSIBLE, E_INPUT_RESOLUTION
-code=2: E_NOT_FOUND, E_CONFIRM_INVALID
+code=2: E_NOT_FOUND, E_CONFIRM_INVALID, E_CONFIRM_EXPIRED
 code=3: E_FORBIDDEN, E_RATE_LIMITED
 code=4: E_CONFIRM_REQUIRED
 ```
