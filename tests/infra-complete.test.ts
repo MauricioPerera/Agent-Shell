@@ -1007,13 +1007,12 @@ describe('Process Jail (opt-in path containment)', () => {
 
 describe('Infrastructure Registration', () => {
 
-  it('REG01: registerShellSkills registers all 38 commands', () => {
+  it('REG01: registerShellSkills registers all 40 commands', () => {
     const registry = new CommandRegistry();
     registerShellSkills(registry);
     const all = registry.listAll();
     // 7 file + 2 shell + 3 http + 2 json + 2 env + 6 workspace + 6 git + 4 cron + 4 secret + 4 process = 40
-    // Wait, let me count: file(7) + shell(2) + http(3) + json(2) + env(2) + workspace(6) + git(6) + cron(4) + secret(4) + process(4) = 40
-    expect(all.length).toBeGreaterThanOrEqual(38);
+    expect(all.length).toBe(40);
   });
 
   it('REG02: all new namespaces are registered', () => {
