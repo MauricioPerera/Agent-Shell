@@ -437,7 +437,15 @@ function validateJqFieldPath(fieldPath: string, raw: string): ParseError | null 
     return jqTooDeepError(fieldPath, raw);
   }
   for (const segment of segments) {
-    if (segment.length > 0 && !JQ_FIELD_NAME_PATTERN.test(segment) && !JQ_ARRAY_INDEX_PATTERN.test(segment)) {
+    // No `segment.length > 0` bypass: contracts/parser.md's own grammar
+    // requires <field_path> ::= <field_name> ("." <field_name>)*, and
+    // <field_name> ::= [a-zA-Z_][a-zA-Z0-9_]* — at least one character per
+    // segment, always; there's no grammar rule granting a bare "." (no
+    // field_path at all) special "identity" status. The bypass let that
+    // (`cmd | .`) and any empty segment from a trailing/double dot
+    // (`cmd | .name.`, `cmd | .name..sub`) parse as valid instead of being
+    // rejected with E_INVALID_JQ_FIELD like any other malformed field name.
+    if (!JQ_FIELD_NAME_PATTERN.test(segment) && !JQ_ARRAY_INDEX_PATTERN.test(segment)) {
       return invalidJqFieldError(segment, raw);
     }
   }

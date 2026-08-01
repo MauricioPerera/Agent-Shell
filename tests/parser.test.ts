@@ -321,6 +321,46 @@ describe('Parser', () => {
       if (isParseResult(result)) return;
       expect(result.errorType).toBe('E_INVALID_JQ');
     });
+
+    /**
+     * Regresion: contracts/parser.md exige <field_name> ::= [a-zA-Z_][a-zA-Z0-9_]*
+     * (>=1 caracter) en cada segmento de <field_path>, pero validateJqFieldPath
+     * eximia los segmentos vacios del chequeo (`segment.length > 0 && ...`).
+     * Un "." suelto (sin field_path), un trailing dot ("x:y | .name."), o un
+     * doble dot ("x:y | .name..sub") parseaban como validos en vez de
+     * rechazarse con E_INVALID_JQ.
+     */
+    it('rechaza un "." suelto (sin field_path) con E_INVALID_JQ_FIELD', () => {
+      const result = parse('x:y | .');
+
+      expect(isParseResult(result)).toBe(false);
+      if (isParseResult(result)) return;
+      expect(result.errorType).toBe('E_INVALID_JQ_FIELD');
+    });
+
+    it('rechaza un trailing dot ("x:y | .name.") con E_INVALID_JQ_FIELD', () => {
+      const result = parse('x:y | .name.');
+
+      expect(isParseResult(result)).toBe(false);
+      if (isParseResult(result)) return;
+      expect(result.errorType).toBe('E_INVALID_JQ_FIELD');
+    });
+
+    it('rechaza un doble dot ("x:y | .name..sub") con E_INVALID_JQ_FIELD', () => {
+      const result = parse('x:y | .name..sub');
+
+      expect(isParseResult(result)).toBe(false);
+      if (isParseResult(result)) return;
+      expect(result.errorType).toBe('E_INVALID_JQ_FIELD');
+    });
+
+    it('rechaza un multi-select con un segmento vacio ("x:y | [.name, .]") con E_INVALID_JQ_FIELD', () => {
+      const result = parse('x:y | [.name, .]');
+
+      expect(isParseResult(result)).toBe(false);
+      if (isParseResult(result)) return;
+      expect(result.errorType).toBe('E_INVALID_JQ_FIELD');
+    });
   });
 
   // ----------------------------------------------------------
