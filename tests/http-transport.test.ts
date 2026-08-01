@@ -345,6 +345,30 @@ describe('HttpSseTransport', () => {
       expect(body.error.code).toBe(-32600);
     });
 
+    /**
+     * Regresion: `null` es JSON valido (JSON.parse('null') no lanza), asi
+     * que `request` podia terminar siendo `null` aca dentro — el chequeo de
+     * estructura JSON-RPC accedia `request.jsonrpc`/`request.id` sin
+     * resguardo, lo que tiraba un TypeError sincronico dentro de un
+     * callback async (`req.on('end', async () => {...})`) que nadie espera
+     * ni atrapa. Sin un process.on('unhandledRejection') en todo el repo,
+     * un solo request con body literal `null` tumbaba el proceso entero.
+     */
+    it('T09b: body JSON "null" retorna 400 en vez de tumbar el servidor', async () => {
+      const { status, body } = await rpcRequest(transport.port, null);
+
+      expect(status).toBe(400);
+      expect(body.error.code).toBe(-32600);
+    });
+
+    it('T09c: body JSON no-objeto (numero/string/array) retorna 400, no crashea', async () => {
+      for (const primitive of [42, 'just-a-string', true, []]) {
+        const { status, body } = await rpcRequest(transport.port, primitive as any);
+        expect(status).toBe(400);
+        expect(body.error.code).toBe(-32600);
+      }
+    });
+
     it('T10: retorna 413 si body excede maxBodySize', async () => {
       await transport.stop();
       transport = new HttpSseTransport({ port: 0, maxBodySize: 50 });

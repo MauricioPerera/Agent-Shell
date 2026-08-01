@@ -262,12 +262,22 @@ export class HttpSseTransport {
         return;
       }
 
-      // Validate JSON-RPC structure
-      if (request.jsonrpc !== '2.0' || !request.method) {
+      // Validate JSON-RPC structure. `null` is valid JSON (JSON.parse('null')
+      // succeeds), so `request` can legitimately be null here — property
+      // access on it below would otherwise throw a TypeError synchronously
+      // inside this async req.on('end', async () => {...}) callback. Nobody
+      // awaits that callback and there's no process.on('unhandledRejection')
+      // handler anywhere in this repo, so an uncaught throw here crashes the
+      // whole process: one request with body `null` took down the entire
+      // HTTP server.
+      if (request === null || typeof request !== 'object' || request.jsonrpc !== '2.0' || !request.method) {
         clearTimeout(timeout);
         this.sendJson(res, 400, {
           jsonrpc: '2.0',
-          id: request.id ?? null,
+          // Optional chaining, not `request.id`: request can be null (or any
+          // other non-object JSON primitive) here, and `?.` safely returns
+          // undefined for those instead of throwing.
+          id: request?.id ?? null,
           error: { code: INVALID_REQUEST, message: 'Invalid Request: missing jsonrpc or method' },
         });
         return;
