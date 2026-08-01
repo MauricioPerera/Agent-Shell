@@ -620,6 +620,43 @@ describe('Core', () => {
       expect(response.code).toBe(0);
       // El primer paso no tiene input previo; el literal llega tal cual.
     });
+
+    /**
+     * Regresion (hallazgo de auditoria de seguridad): executePipeline()
+     * llamaba registeredCmd.handler(...) directo, sin chequear
+     * flags.confirm ni registeredCmd.requiresConfirmation en absoluto —
+     * a diferencia de executeCommand()/executeBatch(), que si lo hacen.
+     * Un pipeline como `users:list >> users:purge --id 9` corria la
+     * purga irreversible sin preview, evadiendo por completo la
+     * proteccion que requiresConfirmation existe para dar (T06i-k
+     * arriba prueban exactamente ese comando ejecutado SOLO, sin pipeline).
+     */
+    it('un paso de pipeline con requiresConfirmation pide preview, NO ejecuta el handler', async () => {
+      const response = await core.exec('users:list >> users:purge --id 9');
+
+      expect(response.code).toBe(4);
+      expect(response.meta.mode).toBe('confirm');
+      expect(response.data.confirmRequired).toBe(true);
+      expect(response.data.preview.command).toBe('users:purge');
+      expect(typeof response.data.confirmToken).toBe('string');
+    });
+
+    it('confirmar el token de un paso de pipeline con requiresConfirmation lo ejecuta de verdad', async () => {
+      const preview = await core.exec('users:list >> users:purge --id 9');
+      const token = preview.data.confirmToken;
+
+      const response = await core.exec(`confirm ${token}`);
+
+      expect(response.code).toBe(0);
+      expect(response.data).toEqual({ purged: 9 });
+    });
+
+    it('un pipeline sin ningun paso requiresConfirmation sigue ejecutando normal (sin regresion)', async () => {
+      const response = await core.exec('users:list >> users:export');
+
+      expect(response.code).toBe(0);
+      expect(response.data).toBeDefined();
+    });
   });
 
   /**

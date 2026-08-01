@@ -414,9 +414,11 @@ class Core {
     // checked above) and return a preview + token instead of running it —
     // the caller must re-submit via the `confirm <token>` builtin to
     // actually execute. Only single commands and batch items go through
-    // this method; executePipeline has its own separate loop that doesn't
-    // check flags.dryRun/validate/confirm at all (a pre-existing, broader
-    // gap left out of scope here).
+    // this method; executePipeline has its own separate loop with the same
+    // check applied to each step (see executePipeline()) — dryRun/validate
+    // are NOT checked there, only confirm, since dry-run/validate semantics
+    // don't obviously generalize to a multi-step chain (a pre-existing,
+    // narrower gap left out of scope here).
     //
     // registeredCmd.requiresConfirmation (documented in contracts/
     // command-registry.md as "Si requiere --confirm por defecto") makes
@@ -814,6 +816,21 @@ class Core {
       const typeCheck = registeredCmd.params ? this.convertArgTypes(handlerArgs, registeredCmd.params) : { ok: true as const, args: handlerArgs };
       if (!typeCheck.ok) {
         return { _error: { code: 1, error: `Pipeline failed at ${namespace}:${command}: ${typeCheck.error}` } };
+      }
+
+      // Confirm gate — same check executeCommand() applies, previously
+      // missing here entirely: a step tagged requiresConfirmation (e.g.
+      // file:delete) executed immediately with no preview when reached via
+      // a pipeline, silently bypassing the exact protection that flag
+      // exists for (`cmd1 >> file:delete --path important --recursive
+      // true` ran unconfirmed). Aborts the pipeline here — same as any
+      // other mid-pipeline failure — rather than trying to resume the
+      // remaining steps after a separate confirm: pendingConfirms stashes
+      // only this one step's resolved args, not "the rest of the pipeline
+      // plus its accumulated previousData", so a later-confirmed token
+      // re-runs just this step, matching single-command confirm semantics.
+      if (flags.confirm || registeredCmd.requiresConfirmation) {
+        return this.requestConfirmation(namespace, command, registeredCmd, typeCheck.args, sessionId);
       }
 
       const result = await registeredCmd.handler(typeCheck.args, previousData, { sessionId, signal });
