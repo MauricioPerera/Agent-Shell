@@ -27,6 +27,15 @@ interface CronTask {
 
 const MAX_HISTORY_PER_TASK = 20;
 
+// Same bounded-Map + oldest-eviction pattern as ProcessManager
+// (MAX_PROCESSES) and SecretStore (MAX_SECRETS): cron:schedule under
+// unique names would otherwise grow `tasks` forever, each entry holding
+// a LIVE setInterval that keeps re-running its command indefinitely —
+// a more severe resource-exhaustion vector than pure memory growth,
+// since MAX_HISTORY_PER_TASK only bounds an array INSIDE each task, not
+// the number of tasks/timers itself.
+const MAX_TASKS = 200;
+
 export class CronScheduler {
   private tasks: Map<string, CronTask> = new Map();
   private readonly adapter: ShellAdapter;
@@ -43,6 +52,19 @@ export class CronScheduler {
     const ms = parseInterval(interval);
     if (ms === null || ms < 1000) {
       return { success: false, error: `Invalid interval: '${interval}'. Use cron (*/5 * * * *) or shorthand (30s, 5m, 1h).` };
+    }
+
+    // Bound BEFORE inserting. Unlike the other bounded stores, the
+    // evictee here holds a live timer that must be stopped — dropping it
+    // from the Map alone would leave its setInterval running forever,
+    // orphaned but still executing the scheduled command.
+    if (this.tasks.size >= MAX_TASKS) {
+      const oldestKey = this.tasks.keys().next().value;
+      if (oldestKey !== undefined) {
+        const oldest = this.tasks.get(oldestKey)!;
+        clearInterval(oldest.timer);
+        this.tasks.delete(oldestKey);
+      }
     }
 
     const task: CronTask = {

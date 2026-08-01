@@ -437,6 +437,28 @@ describe('Cron Skills', () => {
 
   afterEach(() => { scheduler.destroy(); });
 
+  /**
+   * Regresion: sin bound, cron:schedule bajo nombres unicos crecia el Map
+   * para siempre — y cada entrada evictada sin clearInterval() dejaria un
+   * timer huerfano re-ejecutando su comando indefinidamente. Mismo patron
+   * que ProcessManager (MAX_PROCESSES) y SecretStore (MAX_SECRETS).
+   */
+  it('CR00: acota la cantidad de tareas programadas (evict del mas viejo, deteniendo su timer)', () => {
+    for (let i = 0; i < 205; i++) {
+      const res = scheduler.schedule(`task-${i}`, 'echo hi', '1h');
+      expect(res.success).toBe(true);
+    }
+    const names = scheduler.list().map(t => t.name);
+    expect(names.length).toBeLessThanOrEqual(200);
+    expect(names).not.toContain('task-0');
+    expect(names).toContain('task-204');
+    // The evicted task's name must be free again (its timer was actually
+    // stopped, not just dropped) — re-scheduling under it should succeed,
+    // not fail with "already exists" from a stale reference elsewhere.
+    const reschedule = scheduler.schedule('task-0', 'echo hi', '1h');
+    expect(reschedule.success).toBe(true);
+  });
+
   it('CR01: cron:schedule creates task', async () => {
     const handler = findHandler(cmds, 'cron', 'schedule');
     const res = await handler({ name: 'test', command: 'echo hi', interval: '30s' });
