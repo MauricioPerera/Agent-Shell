@@ -240,13 +240,15 @@ async function main() {
 
   // Skills
   if (config.skills.cli) {
+    const before = registry.listAll().length;
     registerSkills(registry, agentPermissions);
-    console.log('  CLI skills: 9 commands registered');
+    console.log(`  CLI skills: ${registry.listAll().length - before} commands registered`);
   }
   if (config.skills.shell) {
+    const before = registry.listAll().length;
     const adapter = createShellAdapter({ prefer: config.shellAdapter });
     registerShellSkills(registry, adapter, config.jailRoot ?? undefined);
-    console.log(`  Shell skills: 12 commands registered (${adapter.backend} backend)`);
+    console.log(`  Shell skills: ${registry.listAll().length - before} commands registered (${adapter.backend} backend)`);
   }
 
   const totalCommands = registry.listAll().length;
@@ -322,7 +324,17 @@ async function main() {
   });
 }
 
-main().catch((err) => {
-  console.error('Failed to start:', err.message);
-  process.exit(1);
-});
+// Guarded the same way cli/index.ts is: without this, importing this module
+// for its named exports (maskToken/validatePort/validateConfigFile) would
+// also run main() as a side effect and bind a real HTTP listener — which is
+// exactly why this file had zero test coverage until now.
+const isDirectExecution = process.argv[1]?.includes('agent-shell') ||
+  process.argv[1]?.endsWith('/server/index.js') ||
+  process.argv[1]?.endsWith('\\server\\index.js');
+
+if (isDirectExecution) {
+  main().catch((err) => {
+    console.error('Failed to start:', err.message);
+    process.exit(1);
+  });
+}
