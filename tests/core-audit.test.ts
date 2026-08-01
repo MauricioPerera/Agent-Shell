@@ -199,4 +199,52 @@ describe('Core + AuditLogger', () => {
     const res = await core.exec('users:list');
     expect(res.code).toBe(0);
   });
+
+  /**
+   * Regresion (ronda 28 del audit): executeBatch() ruteaba cada item por
+   * executeCommand() pero nunca tocaba auditLogger — el mismo chequeo de
+   * permission:denied/error:handler/command:executed que execInternal()
+   * aplica al comando suelto y al pipeline se saltaba en silencio para
+   * TODO comando dentro de un batch[]. Blind spot total en Core (el unico
+   * engine que cli/index.ts y server/index.ts construyen).
+   */
+  it('AU11: batch[] audita cada item individualmente (command:executed y error:handler)', async () => {
+    const auditLogger = new AuditLogger('default');
+    const events = collectEvents(auditLogger);
+    const core = new Core({ registry: createMockRegistry() as any, auditLogger });
+
+    await core.exec('batch[users:list, users:fail]', 'session-H');
+
+    const executed = events.find(e => e.type === 'command:executed' && e.data.command.includes('users:list'));
+    const failed = events.find(e => e.type === 'error:handler' && e.data.command.includes('users:fail'));
+    expect(executed).toBeDefined();
+    expect(executed.sessionId).toBe('session-H');
+    expect(failed).toBeDefined();
+    expect(failed.sessionId).toBe('session-H');
+  });
+
+  /**
+   * Regresion (ronda 28 del audit): confirm:expired solo se emitia si el
+   * caller reenviaba explicitamente el token ya vencido. El barrido
+   * proactivo por TTL (cleanExpiredConfirms(), corrido una vez por
+   * exec()) descartaba tokens vencidos en silencio — el caso COMUN, ya
+   * que la mayoria de previews nunca se confirman en absoluto.
+   */
+  it('AU12: confirm:expired se emite via el barrido de TTL, no solo al reenviar el token vencido', async () => {
+    const auditLogger = new AuditLogger('default');
+    const events = collectEvents(auditLogger);
+    const core = new Core({ registry: createMockRegistry() as any, auditLogger, permissions: ['users:delete', 'users:list'], confirmTTL_ms: 1 });
+
+    const preview = await core.exec('users:delete --id 5 --confirm', 'session-I');
+    await new Promise(r => setTimeout(r, 20));
+    // Un comando NO relacionado dispara cleanExpiredConfirms() internamente
+    // — el token de arriba nunca se reenvia.
+    await core.exec('users:list', 'session-I');
+
+    const evt = events.find(e => e.type === 'confirm:expired');
+    expect(evt).toBeDefined();
+    expect(evt.data.reason).toBe('ttl-sweep');
+    expect(evt.data.command).toContain('users:delete');
+    expect(preview.data.confirmToken).toBeTruthy();
+  });
 });

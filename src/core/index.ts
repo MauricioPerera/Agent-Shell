@@ -490,7 +490,10 @@ class Core {
 
   /** Evicts confirm tokens older than confirmTTL_ms (default 5 min). Runs once per exec() call. */
   private cleanExpiredConfirms(): void {
-    this.pendingConfirms.sweepExpired();
+    const swept = this.pendingConfirms.sweepExpired();
+    for (const { token, payload, ageMs } of swept) {
+      this.auditLogger?.audit('confirm:expired', { command: `${payload.namespace}:${payload.command}`, token, reason: 'ttl-sweep', ageMs }, payload.sessionId);
+    }
   }
 
   private async executeBuiltin(command: string, args: any, signal?: AbortSignal, sessionId?: string): Promise<any> {
@@ -855,17 +858,29 @@ class Core {
     // Execute commands sequentially, in order (index 0, 1, 2...) — per contract v1
     const results: any[] = [];
     for (const cmd of commands) {
+      // Batch previously routed every item through executeCommand() without
+      // ever touching auditLogger — the same permission-denied/handler-error/
+      // command-executed checks execInternal() applies to the single-command
+      // and pipeline paths (lines ~293-337 above) were silently skipped for
+      // every batched command, a total audit blind spot in Core (the engine
+      // cli/index.ts and server/index.ts actually construct).
+      const label = cmd.meta.rawSegment.slice(0, 100);
       try {
         const data = await this.executeCommand(cmd, sessionId, signal);
         if (data && typeof data === 'object' && '_error' in data) {
-          results.push({ code: data._error.code, data: null, error: data._error.error });
+          const { code, error } = data._error;
+          this.auditLogger?.audit(code === 3 ? 'permission:denied' : 'error:handler', { command: label, code, error }, sessionId);
+          results.push({ code, data: null, error });
         } else if (data && typeof data === 'object' && data.confirmRequired === true) {
           results.push({ code: 4, data, error: null });
         } else {
+          this.auditLogger?.audit('command:executed', { command: label }, sessionId);
           results.push({ code: 0, data, error: null });
         }
       } catch (err) {
-        results.push({ code: 1, data: null, error: (err as Error)?.message || 'Unknown error' });
+        const error = (err as Error)?.message || 'Unknown error';
+        this.auditLogger?.audit('error:handler', { command: label, error }, sessionId);
+        results.push({ code: 1, data: null, error });
       }
     }
     return results;
