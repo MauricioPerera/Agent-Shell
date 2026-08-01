@@ -35,10 +35,24 @@ export function validateRbacConfigShape(raw: any, configPath: string, fail: (msg
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw) || !Array.isArray(raw.roles)) {
     fail(`${configPath} field 'rbac' must be an object with a 'roles' array, refusing to start with an ambiguous access-control config.`);
   }
+  // RBAC's own Map-keyed-by-name constructor silently keeps only the LAST
+  // definition of a duplicated role name (later roles.set() overwrites
+  // earlier ones) — a config author who accidentally defines the same role
+  // twice (a plausible hand-edited-JSON copy-paste mistake) would get
+  // whichever permissions the second definition happens to grant, with no
+  // error pointing at the typo. Unlike an unknown `inherits`/`defaultRole`
+  // reference (deliberately tolerated at resolution time, see rbac.ts's
+  // collectPermissions), there's no legitimate reason to define the same
+  // role name twice, so this fails closed like every other rbac shape issue.
+  const seenNames = new Set<string>();
   const roles = (raw.roles as any[]).map((r, i) => {
     if (typeof r !== 'object' || r === null || typeof r.name !== 'string' || r.name.length === 0) {
       fail(`${configPath} field 'rbac' roles[${i}] must be an object with a non-empty string 'name', refusing to start with an ambiguous access-control config.`);
     }
+    if (seenNames.has(r.name)) {
+      fail(`${configPath} field 'rbac' roles[${i}] ('${r.name}') is a duplicate role name — a later definition would silently overwrite the earlier one, refusing to start with an ambiguous access-control config.`);
+    }
+    seenNames.add(r.name);
     if (!Array.isArray(r.permissions) || !r.permissions.every((p: any) => typeof p === 'string')) {
       fail(`${configPath} field 'rbac' roles[${i}] ('${r.name}') 'permissions' must be an array of strings, refusing to start with an ambiguous access-control config.`);
     }

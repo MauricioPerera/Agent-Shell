@@ -258,6 +258,30 @@ describe('CLI config file validation', () => {
     expect(exitSpy).toHaveBeenCalledWith(1);
     expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("'inherits' must be an array of strings"));
   });
+
+  /**
+   * Regresion (ronda 24 del audit): RBAC's Map-keyed-by-name constructor
+   * silently keeps solo la ULTIMA definicion de un nombre de rol repetido
+   * (roles.set() posterior pisa la anterior) — un config con el mismo
+   * nombre de rol dos veces (typo/copy-paste plausible en JSON a mano)
+   * terminaba con los permisos de la segunda definicion, sin ningun error
+   * que apunte al problema.
+   */
+  it('CLI25: rbac con un nombre de rol duplicado aborta el proceso (exit 1)', () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+      throw new Error(`__process_exit_${code}__`);
+    }) as any);
+
+    expect(() => validateConfigFile({
+      rbac: { roles: [
+        { name: 'viewer', permissions: ['users:read'] },
+        { name: 'viewer', permissions: ['users:*'] },
+      ] },
+    }, 'x.json')).toThrow('__process_exit_1__');
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("is a duplicate role name"));
+  });
 });
 
 /**
