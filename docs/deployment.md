@@ -45,7 +45,7 @@ export AGENT_SHELL_TOKEN=your-secret-token-here
 export AGENT_SHELL_PROFILE=operator
 export AGENT_SHELL_CORS_ORIGIN=https://your-domain.com  # omit entirely if no browser-based client needs cross-origin access
 export AGENT_SHELL_ADAPTER=native  # or "just-bash" for sandboxed
-export AGENT_SHELL_JAIL_ROOT=/opt/agent-workspace  # confine file:*/git:*/workspace:* to this directory
+export AGENT_SHELL_JAIL_ROOT=/opt/agent-workspace  # confine file:*/git:*/workspace:*/process:*/cron:*'s --cwd to this directory (see WARNING below)
 export AGENT_SHELL_SKILLS_CLI=true    # set to "false" to skip CLI-creation skills (scaffold, wizard...)
 export AGENT_SHELL_SKILLS_SHELL=true  # set to "false" to skip system shell skills (shell:*, file:*, git:*...)
 ```
@@ -73,12 +73,25 @@ Create `agent-shell.config.json` in the working directory:
 
 Environment variables override config file values.
 
+**WARNING — jailRoot does not contain shell:exec.** `AGENT_SHELL_JAIL_ROOT`
+constrains `file:*`, `git:*`, `workspace:*`, and the `--cwd` of
+`process:*`/`cron:*` — but `shell:exec` runs an arbitrary command string,
+which can `cd` elsewhere or reference absolute paths directly no matter
+where it started. Any agent granted `shell:exec` — directly, or
+transitively via `process:spawn`/`cron:schedule`, which both require it as
+a co-permission — can read/write/delete anywhere the host process can
+reach, regardless of jailRoot. **The `operator` profile below grants
+`shell:exec`.** Do not rely on jailRoot as a security boundary for any
+deployment using `operator` (or any profile/RBAC role with `shell:exec`);
+use `reader`/`restricted`, or a custom RBAC role that omits `shell:exec`,
+if filesystem containment must actually hold.
+
 ### Agent Profiles
 
 | Profile | Use case |
 |---------|----------|
 | `admin` | Full access, dev/testing |
-| `operator` | Production agent: CRUD + shell + http |
+| `operator` | Production agent: CRUD + shell + http — includes unjailed shell:exec, see WARNING above |
 | `reader` | Read-only: search, describe, read files |
 | `restricted` | Only public commands (no permissions) |
 
@@ -210,6 +223,7 @@ sudo ufw enable
 - [ ] Firewall blocking port 3000 from public
 - [ ] Agent profile set to `operator` or `reader` (not `admin`)
 - [ ] `shellAdapter: "just-bash"` for sandboxed execution (optional)
+- [ ] If relying on `jailRoot`: confirmed no granted profile/RBAC role includes `shell:exec` (see WARNING above — jailRoot does not contain it)
 - [ ] Rotate token periodically
 - [ ] Monitor logs: `journalctl -u agent-shell -f`
 

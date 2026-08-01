@@ -2,7 +2,18 @@
  * @module security/path-jail
  * @description Shared syntactic path-containment check for skills that
  * accept a caller-controlled filesystem path or working directory
- * (file:*, workspace:*, git:*).
+ * (file:*, workspace:*, git:*, process:*'s --cwd, cron:*'s --cwd, and
+ * shell:exec's --cwd).
+ *
+ * IMPORTANT: shell:exec's containment is necessarily partial — jailing
+ * --cwd only narrows where a command STARTS, not what it can touch once
+ * running (the command string itself can `cd` elsewhere or reference
+ * absolute paths directly). Granting shell:exec to any agent — directly,
+ * or transitively via process:spawn/cron:schedule, which both require it
+ * as a co-permission — means that agent can read/write/delete anywhere
+ * the host process can reach, REGARDLESS of jailRoot. Do not rely on
+ * jailRoot as a security boundary for any deployment that grants
+ * shell:exec (this includes the built-in `operator` profile).
  */
 
 import { resolve, sep } from 'node:path';
