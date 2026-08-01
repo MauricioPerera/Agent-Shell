@@ -3,12 +3,13 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from 'vitest';
-import { mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, statSync, readFileSync, chmodSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, statSync, readFileSync, chmodSync, realpathSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execSync } from 'node:child_process';
 import { CommandRegistry } from '../src/command-registry/index.js';
 import { registerShellSkills } from '../src/skills/index.js';
+import { command } from '../src/command-builder/index.js';
 import { createFileCommands } from '../src/skills/shell-file.js';
 import { gitCommands, createGitCommands } from '../src/skills/shell-git.js';
 import { CronScheduler, createCronCommands, cronCommands } from '../src/skills/cron.js';
@@ -138,7 +139,12 @@ describe('File Jail (opt-in path containment)', () => {
   let jailed: SkillEntry[];
 
   beforeEach(() => {
-    jailDir = mkdtempSync(join(tmpdir(), 'filejail-'));
+    // realpathSync: on Windows, tmpdir() can return an 8.3 short-name path
+    // (e.g. ADMINI~1) that's really an alias for the canonical long-name
+    // directory — createPathJail's symlink-resolution (ronda 36 del audit)
+    // now canonicalizes this the same way it would a real symlink, so tests
+    // comparing against jailDir need the same canonical form.
+    jailDir = realpathSync.native(mkdtempSync(join(tmpdir(), 'filejail-')));
     jailed = createFileCommands(adapter, jailDir);
   });
   afterEach(() => { rmSync(jailDir, { recursive: true, force: true }); });
@@ -231,6 +237,76 @@ describe('File Jail (opt-in path containment)', () => {
     const res = await readH({ path: join(tmpdir(), 'no-containment-here-' + Date.now() + '.txt') });
     expect(res.success).toBe(false);
     expect(res.error).not.toMatch(/jail|outside/i);
+  });
+
+  /**
+   * Regresion (ronda 36 del audit, MEDIUM): createPathJail() era un check
+   * puramente SINTACTICO (string startsWith), nunca resolvia symlinks — un
+   * symlink que vive DENTRO del jail pero apunta AFUERA lo evadia por
+   * completo, ya que el string resuelto seguia empezando con jailDir aunque
+   * el destino real estuviera fuera. Ahora createPathJail resuelve symlinks
+   * (via realpath) antes de comparar. Si crear el symlink falla por
+   * politicas del SO (Windows exige privilegios elevados o Developer Mode
+   * para symlinks reales; una junction de directorio no los requiere pero
+   * puede seguir fallando en algunos entornos restringidos), el test se
+   * salta en vez de reportar un falso negativo no relacionado con jailing.
+   */
+  it('FJ07: un symlink dentro del jail que apunta afuera es bloqueado (jail-escape)', async () => {
+    const outsideSecretDir = mkdtempSync(join(tmpdir(), 'filejail-secret-'));
+    const secretPath = join(outsideSecretDir, 'secret.txt');
+    writeFileSync(secretPath, 'super-secret');
+    const linkPath = join(jailDir, 'escape-link');
+
+    try {
+      symlinkSync(outsideSecretDir, linkPath, 'junction');
+    } catch {
+      rmSync(outsideSecretDir, { recursive: true, force: true });
+      return;
+    }
+
+    try {
+      const readH = findHandler(jailed, 'file', 'read');
+      const res = await readH({ path: join(linkPath, 'secret.txt') });
+      expect(res.success).toBe(false);
+      expect(res.error).toMatch(/jail|outside/i);
+      expect(res.data).toBeNull();
+    } finally {
+      rmSync(linkPath, { force: true });
+      rmSync(outsideSecretDir, { recursive: true, force: true });
+    }
+  });
+
+  /**
+   * Regresion (ronda 36 del audit, LOW): file:mkdir y file:chmod tenian el
+   * MISMO gating (assertInsideJail antes de tocar el adapter) que
+   * read/write/delete/rename, pero ningun test propio ejercitaba su
+   * jail-escape — solo se sabia por lectura de codigo que el path era
+   * identico, sin cobertura de regresion.
+   */
+  it('FJ08: file:mkdir fuera del jail es bloqueado', async () => {
+    const mkdirH = findHandler(jailed, 'file', 'mkdir');
+    const outsidePath = join(tmpdir(), 'escaped-mkdir-' + Date.now());
+    try {
+      const res = await mkdirH({ path: outsidePath });
+      expect(res.success).toBe(false);
+      expect(res.error).toMatch(/jail|outside/i);
+      expect(existsSync(outsidePath)).toBe(false);
+    } finally {
+      rmSync(outsidePath, { recursive: true, force: true });
+    }
+  });
+
+  it('FJ09: file:chmod fuera del jail es bloqueado', async () => {
+    const chmodH = findHandler(jailed, 'file', 'chmod');
+    const outsidePath = join(tmpdir(), 'escaped-chmod-' + Date.now() + '.txt');
+    writeFileSync(outsidePath, 'data');
+    try {
+      const res = await chmodH({ path: outsidePath, mode: '755' });
+      expect(res.success).toBe(false);
+      expect(res.error).toMatch(/jail|outside/i);
+    } finally {
+      rmSync(outsidePath, { recursive: true, force: true });
+    }
   });
 });
 
@@ -351,7 +427,8 @@ describe('Git Jail (opt-in path containment)', () => {
   let jailed: SkillEntry[];
 
   beforeEach(() => {
-    jailDir = mkdtempSync(join(tmpdir(), 'gitjail-'));
+    // realpathSync: see the filejail beforeEach above for why this is needed.
+    jailDir = realpathSync.native(mkdtempSync(join(tmpdir(), 'gitjail-')));
     execSync('git init', { cwd: jailDir, stdio: 'pipe' });
     execSync('git config user.email "test@test.com"', { cwd: jailDir, stdio: 'pipe' });
     execSync('git config user.name "Test"', { cwd: jailDir, stdio: 'pipe' });
@@ -577,7 +654,8 @@ describe('Cron Jail (opt-in path containment)', () => {
       listDir: vi.fn().mockResolvedValue({ path: '', entries: [], count: 0 }),
     };
     scheduler = new CronScheduler(fakeAdapter);
-    jailDir = mkdtempSync(join(tmpdir(), 'cronjail-'));
+    // realpathSync: see the filejail beforeEach above for why this is needed.
+    jailDir = realpathSync.native(mkdtempSync(join(tmpdir(), 'cronjail-')));
     outsideDir = mkdtempSync(join(tmpdir(), 'cronjail-outside-'));
     jailed = createCronCommands(scheduler, undefined, jailDir);
   });
@@ -1022,7 +1100,8 @@ describe('Process Jail (opt-in path containment)', () => {
 
   beforeEach(() => {
     pm = new ProcessManager();
-    jailDir = mkdtempSync(join(tmpdir(), 'processjail-'));
+    // realpathSync: see the filejail beforeEach above for why this is needed.
+    jailDir = realpathSync.native(mkdtempSync(join(tmpdir(), 'processjail-')));
     outsideDir = mkdtempSync(join(tmpdir(), 'processjail-outside-'));
     jailed = createProcessCommands(pm, jailDir);
   });

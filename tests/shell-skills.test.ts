@@ -564,7 +564,12 @@ describe('Shell Exec Jail (opt-in path containment)', () => {
   let jailed: SkillEntry[];
 
   beforeEach(() => {
-    jailDir = mkdtempSync(join(tmpdir(), 'shelljail-'));
+    // realpathSync: on Windows, tmpdir() can return an 8.3 short-name path
+    // (e.g. ADMINI~1) that's really an alias for the canonical long-name
+    // directory — createPathJail's symlink-resolution (ronda 36 del audit)
+    // now canonicalizes this the same way it would a real symlink, so tests
+    // comparing against jailDir need the same canonical form.
+    jailDir = realpathSync.native(mkdtempSync(join(tmpdir(), 'shelljail-')));
     outsideDir = mkdtempSync(join(tmpdir(), 'shelljail-outside-'));
     jailed = createShellCommands(nativeAdapter, jailDir);
   });
@@ -609,7 +614,7 @@ describe('Shell Exec Jail (opt-in path containment)', () => {
 // File Skills (test with temp directory)
 // ===========================================================================
 
-import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 

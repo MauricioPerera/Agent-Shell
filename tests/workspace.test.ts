@@ -6,7 +6,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { WorkspaceState, createWorkspaceCommands } from '../src/skills/workspace.js';
 import { CommandRegistry } from '../src/command-registry/index.js';
 import { registerShellSkills } from '../src/skills/index.js';
-import { mkdtempSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, existsSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { SkillEntry } from '../src/skills/scaffold.js';
@@ -311,7 +311,12 @@ describe('Workspace jailRoot containment', () => {
   let cmds: SkillEntry[];
 
   beforeEach(() => {
-    jailDir = mkdtempSync(join(tmpdir(), 'ws-jail-'));
+    // realpathSync: on Windows, tmpdir() can return an 8.3 short-name path
+    // (e.g. ADMINI~1) that's really an alias for the canonical long-name
+    // directory — createPathJail's symlink-resolution (ronda 36 del audit)
+    // now canonicalizes this the same way it would a real symlink, so tests
+    // comparing against jailDir need the same canonical form.
+    jailDir = realpathSync.native(mkdtempSync(join(tmpdir(), 'ws-jail-')));
     outsideDir = mkdtempSync(join(tmpdir(), 'ws-outside-'));
     state = new WorkspaceState();
     cmds = createWorkspaceCommands(state, undefined, jailDir);
