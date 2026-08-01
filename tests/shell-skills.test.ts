@@ -15,6 +15,23 @@ vi.mock('node:dns/promises', () => ({
   lookup: vi.fn(),
 }));
 import { lookup as dnsLookup } from 'node:dns/promises';
+
+// doFetch() (shell-http.ts) calls undici's OWN `fetch` export, not the
+// Node-global one — see doFetch()'s docstring: passing an undici Agent
+// dispatcher to global fetch throws, since global fetch runs Node's
+// separately-versioned internal copy of undici, which doesn't accept a
+// Dispatcher from a different undici module instance. Proxying undici's
+// `fetch` through to `globalThis.fetch` at call time (not import time)
+// keeps every existing `globalThis.fetch = vi.fn(...)` test below working
+// unchanged — Agent itself is left as the real implementation so a pinned
+// request still gets a real, closeable Agent instance.
+vi.mock('undici', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('undici')>();
+  return {
+    ...actual,
+    fetch: (...args: Parameters<typeof globalThis.fetch>) => (globalThis.fetch as any)(...args),
+  };
+});
 import { jsonCommands } from '../src/skills/shell-json.js';
 import { createFileCommands } from '../src/skills/shell-file.js';
 import { createShellCommands } from '../src/skills/shell-exec.js';
@@ -235,6 +252,53 @@ describe('HTTP Skills', () => {
     expect(result.success).toBe(true);
     expect(result.data.status).toBe(200);
     expect(globalThis.fetch).toHaveBeenCalled();
+  });
+
+  /**
+   * Regresion: assertUrlSafe() validaba la resolucion DNS pero la descartaba
+   * — fetch() hacia su PROPIA resolucion DNS independiente unos milisegundos
+   * despues, y un atacante controlando el DNS del hostname podia devolver
+   * una IP publica para la validacion y una privada (ej. 169.254.169.254)
+   * para la conexion real de fetch (DNS-rebinding TOCTOU). doFetch() ahora
+   * pinea la conexion a la MISMA IP que assertUrlSafe() ya valido, via un
+   * dispatcher (undici Agent) con connect.lookup fijo — nunca deja que
+   * fetch resuelva DNS de nuevo por su cuenta.
+   */
+  it('HT09b: request a un hostname resuelto por DNS pinea la conexion (pasa un dispatcher a fetch)', async () => {
+    vi.mocked(dnsLookup).mockResolvedValue([
+      { address: '93.184.216.34', family: 4 },
+    ] as any);
+
+    const handler = findHandler(httpCommands, 'http', 'get');
+    await handler({ url: 'http://public.test.example/' });
+
+    const fetchMock = globalThis.fetch as any;
+    const [, opts] = fetchMock.mock.calls[0];
+    expect(opts.dispatcher).toBeDefined();
+    // El dispatcher pineado se cierra despues de usarlo (no queda colgado).
+    expect(typeof opts.dispatcher.close).toBe('function');
+  });
+
+  it('HT07b: request a una IP literal no pinea (no hay nada que resolver — la IP YA es el destino)', async () => {
+    const handler = findHandler(httpCommands, 'http', 'get');
+    await handler({ url: 'http://93.184.216.34/' });
+
+    const fetchMock = globalThis.fetch as any;
+    const [, opts] = fetchMock.mock.calls[0];
+    expect(opts.dispatcher).toBeUndefined();
+  });
+
+  it('HT10b: fail-open (DNS no resuelve) tampoco pinea — fetch resuelve DNS por su cuenta, sin dispatcher', async () => {
+    const dnsErr: NodeJS.ErrnoException = new Error('getaddrinfo ENOTFOUND fail.test.example');
+    dnsErr.code = 'ENOTFOUND';
+    vi.mocked(dnsLookup).mockRejectedValue(dnsErr);
+
+    const handler = findHandler(httpCommands, 'http', 'get');
+    await handler({ url: 'http://fail.test.example/' });
+
+    const fetchMock = globalThis.fetch as any;
+    const [, opts] = fetchMock.mock.calls[0];
+    expect(opts.dispatcher).toBeUndefined();
   });
 
   // -------------------------------------------------------------------------

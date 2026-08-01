@@ -4,6 +4,7 @@
  */
 
 import { lookup as dnsLookup } from 'node:dns/promises';
+import { Agent, fetch as undiciFetch } from 'undici';
 import { command } from '../command-builder/index.js';
 import type { SkillEntry } from './scaffold.js';
 
@@ -153,12 +154,31 @@ function isLiteralIp(hostname: string): boolean {
   return parseIpv4(h) !== null || parseIpv6(h) !== null;
 }
 
+/** The specific address (and family) doFetch() must pin its connection to. */
+interface UrlSafetyResult {
+  pinnedAddress: string | null;
+  family: 4 | 6 | null;
+}
+
 /**
- * Validate the request URL against SSRF rules. Throws (caught by the existing
- * handler try/catch) when the scheme is not http/https or when the target host
- * is/resolve-to a private/reserved/loopback/link-local address.
+ * Validate the request URL against SSRF rules AND return the exact resolved
+ * address doFetch() must pin its TCP connection to. Throws (caught by the
+ * existing handler try/catch) when the scheme is not http/https or when the
+ * target host is/resolves to a private/reserved/loopback/link-local address.
+ *
+ * Returning the resolved address (rather than just validating and discarding
+ * it, as before) is what closes a DNS-rebinding TOCTOU: without pinning, an
+ * attacker controlling DNS for the target hostname could return a safe
+ * address for THIS validation lookup and a different, unsafe one (e.g. the
+ * cloud metadata endpoint 169.254.169.254) for fetch()'s own later,
+ * independent resolution of the same hostname a few milliseconds after.
+ *
+ * `pinnedAddress` is null when the hostname is already a literal IP (nothing
+ * to pin — it IS the connection target) or when DNS resolution failed
+ * (fail-open, same as before: let fetch's own DNS resolution proceed
+ * unpinned rather than block on a resolver error).
  */
-async function assertUrlSafe(url: string): Promise<void> {
+async function assertUrlSafe(url: string): Promise<UrlSafetyResult> {
   const parsed = new URL(url); // throws on malformed URL -> existing catch
 
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
@@ -172,24 +192,28 @@ async function assertUrlSafe(url: string): Promise<void> {
     if (isBlockedIp(raw)) {
       throw new Error(`Blocked: URL resolves to a private/internal address (${raw})`);
     }
-    return;
+    return { pinnedAddress: null, family: null };
   }
 
   // Hostname is a domain -> resolve via DNS. Fail-open on DNS errors so the
   // existing tests (fictional hostnames + mocked fetch) keep working unchanged.
   try {
-    const addresses = (await dnsLookup(hostname, { all: true })) as Array<{ address: string }>;
+    const addresses = (await dnsLookup(hostname, { all: true })) as Array<{ address: string; family: number }>;
     for (const a of addresses) {
       if (isBlockedIp(a.address)) {
         throw new Error(`Blocked: URL resolves to a private/internal address (${hostname} -> ${a.address})`);
       }
     }
+    const first = addresses[0];
+    if (!first) return { pinnedAddress: null, family: null };
+    return { pinnedAddress: first.address, family: first.family === 6 ? 6 : 4 };
   } catch (err: any) {
     // Re-throw our own block decision; only swallow DNS resolution failures.
     if (err && typeof err.message === 'string' && err.message.startsWith('Blocked:')) {
       throw err;
     }
-    // DNS failure -> fail-open, let fetch proceed.
+    // DNS failure -> fail-open, let fetch proceed (unpinned).
+    return { pinnedAddress: null, family: null };
   }
 }
 
@@ -202,6 +226,14 @@ const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
  * external server can respond 302 -> http://169.254.169.254/... and bypass
  * the SSRF guard entirely. Disable automatic following (redirect: 'manual')
  * and re-validate + re-fetch each hop ourselves, capped at MAX_REDIRECTS.
+ *
+ * Uses undici's own `fetch` (not the Node-global one) — verified against a
+ * real network request: passing a `dispatcher` built from the `undici` npm
+ * package to the GLOBAL fetch throws `InvalidArgumentError: invalid
+ * onRequestStart method`, because global fetch runs on Node's internal,
+ * separately-versioned bundled copy of undici, which doesn't duck-type
+ * match a Dispatcher instance from a different undici module instance.
+ * undici's own exported fetch is guaranteed to accept undici's own Agent.
  */
 async function doFetch(url: string, method: string, body?: any, headers?: Record<string, string>): Promise<any> {
   const baseHeaders = headers || {};
@@ -210,7 +242,7 @@ async function doFetch(url: string, method: string, body?: any, headers?: Record
   let currentBody = body;
 
   for (let redirectCount = 0; ; redirectCount++) {
-    await assertUrlSafe(currentUrl);
+    const { pinnedAddress, family } = await assertUrlSafe(currentUrl);
 
     const opts: RequestInit = { method: currentMethod, headers: { ...baseHeaders }, redirect: 'manual' };
     if (currentBody && currentMethod !== 'GET' && currentMethod !== 'HEAD') {
@@ -220,38 +252,67 @@ async function doFetch(url: string, method: string, body?: any, headers?: Record
       }
     }
 
-    const res = await fetch(currentUrl, opts);
+    // Pin the actual TCP connection to the exact address assertUrlSafe()
+    // just resolved and validated above — see its docstring for why. The
+    // custom `lookup` here returns ONLY that address, so undici's own DNS
+    // resolution (which would otherwise be a second, independent lookup a
+    // rebinding attacker could answer differently) never runs. TLS SNI and
+    // the Host header still derive from `currentUrl`'s hostname as normal —
+    // only the raw socket destination is overridden.
+    const agent = pinnedAddress
+      ? new Agent({
+          connect: {
+            // Node's modern happy-eyeballs connection path
+            // (lookupAndConnectMultiple, the net.connect() default since
+            // Node 18+) calls this with the ARRAY form of dns.lookup's
+            // callback (an address list), not the older single
+            // (err, address, family) form — passing a bare string here
+            // throws ERR_INVALID_IP_ADDRESS deep inside node:net, verified
+            // against a real connection.
+            lookup: (_hostname: string, _options: unknown, callback: (err: Error | null, addresses: Array<{ address: string; family: number }>) => void) => {
+              callback(null, [{ address: pinnedAddress, family: family ?? 4 }]);
+            },
+          },
+        })
+      : undefined;
+    if (agent) (opts as any).dispatcher = agent;
 
-    if (REDIRECT_STATUSES.has(res.status)) {
-      const location = res.headers.get('location');
-      if (!location) {
-        throw new Error(`Blocked: redirect response (${res.status}) without a Location header`);
-      }
-      if (redirectCount >= MAX_REDIRECTS) {
-        throw new Error(`Blocked: too many redirects (max ${MAX_REDIRECTS})`);
-      }
-      currentUrl = new URL(location, currentUrl).toString();
-      // 303 always downgrades to GET with no body; 301/302 downgrade non-GET/HEAD
-      // to GET too (long-standing fetch/browser behavior); 307/308 preserve both.
-      if (res.status === 303 || ((res.status === 301 || res.status === 302) && currentMethod !== 'GET' && currentMethod !== 'HEAD')) {
-        currentMethod = 'GET';
-        currentBody = undefined;
-      }
-      continue;
-    }
-
-    const contentType = res.headers.get('content-type') || '';
-    let resBody: any;
     try {
-      resBody = contentType.includes('application/json') ? await res.json() : await res.text();
-    } catch {
-      resBody = await res.text();
+      const res = await undiciFetch(currentUrl, opts as any);
+
+      if (REDIRECT_STATUSES.has(res.status)) {
+        const location = res.headers.get('location');
+        if (!location) {
+          throw new Error(`Blocked: redirect response (${res.status}) without a Location header`);
+        }
+        if (redirectCount >= MAX_REDIRECTS) {
+          throw new Error(`Blocked: too many redirects (max ${MAX_REDIRECTS})`);
+        }
+        currentUrl = new URL(location, currentUrl).toString();
+        // 303 always downgrades to GET with no body; 301/302 downgrade non-GET/HEAD
+        // to GET too (long-standing fetch/browser behavior); 307/308 preserve both.
+        if (res.status === 303 || ((res.status === 301 || res.status === 302) && currentMethod !== 'GET' && currentMethod !== 'HEAD')) {
+          currentMethod = 'GET';
+          currentBody = undefined;
+        }
+        continue;
+      }
+
+      const contentType = res.headers.get('content-type') || '';
+      let resBody: any;
+      try {
+        resBody = contentType.includes('application/json') ? await res.json() : await res.text();
+      } catch {
+        resBody = await res.text();
+      }
+
+      const resHeaders: Record<string, string> = {};
+      res.headers.forEach((v, k) => { resHeaders[k] = v; });
+
+      return { status: res.status, headers: resHeaders, body: resBody };
+    } finally {
+      if (agent) await agent.close();
     }
-
-    const resHeaders: Record<string, string> = {};
-    res.headers.forEach((v, k) => { resHeaders[k] = v; });
-
-    return { status: res.status, headers: resHeaders, body: resBody };
   }
 }
 
