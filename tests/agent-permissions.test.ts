@@ -207,6 +207,41 @@ describe('Agent Profiles', () => {
     const perms = resolveAgentPermissions({ rbac, permissions: ['editor'] });
     expect(perms).toEqual(['users:read', 'users:update']);
   });
+
+  /**
+   * Regresion (ronda 34 del audit): la rama `rbac + permissions` solo se
+   * entraba con `config.rbac && config.permissions` — un operador que
+   * configuraba `rbac` con roles y `defaultRole` pero NO seteaba el array
+   * `permissions` de nivel superior (permissions === undefined, distinto
+   * del caso ya cubierto por AP08 de permissions:[] explicito) caia de
+   * largo hasta el `return null` final: acceso SIN NINGUNA restriccion en
+   * vez de aplicar defaultRole. defaultRole es la propia respuesta de RBAC
+   * a "el caller no trae rol"; ahora se invoca con roles:[] para que esa
+   * logica corra en vez de saltearse enteramente.
+   */
+  it('AP10: rbac configurado sin permissions de nivel superior aplica defaultRole, no cae a null', () => {
+    const rbac = new RBAC({
+      roles: [{ name: 'default-user', permissions: ['*:read', '*:list'] }],
+      defaultRole: 'default-user',
+    });
+
+    const perms = resolveAgentPermissions({ rbac });
+
+    expect(perms).not.toBeNull();
+    expect(perms).toEqual(['*:read', '*:list']);
+  });
+
+  it('AP11: rbac configurado sin permissions Y sin defaultRole deniega todo (deny-all), no null', () => {
+    const rbac = new RBAC({
+      roles: [{ name: 'editor', permissions: ['users:read'] }],
+      // sin defaultRole
+    });
+
+    const perms = resolveAgentPermissions({ rbac });
+
+    expect(perms).toEqual([]);
+    expect(perms).not.toBeNull();
+  });
 });
 
 // ===========================================================================
