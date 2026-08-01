@@ -832,3 +832,47 @@ describe('Context Store - Concurrencia realista (cola FIFO)', () => {
     expect(all.data['good']).toBe('y');
   });
 });
+
+// ============================================================
+// onExpired hook (ronda 29 del audit)
+// ============================================================
+
+/**
+ * Regresion: onExpired esta declarado en ContextStoreConfig e invocado
+ * dentro de loadStore(), pero NINGUN caller en todo el codebase lo pasaba
+ * nunca — el equivalente audit event 'session:expired' (declarado en
+ * AuditEventType) nunca tenia forma de dispararse. cli/index.ts y
+ * server/index.ts ahora lo cablean a AuditLogger; este test verifica el
+ * hook en si, independiente de esa integracion.
+ */
+describe('Context Store — onExpired hook', () => {
+  it('dispara onExpired(sessionId) cuando ttl_ms se supera, con el resultado SESSION_EXPIRED', async () => {
+    vi.useFakeTimers();
+    try {
+      // No adapter.initialize() beforehand: loadStore()'s `!loaded` branch
+      // (adapter.load() returning null) is what actually stamps createdAt —
+      // MockMemoryAdapter.initialize() pre-seeds a store with no createdAt
+      // at all, which would make the ttl_ms check permanently inert.
+      const adapter = new MockMemoryAdapter();
+      const expired: string[] = [];
+      const store = new ContextStore(adapter, 'ttl-session', {
+        ttl_ms: 1000,
+        onExpired: (sessionId) => expired.push(sessionId),
+      });
+
+      // Crea el store real (con createdAt = ahora) via una operacion normal.
+      const setRes = await store.set('k', '"v"');
+      expect(setRes.status).toBe(0);
+      expect(expired).toEqual([]);
+
+      vi.advanceTimersByTime(1500);
+
+      const getRes = await store.get('k');
+      expect(getRes.status).toBe(1);
+      expect(getRes.error?.code).toBe('SESSION_EXPIRED');
+      expect(expired).toEqual(['ttl-session']);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

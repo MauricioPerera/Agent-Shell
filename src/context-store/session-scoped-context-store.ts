@@ -33,6 +33,15 @@ export class SessionScopedContextStore {
   constructor(
     private readonly adapter: StorageAdapter,
     private readonly config?: ContextStoreConfig,
+    /**
+     * Called the first time a genuinely new, caller-supplied sessionId is
+     * seen at this layer (i.e. a per-session ContextStore is actually
+     * allocated) — never for the shared DEFAULT_SESSION bucket stdio/
+     * library callers fall back to, since that bucket isn't a real
+     * per-tenant session. Previously nothing observed this: AGENT_PROFILES-
+     * documented session:created had zero emit sites anywhere in src/.
+     */
+    private readonly onSessionCreated?: (sessionId: string) => void,
   ) {}
 
   async get(key: string, sessionId?: string): Promise<ContextStoreResult> {
@@ -78,6 +87,7 @@ export class SessionScopedContextStore {
       await this.adapter.initialize(key);
       store = new ContextStore(this.adapter, key, this.config);
       this.stores.set(key, store);
+      if (sessionId !== undefined) this.onSessionCreated?.(sessionId);
     }
     return store;
   }

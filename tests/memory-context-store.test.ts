@@ -177,6 +177,32 @@ describe('SessionScopedContextStore', () => {
     const result = await scoped.get('key');
     expect(result.data.value).toBe('stdio-value');
   });
+
+  /**
+   * Regresion (ronda 29 del audit): session:created estaba declarado en
+   * AuditEventType pero ningun path del codigo lo emitia — SessionScoped
+   * ContextStore es donde una sesion nueva realmente se materializa
+   * (allocation de un ContextStore por sessionId), asi que es el lugar
+   * natural para el hook, via un 3er parametro de constructor opcional.
+   */
+  it('SC06: onSessionCreated dispara solo la PRIMERA vez que se ve un sessionId real', async () => {
+    const created: string[] = [];
+    const scoped = new SessionScopedContextStore(new InMemoryStorageAdapter(), undefined, (id) => created.push(id));
+
+    await scoped.set('key', '"v1"', 'sess-A');
+    await scoped.get('key', 'sess-A'); // misma sesion, no debe re-disparar
+    await scoped.set('key', '"v2"', 'sess-B');
+
+    expect(created).toEqual(['sess-A', 'sess-B']);
+  });
+
+  it('SC07: onSessionCreated NO dispara para el bucket default compartido (sessionId undefined, stdio)', async () => {
+    const created: string[] = [];
+    const scoped = new SessionScopedContextStore(new InMemoryStorageAdapter(), undefined, (id) => created.push(id));
+
+    await scoped.set('key', '"stdio-value"'); // sin sessionId
+    expect(created).toEqual([]);
+  });
 });
 
 // ===========================================================================
