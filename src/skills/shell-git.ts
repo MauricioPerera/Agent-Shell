@@ -131,7 +131,19 @@ export function createGitCommands(jailRoot?: string): SkillEntry[] {
   const assertInsideJail = createPathJail(jailRoot);
   const jailRootAbs = jailRoot ? resolve(jailRoot) : null;
 
-  function resolveCwd(rawCwd: string | undefined): { ok: true; cwd: string | undefined } | { ok: false; error: string } {
+  // git accepts a bare filesystem path (relative, absolute, or file://) as
+// --url with no scheme required — only these forms are genuinely remote.
+// The SCP-like shorthand (user@host:path) has no leading slash before its
+// first ':', which is what distinguishes it from a Windows drive letter
+// path like 'C:\foo'.
+const REMOTE_GIT_URL_RE = /^(https?|ssh|git|ftps?):\/\//i;
+const SCP_LIKE_GIT_URL_RE = /^[^\s/\\]+@[^\s:/\\]+:/;
+
+function isRemoteGitUrl(url: string): boolean {
+  return REMOTE_GIT_URL_RE.test(url) || SCP_LIKE_GIT_URL_RE.test(url);
+}
+
+function resolveCwd(rawCwd: string | undefined): { ok: true; cwd: string | undefined } | { ok: false; error: string } {
     if (!jailRootAbs) return { ok: true, cwd: rawCwd || undefined };
     const base = rawCwd ? (isAbsolute(rawCwd) ? rawCwd : resolve(jailRootAbs, rawCwd)) : jailRootAbs;
     const check = assertInsideJail(base);
@@ -143,14 +155,28 @@ export function createGitCommands(jailRoot?: string): SkillEntry[] {
     { definition: cloneDef, handler: async (args: any) => {
       const branch = args.branch ? String(args.branch) : '';
       let target = String(args.path || '.');
+      const url = String(args.url);
       if (jailRootAbs) {
         const abs = isAbsolute(target) ? target : resolve(jailRootAbs, target);
         const check = assertInsideJail(abs);
         if (!check.ok) return { success: false, data: null, error: check.error };
         target = check.resolved;
+
+        // --path (the destination) was already jail-checked above, but git
+        // also accepts a bare filesystem path as --url (the SOURCE) with no
+        // scheme required — without this check, a caller holding only
+        // git:write could clone any repo elsewhere on the host INTO the
+        // jail, exfiltrating its tracked files (readable afterwards via
+        // file:read) despite jailRoot being configured.
+        if (!isRemoteGitUrl(url)) {
+          const rawSource = url.replace(/^file:\/\//i, '');
+          const sourceAbs = isAbsolute(rawSource) ? rawSource : resolve(jailRootAbs, rawSource);
+          const sourceCheck = assertInsideJail(sourceAbs);
+          if (!sourceCheck.ok) return { success: false, data: null, error: `git:clone --url ${sourceCheck.error}` };
+        }
       }
       const res = gitExecArgs(
-        ['clone', ...(branch ? ['-b', branch] : []), String(args.url), target],
+        ['clone', ...(branch ? ['-b', branch] : []), url, target],
       );
       return { success: res.exitCode === 0, data: res, error: res.exitCode !== 0 ? res.stderr : undefined };
     }},

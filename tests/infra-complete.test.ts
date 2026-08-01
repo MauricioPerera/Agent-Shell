@@ -420,6 +420,34 @@ describe('Git Jail (opt-in path containment)', () => {
     const res = await handler({ cwd: outsideRepo });
     expect(res.success).toBe(true);
   });
+
+  /**
+   * Regresion (ronda 26 del audit): --path (destino) ya se validaba, pero
+   * --url tambien puede ser un path local del filesystem (sin esquema
+   * remoto) — sin este check, un caller con solo git:write podia clonar
+   * CUALQUIER repo del host hacia adentro del jail, exfiltrando su
+   * contenido (legible despues via file:read). Verificado en vivo antes
+   * de este fix: clonar outsideRepo copiaba SECRET.md adentro del jail.
+   */
+  it('GJ07: git:clone --url apuntando a un path local fuera del jail es bloqueado', async () => {
+    const handler = findHandler(jailed, 'git', 'clone');
+    const target = join(jailDir, 'cloned-secret');
+    const res = await handler({ url: outsideRepo, path: target });
+    expect(res.success).toBe(false);
+    expect(res.error).toMatch(/jail|outside/i);
+    expect(existsSync(target)).toBe(false);
+  });
+
+  it('GJ08: git:clone --url con esquema remoto (http/ssh/git) no se trata como path local', async () => {
+    const handler = findHandler(jailed, 'git', 'clone');
+    // No hay red real en el test — solo verificamos que el chequeo de jail
+    // NO dispara para esta forma de --url (git fallara por su cuenta al no
+    // poder conectar). No usar /jail/i aca: el prefijo del tmpdir del test
+    // ("gitjail-...") lo contiene incidentalmente — se chequea en cambio
+    // el prefijo exacto que arma el chequeo sintetico de --url.
+    const res = await handler({ url: 'https://example.invalid/repo.git', path: join(jailDir, 'remote-clone') });
+    expect(res.error || '').not.toMatch(/^git:clone --url/);
+  });
 });
 
 // ===========================================================================
