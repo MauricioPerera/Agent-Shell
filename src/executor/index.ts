@@ -106,8 +106,15 @@ export class Executor {
     if (resolved.status === 'expired') {
       const pending = resolved.payload;
       const command = `${pending.namespace}:${pending.command}`;
-      this.context.auditLogger?.audit('confirm:expired', { command, token });
-      return this.errorResult(2, 'E_CONFIRM_EXPIRED', `Confirmation token expired (${Math.round(resolved.ageMs / 1000)}s > ${resolved.ttlMs / 1000}s TTL)`, 'normal', command);
+      // Audit gets the full detail (command, age, TTL) — internal/operator
+      // visibility, not returned to the caller. The response itself now
+      // matches Core's equivalent path exactly (src/core/index.ts's
+      // resolveConfirmation): a caller resolving a foreign/stale token
+      // learns nothing about WHAT was pending or WHEN it was created,
+      // same as an outright bogus token. Previously this branch leaked
+      // both — an oracle a not_found token never had.
+      this.context.auditLogger?.audit('confirm:expired', { command, token, ageMs: resolved.ageMs, ttlMs: resolved.ttlMs });
+      return this.errorResult(2, 'E_CONFIRM_EXPIRED', 'Invalid or expired confirmation token', 'normal', '');
     }
 
     const pending = resolved.payload;
@@ -189,8 +196,15 @@ export class Executor {
     // 3. CHECK PERMISSIONS
     if (definition.requiredPermissions && definition.requiredPermissions.length > 0) {
       if (!this.hasPermissions(definition.requiredPermissions, validatedArgs)) {
+        // Audit gets the full required-permissions list — internal/operator
+        // visibility. The caller-facing message now matches Core's
+        // equivalent path (src/core/index.ts: `Permission denied: ns:cmd`)
+        // exactly: it confirms the command exists and is denied, without
+        // disclosing the RBAC permission-string vocabulary that would fix
+        // it — a caller iterating denied commands could otherwise
+        // reconstruct that taxonomy one denial at a time.
         this.context.auditLogger?.audit('permission:denied', { command: fullName, required: definition.requiredPermissions });
-        return this.errorResult(3, 'E_FORBIDDEN', `Permission denied: '${fullName}' requires [${definition.requiredPermissions.join(', ')}]`, this.getMode(cmd.flags), fullName);
+        return this.errorResult(3, 'E_FORBIDDEN', `Permission denied: ${fullName}`, this.getMode(cmd.flags), fullName);
       }
     }
 

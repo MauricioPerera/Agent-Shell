@@ -692,7 +692,7 @@ Feature: Conversion de tipos de argumentos
 | E_MISSING_REQUIRED | Argumento requerido faltante | Arg marcado REQUIRED no presente y sin default | "Missing required argument '--{arg}' for '{cmd}'" | 1 |
 | E_TYPE_MISMATCH | Tipo no convertible | Valor no puede convertirse al tipo esperado | "Argument '--{arg}' expects {expected_type}, got '{value}'" | 1 |
 | E_CONSTRAINT_VIOLATED | Restriccion no cumplida | Valor fuera de rango, longitud, etc. | "Argument '--{arg}' violates constraint: {constraint}" | 1 |
-| E_FORBIDDEN | Sin permisos | Contexto sin los permisos requeridos | "Permission denied: '{cmd}' requires [{perms}]" | 3 |
+| E_FORBIDDEN | Sin permisos | Contexto sin los permisos requeridos | "Permission denied: {ns}:{cmd}" (no incluye la lista de permisos requeridos — mismo mensaje minimo que Core, evita que un caller reconstruya la taxonomia RBAC iterando comandos denegados; el detalle completo va solo al AuditLogger) | 3 |
 | E_CONFIRM_REQUIRED | Requiere confirmacion | Modo --confirm activo | "Confirmation required. Use 'confirm {token}' to proceed." | 4 |
 | E_TIMEOUT | Handler excede timeout | Ejecucion supera timeout_ms | "Command '{cmd}' timed out after {ms}ms" | 1 |
 | E_HANDLER_ERROR | Handler lanza excepcion | Error no controlado en handler | "Command '{cmd}' failed: {message}" | 1 |

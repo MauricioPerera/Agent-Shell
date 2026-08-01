@@ -521,6 +521,26 @@ describe('Executor', () => {
       expect(result.code).toBe(3);
       expect(result.error!.type).toBe('E_FORBIDDEN');
     });
+
+    /**
+     * Regresion (ronda 30 del audit): el mensaje de E_FORBIDDEN listaba el
+     * array requiredPermissions completo ("requires [admin:delete, ...]"),
+     * distinto del mensaje minimo de Core ("Permission denied: ns:cmd") para
+     * la misma garantia — un caller iterando comandos denegados podia
+     * reconstruir la taxonomia de permisos RBAC. El detalle completo ahora
+     * solo va al AuditLogger, no a la respuesta.
+     */
+    it('T06b: el mensaje de E_FORBIDDEN no revela el array requiredPermissions', async () => {
+      context = createMockContext({ permissions: [] });
+      executor = new Executor(registry, context);
+
+      const parsed = createSingleParseResult('admin', 'delete', { id: '1' });
+      const result = await executor.execute(parsed) as ExecutionResult;
+
+      expect(result.error!.message).toBe('Permission denied: admin:delete');
+      expect(result.error!.message).not.toContain('requires');
+      expect(result.error!.message).not.toContain('[');
+    });
   });
 
   // ----------------------------------------------------------
@@ -655,6 +675,36 @@ describe('Executor', () => {
       expect(result.code).toBe(0);
       expect(result.success).toBe(true);
       expect(result.data).toEqual({ purged: true, id: 9 });
+    });
+
+    /**
+     * Regresion (ronda 30 del audit): confirmar un token EXPIRADO revelaba
+     * el comando que estaba pendiente, su antiguedad exacta y el TTL
+     * configurado — un caller resolviendo un token ajeno o vencido
+     * aprendia detalles que un token directamente invalido (E_CONFIRM_INVALID,
+     * ver T12) nunca revela. Mismo PendingConfirmStore, mismo mensaje minimo
+     * que Core ahora en ambos casos; el detalle completo sigue yendo al
+     * AuditLogger (visibilidad interna/operador, no al caller).
+     */
+    it('T12e: confirmar un token EXPIRADO da el mismo mensaje minimo que un token invalido', async () => {
+      const shortTtlContext = createMockContext({
+        config: { timeout_ms: 30000, maxPipelineDepth: 10, maxBatchSize: 20, undoTTL_ms: 3600000, enableHistory: true, confirmTTL_ms: 1 },
+      });
+      const shortTtlExecutor = new Executor(registry, shortTtlContext);
+
+      const parsed = createSingleParseResult('users', 'delete', { id: '5' }, { confirm: true });
+      const preview = await shortTtlExecutor.execute(parsed) as ExecutionResult;
+      const token = preview.data.confirmToken;
+
+      await new Promise(r => setTimeout(r, 20));
+      const result = await shortTtlExecutor.confirm(token);
+
+      expect(result.code).toBe(2);
+      expect(result.error!.type).toBe('E_CONFIRM_EXPIRED');
+      expect(result.error!.message).toBe('Invalid or expired confirmation token');
+      expect(result.error!.message).not.toContain('users');
+      expect(result.error!.message).not.toContain('TTL');
+      expect(result.meta.command).toBe('');
     });
 
     it('T12d: --dry-run sigue teniendo prioridad sobre requiresConfirmation (no pide preview)', async () => {
