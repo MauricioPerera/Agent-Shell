@@ -163,8 +163,20 @@ export interface ParseError {
   suggestion?: string;
 }
 
-/** Comandos builtin del protocolo Agent Shell (no requieren namespace). */
-export const BUILTIN_COMMANDS = ['search', 'describe', 'help', 'context', 'history', 'undo'] as const;
+/**
+ * Comandos builtin del protocolo Agent Shell (no requieren namespace).
+ *
+ * 'undo' fue removido (ronda 33 del audit): Core.executeBuiltin() lo
+ * stubeaba incondicionalmente con un error ("Undo not implemented in core
+ * standalone mode"), mientras HELP_TEXT lo anunciaba como un comando
+ * funcional — ningun comando real del registry esta marcado
+ * undoable/reversible, asi que no habia nada que revertir en absoluto.
+ * Quitarlo de esta lista no cambia el parseo (un token sin ':' que no
+ * matchea un builtin conocido igual cae en el mismo fallback {namespace:
+ * null, command: value}), pero ahora `undo <id>` reporta honestamente
+ * "Unknown builtin command: undo" (code=2) en vez de fingir soporte.
+ */
+export const BUILTIN_COMMANDS = ['search', 'describe', 'help', 'context', 'history'] as const;
 
 /** Union type de los nombres de comandos builtin. */
 export type BuiltinCommand = typeof BUILTIN_COMMANDS[number];

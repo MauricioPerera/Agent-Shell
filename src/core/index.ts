@@ -95,7 +95,6 @@ The LLM agent interacts with the system using exactly 2 tools:
 
 == History ==
   history                          View command history
-  undo <id>                        Revert a command
   confirm <token>                  Execute a command previously requested with --confirm
 
 == Output ==
@@ -573,10 +572,6 @@ class Core {
 
       case 'history': {
         return [...this.history];
-      }
-
-      case 'undo': {
-        return { _error: { code: 1, error: 'Undo not implemented in core standalone mode' } };
       }
 
       case 'confirm': {

@@ -47,7 +47,7 @@ Recibir un string de comando y producir un objeto estructurado (ParsedCommand) q
 
 <namespace>      ::= [a-zA-Z][a-zA-Z0-9_-]*
 <command_name>   ::= [a-zA-Z][a-zA-Z0-9_-]*
-<builtin_command>::= "search" | "describe" | "help" | "context" | "history" | "undo"
+<builtin_command>::= "search" | "describe" | "help" | "context" | "history"
 
 <arguments>      ::= <named_arg> | <positional_arg>
 <named_arg>      ::= "--" <arg_name> <arg_value>?
@@ -359,7 +359,7 @@ Feature: Parsing de comandos simples con namespace
 
 Feature: Parsing de comandos builtin
 
-  DADO un string que inicia con un builtin (search, describe, help, context, history, undo)
+  DADO un string que inicia con un builtin (search, describe, help, context, history)
   CUANDO se parsea el input
   ENTONCES namespace es null
   Y command es el nombre del builtin
@@ -578,7 +578,7 @@ El parser es un modulo **zero-dependency**. Solo depende del lenguaje base.
 
 - Solo se soportan los 6 flags globales definidos en el protocolo
 - Solo se soportan los 3 formatos de output: json, table, csv
-- Los builtins son un conjunto cerrado: search, describe, help, context, history, undo
+- Los builtins son un conjunto cerrado: search, describe, help, context, history
 - El parser NO valida si un namespace:comando existe; eso es responsabilidad del Router
 
 ### 6.3 Limites de Seguridad
@@ -726,7 +726,9 @@ El comando `search` trata TODO lo que sigue como un unico argumento posicional (
 ### Implementado
 - Funcion `parse()` con firma exacta del contrato
 - Todos los tipos exportados (ParseResult, ParsedCommand, CommandArgs, GlobalFlags, JqFilter, ParseMeta, ParseError)
-- 6 builtins (search, describe, help, context, history, undo)
+- 5 builtins (search, describe, help, context, history) — `undo` removido
+  del conjunto de builtins en ronda 33 del audit (era un stub siempre-error
+  en Core; ver `contracts/core.md` seccion 9)
 - 6 flags globales (dry-run, validate, confirm, format, limit, offset)
 - Pipeline con validacion de profundidad (MAX_PIPELINE_DEPTH = 10)
 - Batch con validacion de tamaño (MAX_BATCH_SIZE = 20)

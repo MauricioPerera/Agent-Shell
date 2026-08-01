@@ -934,6 +934,27 @@ describe('Core', () => {
       expect(response.code).toBe(0);
       expect(response.data).toBeDefined();
     });
+
+    /**
+     * Regresion (ronda 33 del audit): el builtin `undo` estaba stubeado
+     * incondicionalmente con code=1 y un mensaje ("Undo not implemented in
+     * core standalone mode") mientras HELP_TEXT lo anunciaba como un
+     * comando funcional del protocolo — pero ningun comando real del
+     * registry esta marcado undoable/reversible, asi que no habia nada
+     * que revertir. Se removio el builtin: `undo <id>` ahora cae en el
+     * mismo camino que cualquier builtin desconocido, code=2, sin fingir
+     * soporte que no existe.
+     */
+    it('T21b: exec("undo <id>") ya no es un builtin reconocido (removido, era un stub que siempre fallaba)', async () => {
+      const response = await core.exec('undo cmd_01');
+
+      expect(response.code).toBe(2);
+      expect(response.error).toContain('Unknown builtin command: undo');
+    });
+
+    it('T21c: HELP_TEXT ya no anuncia "undo" como comando soportado', () => {
+      expect(core.help()).not.toMatch(/\bundo\s*<id>/);
+    });
   });
 
   // ----------------------------------------------------------

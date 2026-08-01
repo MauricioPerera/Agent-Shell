@@ -53,7 +53,7 @@ Punto de entrada para toda interaccion activa con el sistema. El string `cmd` pu
 - Un comando con filtro jq: `namespace:comando --arg valor | .campo`
 - Una composicion: `cmd1 >> cmd2`
 - Un batch: `batch [cmd1, cmd2, cmd3]`
-- Un comando de sistema: `search`, `describe`, `context`, `history`, `undo`
+- Un comando de sistema: `search`, `describe`, `context`, `history`
 
 ### 1.4 Flujo de Procesamiento Principal
 
@@ -137,7 +137,7 @@ cli_exec(cmd) recibido
 
 ```
 {
-  "type": enum("command"|"search"|"describe"|"context"|"history"|"undo"|"batch"|"pipe"),
+  "type": enum("command"|"search"|"describe"|"context"|"history"|"batch"|"pipe"),
   "namespace": string|null,
   "command": string,
   "args": Record<string, any>,
@@ -164,7 +164,6 @@ cli_exec(cmd) recibido
 | `command` | Executor Module | Ejecucion de comando registrado |
 | `context` | Context Store | Leer/escribir estado de sesion |
 | `history` | History Module | Consultar historial |
-| `undo` | Executor Module (rollback) | Revertir comando previo |
 | `batch` | Core (loop interno) | Ejecutar N comandos secuencialmente |
 | `pipe` | Core (encadenamiento) | Output de cmd1 como input de cmd2 |
 
@@ -309,7 +308,6 @@ ENTONCES el formato por defecto es json
 | T19 | Context set | cli_exec("context:set key val") | Response code=0, valor persistido | Media |
 | T20 | Context get | cli_exec("context") | Response code=0, data con contexto actual | Media |
 | T21 | History | cli_exec("history") | Response code=0, data con ultimos cmds | Media |
-| T22 | Undo | cli_exec("undo <id>") | Delegado a Executor rollback | Baja |
 | T23 | Paginacion | cli_exec("cmd --limit 5 --offset 10") | Flags pasados correctamente al Executor | Media |
 | T24 | Describe comando | cli_exec("describe users:create") | Response con definicion del comando | Alta |
 
@@ -416,7 +414,7 @@ Retornar Response
 
 - [ ] El modulo Parser esta implementado y cumple su contrato (retorna ParsedCommand)
 - [ ] El modulo Search esta disponible y conectado a un indice vectorial funcional
-- [ ] El Command Registry tiene al menos los comandos de sistema registrados (search, describe, context, history, undo)
+- [ ] El Command Registry tiene al menos los comandos de sistema registrados (search, describe, context, history)
 - [ ] El Executor puede recibir y procesar ParsedCommands
 - [ ] El JQ Filter puede procesar expresiones jq basicas sobre objetos JSON
 - [ ] El Context Store esta inicializado (puede estar vacio)
@@ -709,7 +707,12 @@ Agente llama: cli_exec("users:create --name Juan --email j@t.com --dry-run | .id
 - Tipo de respuesta es `CoreResponse` (contrato dice `Response`)
 - MAX_INPUT_LENGTH default es 10000 (contrato dice 4096)
 - context:delete implementado pero no documentado en contrato
-- Undo retorna error "not implemented in core standalone mode"
+- `undo` removido como builtin (ronda 33 del audit): estaba stubeado
+  incondicionalmente ("Undo not implemented in core standalone mode") y
+  HELP_TEXT lo anunciaba como si funcionara, pero ningun comando real del
+  registry esta marcado undoable/reversible, asi que no habia nada que
+  revertir. `undo <id>` ahora reporta honestamente "Unknown builtin
+  command: undo" (code=2), igual que cualquier otro builtin inexistente.
 
 ### Implementado (v1.1)
 - Rate limiting con sliding window + burst control (120 req/min, burst 20/s configurable)
