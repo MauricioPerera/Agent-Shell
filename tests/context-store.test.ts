@@ -472,6 +472,74 @@ describe('Context Store', () => {
       expect(result.error!.code).toBe('ALREADY_REVERTED');
       expect(result.error!.message).toContain('already reverted');
     });
+
+    /**
+     * Regresion (ronda 33 del audit): undo() devolvia success con
+     * `snapshot_applied: snapshot.state_before` sin escribir ese estado a
+     * ningun lado — context.entries quedaba completamente intacto. Un
+     * caller que llamaba context:get despues de "revertir" un comando
+     * seguia viendo el valor POSTERIOR al comando revertido, no el de
+     * antes. Ahora undo() restaura context.entries de verdad.
+     */
+    it('T13b: undo() restaura context.entries al estado previo, no solo lo devuelve en la respuesta', async () => {
+      await store.set('theme', '"dark"');
+
+      // El snapshot capturado por recordCommand() refleja el estado ANTES
+      // de aplicar el cambio que se registra (theme:"dark" todavia no
+      // existia en un caso real, pero para este test lo que importa es
+      // que sea un estado DISTINTO del que hay al momento de invocar undo).
+      await store.recordCommand({
+        id: 'cmd_10',
+        command: 'config:set theme dark',
+        namespace: 'config',
+        executed_at: new Date().toISOString(),
+        duration_ms: 5,
+        exit_code: 0,
+        undoable: true,
+        undo_status: 'available',
+        snapshot_id: 'snap_10',
+      });
+
+      // Cambia el estado DESPUES de que el snapshot ya fue tomado.
+      await store.set('theme', '"light"');
+      expect((await store.get('theme')).data.value).toBe('light');
+
+      const result = await store.undo('cmd_10');
+      expect(result.status).toBe(0);
+
+      // El estado real debe reflejar el snapshot (theme:"dark", el valor
+      // que habia al momento de recordCommand), no seguir en "light".
+      const after = await store.get('theme');
+      expect(after.data.value).toBe('dark');
+    });
+
+    /**
+     * Regresion (ronda 33 del audit), finding #3: un comando marcado
+     * undoable pero SIN snapshot (recordCommand llamado con snapshot_id
+     * ausente, algo que la guarda interna permite) devolvia success con
+     * un objeto vacio en vez del error E007/STORAGE_ERROR documentado en
+     * contracts/context-store.md ("si el snapshot de undo esta corrupto ->
+     * retornar error E007, no aplicar cambios parciales").
+     */
+    it('T13c: undo() de un comando undoable sin snapshot devuelve STORAGE_ERROR (E007), no success vacio', async () => {
+      await store.recordCommand({
+        id: 'cmd_11',
+        command: 'config:set theme dark',
+        namespace: 'config',
+        executed_at: new Date().toISOString(),
+        duration_ms: 5,
+        exit_code: 0,
+        undoable: true,
+        undo_status: 'available',
+        snapshot_id: null,
+      });
+
+      const result = await store.undo('cmd_11');
+
+      expect(result.status).toBe(1);
+      expect(result.error!.code).toBe('STORAGE_ERROR');
+      expect(result.error!.message).toContain('cmd_11');
+    });
   });
 
   // ----------------------------------------------------------

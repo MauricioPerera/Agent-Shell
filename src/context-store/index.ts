@@ -369,13 +369,31 @@ export class ContextStore {
     // Find snapshot
     const snapshot = store.undo_snapshots.find(s => s.command_id === commandId);
 
+    // Regresion (ronda 33 del audit): un comando marcado undoable pero sin
+    // snapshot (p.ej. recordCommand() llamado con snapshot_id ausente, algo
+    // que su propia guarda interna permite) devolvia success con un objeto
+    // vacio en vez del E007 documentado en contracts/context-store.md:468
+    // ("Si el snapshot de undo esta corrupto -> Retornar error E007 con
+    // detalle, no aplicar cambios parciales"). No se marca undo_status ni
+    // se guarda nada: sin snapshot no hay cambio parcial que aplicar.
+    if (!snapshot) {
+      return this.errorResult(1, 'STORAGE_ERROR', `Undo snapshot missing or corrupted for command '${commandId}'`);
+    }
+
+    // Regresion (ronda 33 del audit): esta rama devolvia success y un
+    // `snapshot_applied: snapshot.state_before` sin escribir ese estado a
+    // ningun lado — context.entries quedaba intacto, asi que un caller que
+    // llamaba context:get despues de "undo" seguia viendo el valor posterior
+    // al comando revertido. Ahora se restaura de verdad antes de guardar.
+    store.context.entries = { ...snapshot.state_before };
+
     // Mark as applied
     command.undo_status = 'applied';
     await this.saveStore(store);
 
     return this.successResult({
       reverted: commandId,
-      snapshot_applied: snapshot ? snapshot.state_before : {},
+      snapshot_applied: snapshot.state_before,
     });
   }
 
