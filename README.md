@@ -509,7 +509,7 @@ Modulo transversal de seguridad con audit logging, RBAC, deteccion de secretos y
 Emite eventos tipados para todas las acciones relevantes de seguridad.
 
 ```typescript
-import { AuditLogger } from 'agent-shell/security';
+import { AuditLogger } from 'agent-shell';
 
 const logger = new AuditLogger('session-id');
 
@@ -528,7 +528,7 @@ logger.on('*', (event) => sendToSIEM(event));
 Deteccion automatica de credenciales con patrones configurables.
 
 ```typescript
-import { containsSecret, maskSecrets } from 'agent-shell/security';
+import { containsSecret, maskSecrets } from 'agent-shell';
 
 // Detectar secretos
 containsSecret('mi-api-key: sk_live_abc123');  // → true
@@ -545,7 +545,7 @@ maskSecrets({ token: 'Bearer eyJhbGc...' });
 Sistema de roles con herencia para permisos agrupados.
 
 ```typescript
-import { RBAC } from 'agent-shell/security';
+import { RBAC } from 'agent-shell';
 
 const rbac = new RBAC();
 rbac.addRole({ name: 'viewer', permissions: ['users:list', 'notes:list'] });
