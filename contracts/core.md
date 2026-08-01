@@ -692,7 +692,7 @@ Agente llama: cli_exec("users:create --name Juan --email j@t.com --dry-run | .id
 
 ---
 
-## 9. Estado de Implementación v1.0
+## 9. Estado de Implementación v1.2
 
 ### Implementado
 - Core con help() y exec(cmd) como entry points
@@ -720,6 +720,18 @@ Agente llama: cli_exec("users:create --name Juan --email j@t.com --dry-run | .id
 - LogEntry interface y CoreLogger inline (INFO/WARN/ERROR)
 - Logging: INFO al ejecutar, WARN si duration > 5s, ERROR en fallos
 - Input size pre-check (configurable via `maxInputLength`)
+
+### Implementado (v1.2)
+- Gating real de `--confirm`: preview + token de un solo uso via `PendingConfirmStore`
+  compartido con Executor, resuelto con `confirm <token>` (code 4, mismo contrato que
+  Executor documenta en `contracts/executor.md`)
+- Enforcement de `CommandDefinition.requiresConfirmation` tanto en `executeCommand()`
+  (comando suelto) como en `executePipeline()` (cada paso del pipeline) — un comando
+  tageado `requiresConfirmation` no se ejecuta sin confirmar aunque se alcance via pipeline
+- Resolucion de referencias `$input.field` entre pasos de un pipeline (el paso N puede leer
+  campos de la respuesta del paso N-1)
+- Validacion de tipo/constraints de parametros (mismo `ParamBuilder`/`CommandParam` que usa
+  el resto del registry), no solo required/missing
 
 ### Pendiente
 - Timeouts per-subsistema individuales (parser 100ms, search 2000ms, executor 5000ms, jq 500ms)
