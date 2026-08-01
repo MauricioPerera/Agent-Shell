@@ -37,6 +37,7 @@ import { createFileCommands } from '../src/skills/shell-file.js';
 import { createShellCommands } from '../src/skills/shell-exec.js';
 import { envCommands } from '../src/skills/shell-env.js';
 import { registerShellSkills } from '../src/skills/index.js';
+import { createGitCommands } from '../src/skills/shell-git.js';
 import { NativeShellAdapter } from '../src/just-bash/adapter.js';
 import type { SkillEntry } from '../src/skills/scaffold.js';
 
@@ -673,5 +674,43 @@ describe('Shell Skills Registration', () => {
     const result = await resolved.value.handler({ path: 'C:/outside-jail/secret.txt' });
     expect(result.success).toBe(false);
     expect(result.error).toContain('resolves outside jail root');
+  });
+});
+
+/**
+ * Regresion (ronda 20 del audit): file:delete era el UNICO comando
+ * tageado requiresConfirmation. Auditoria completa de los 49 comandos
+ * registrados encontro 4 mas con el mismo blast radius (sobreescritura
+ * sin undo o efecto real fuera del sandbox) sin gatear. Este test fija
+ * la politica para que una regresion futura (alguien construye un nuevo
+ * comando de definicion sin copiar el flag) se detecte aca, no en
+ * produccion.
+ */
+describe('requiresConfirmation tagging on dangerous commands', () => {
+  it('DG01: file:delete y file:rename requieren confirmacion', () => {
+    const fileCmds = createFileCommands(nativeAdapter);
+    const deleteDef = fileCmds.find(c => c.definition.name === 'delete')!.definition;
+    const renameDef = fileCmds.find(c => c.definition.name === 'rename')!.definition;
+    expect(deleteDef.requiresConfirmation).toBe(true);
+    expect(renameDef.requiresConfirmation).toBe(true);
+  });
+
+  it('DG02: http:post y http:request requieren confirmacion, http:get no', () => {
+    const postDef = httpCommands.find(c => c.definition.name === 'post')!.definition;
+    const requestDef = httpCommands.find(c => c.definition.name === 'request')!.definition;
+    const getDef = httpCommands.find(c => c.definition.name === 'get')!.definition;
+    expect(postDef.requiresConfirmation).toBe(true);
+    expect(requestDef.requiresConfirmation).toBe(true);
+    expect(getDef.requiresConfirmation).toBe(false);
+  });
+
+  it('DG03: git:push requiere confirmacion, git:pull/commit no', () => {
+    const gitCmds = createGitCommands();
+    const pushDef = gitCmds.find(c => c.definition.name === 'push')!.definition;
+    const pullDef = gitCmds.find(c => c.definition.name === 'pull')!.definition;
+    const commitDef = gitCmds.find(c => c.definition.name === 'commit')!.definition;
+    expect(pushDef.requiresConfirmation).toBe(true);
+    expect(pullDef.requiresConfirmation).toBe(false);
+    expect(commitDef.requiresConfirmation).toBe(false);
   });
 });

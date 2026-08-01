@@ -94,7 +94,13 @@ const pushDef = command('git', 'push').version('1.0.0')
   .optionalParam('branch', 'string', '')
   .optionalParam('cwd', 'string', '')
   .example('git:push --remote origin --branch main')
-  .tags('git', 'write').build();
+  // The one command in this registry whose effect is visible outside the
+  // local sandbox — a shared remote, possibly triggering CI/CD for
+  // others. No --force is implemented, so it can't destroy remote
+  // history, but an unconfirmed push is still irreversible from here.
+  .tags('git', 'write', 'dangerous')
+  .requiresConfirmation()
+  .build();
 
 const pullDef = command('git', 'pull').version('1.0.0')
   .description('Pull from remote repository')

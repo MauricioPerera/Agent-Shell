@@ -332,7 +332,12 @@ const postDef = command('http', 'post')
   .optionalParam('body', 'json', null)
   .optionalParam('headers', 'json', null)
   .example('http:post --url https://api.example.com/users --body \'{"name":"John"}\'')
-  .tags('http', 'network', 'write')
+  .tags('http', 'network', 'write', 'dangerous')
+  // Unlike file:write/secret:set (whose entire purpose IS overwriting a
+  // known local resource inside the jail), this mutates a real external
+  // system with no local undo — a wrong URL/body has consequences
+  // (webhooks, payments, notifications) agent-shell can't roll back.
+  .requiresConfirmation()
   .build();
 
 const requestDef = command('http', 'request')
@@ -343,7 +348,10 @@ const requestDef = command('http', 'request')
   .optionalParam('body', 'json', null)
   .optionalParam('headers', 'json', null)
   .example('http:request --url https://api.example.com/users/1 --method DELETE')
-  .tags('http', 'network')
+  .tags('http', 'network', 'dangerous')
+  // Caller picks ANY method including DELETE/PUT/PATCH against a real
+  // external system — same reasoning as http:post, worse ceiling.
+  .requiresConfirmation()
   .build();
 
 getDef.requiredPermissions = ['http:read'];

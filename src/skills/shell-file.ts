@@ -61,7 +61,11 @@ const renameDef = command('file', 'rename')
   .requiredParam('from', 'string')
   .requiredParam('to', 'string')
   .example('file:rename --from ./old-name.ts --to ./new-name.ts')
-  .tags('file', 'write', 'filesystem')
+  .tags('file', 'write', 'filesystem', 'dangerous')
+  // Same blast radius as file:delete: if `to` already exists, the
+  // underlying rename() silently overwrites and destroys its prior
+  // contents with no undo.
+  .requiresConfirmation()
   .build();
 
 const chmodDef = command('file', 'chmod')
