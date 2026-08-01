@@ -715,15 +715,25 @@ class Core {
   /**
    * Runs convertType() over every param present in handlerArgs, leaving
    * absent params untouched (Core doesn't apply param.default anywhere —
-   * a separate, pre-existing gap out of scope here) and required-param
-   * presence unenforced (still handled separately by validateCommand(),
-   * --validate mode only).
+   * a separate, pre-existing gap out of scope here).
+   *
+   * Regresion (ronda 31 del audit): required-param presence solo se
+   * chequeaba bajo --validate (validateCommand()) — un caller normal (sin
+   * --validate) que omitia un param requerido pasaba directo al handler
+   * con ese arg en undefined, en vez de rechazar con E_INVALID_ARGS como
+   * ya hace Executor (validateArgs(), incondicional en todo modo). Ahora
+   * se enforce aca tambien, no solo bajo --validate.
    */
   private convertArgTypes(handlerArgs: Record<string, any>, params: any[]): { ok: true; args: Record<string, any> } | { ok: false; error: string } {
     const result: Record<string, any> = { ...handlerArgs };
     for (const def of params) {
       const rawValue = handlerArgs[def.name];
-      if (rawValue === undefined || rawValue === null) continue;
+      if (rawValue === undefined || rawValue === null) {
+        if (def.required) {
+          return { ok: false, error: `Missing required parameter: ${def.name}` };
+        }
+        continue;
+      }
       const converted = this.convertType(rawValue, def);
       if (converted.error) {
         return { ok: false, error: converted.error };

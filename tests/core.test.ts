@@ -385,6 +385,22 @@ describe('Core', () => {
       expect(response.code).toBe(1);
       expect(response.meta.mode).toBe('validate');
     });
+
+    /**
+     * Regresion (ronda 31 del audit): convertArgTypes() solo chequeaba
+     * presencia de params requeridos bajo --validate (validateCommand()) —
+     * un caller normal, SIN --validate, que omitia un param requerido
+     * pasaba directo al handler con ese arg en undefined, en vez de
+     * rechazar con code=1/E_INVALID_ARGS como ya hace Executor
+     * (validateArgs(), incondicional en todo modo).
+     */
+    it('T06k: exec SIN --validate y sin args requeridos igual rechaza con code=1', async () => {
+      const response = await core.exec('users:create --name Juan');
+
+      expect(response.code).toBe(1);
+      expect(response.error).toContain('email');
+      expect(response.data).toBeNull();
+    });
   });
 
   /**
