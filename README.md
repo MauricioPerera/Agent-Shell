@@ -94,7 +94,7 @@ agent-shell serve --transport http --profile reader      # HTTP con perfil restr
 | **ContextStore** | Estado de sesion, historial FIFO, undo con snapshots, TTL, secret detection |
 | **JQ Filter** | Filtrado JSON post-ejecucion con sintaxis jq-subset |
 | **Security** | Audit logging, RBAC, deteccion de secretos, encriptacion de storage |
-| **Skills** | 49 system commands (file, shell, http, json, env, workspace, git, cron, secret, process) + 9 CLI creation commands |
+| **Skills** | 40 system commands (file, shell, http, json, env, workspace, git, cron, secret, process) + 9 CLI creation commands |
 | **ShellAdapter** | Backend pluggable: just-bash (sandboxed) o native (child_process). Auto-detect. |
 
 ## Uso Basico
