@@ -35,6 +35,35 @@ function gitExec(cmd: string, cwd?: string): { stdout: string; stderr: string; e
   }
 }
 
+/**
+ * True if `value` would be parsed by git as an OPTION instead of literal
+ * data — i.e. starts with '-'. execFileSync (used by gitExecArgs below)
+ * already eliminates SHELL injection (no `$(...)`/backticks/`;` — see that
+ * function's own comment), but it does nothing about GIT's own argv
+ * parser: a bare positional argument like `url`/`remote`/`branch` that
+ * happens to start with '-' is still git's problem to interpret, and git
+ * has a long, well-documented history of dangerous options reachable this
+ * way (ronda 42 del audit):
+ *   - `git clone --upload-pack=<cmd> <target>` / `git pull --upload-pack=
+ *     <cmd>` runs `<cmd>` as the program git uses to fetch — local RCE,
+ *     no network hop needed for a local-path clone.
+ *   - `git push --exec=<cmd>` / `--receive-pack=<cmd>` is the push-side
+ *     equivalent — same RCE.
+ *   - `git push --force`/`-f`/`--delete`/`--mirror` reachable via a
+ *     `branch` value of literally "--force" etc. — silently contradicts
+ *     this file's own documented claim ("No --force is implemented, so
+ *     it can't destroy remote history").
+ * Every one of these is exploitable specifically because `url`/`remote`/
+ * `branch` are passed as BARE positional argv elements with no leading
+ * '-' rejection and no '--'/'--end-of-options' separator before them —
+ * unlike `-m <message>`/`-b <branch>`, which consume the very next argv
+ * element as literal data regardless of its content, and are therefore
+ * NOT vulnerable to this class of bug.
+ */
+function looksLikeGitFlag(value: string): boolean {
+  return value.startsWith('-');
+}
+
 // Argument-vector git execution. No shell is spawned, so each argument is passed
 // to git verbatim and never re-parsed by a shell — eliminating command injection
 // via interpolation/substitution ($(...), `...`, ;, &&, etc.).
@@ -156,6 +185,18 @@ function resolveCwd(rawCwd: string | undefined): { ok: true; cwd: string | undef
       const branch = args.branch ? String(args.branch) : '';
       let target = String(args.path || '.');
       const url = String(args.url);
+      // Regresion (ronda 42 del audit, CRITICAL): sin este chequeo, --url
+      // "--upload-pack=<cmd>" llegaba a git como argv bare positional,
+      // adyacente al parser de opciones de `git clone` — git lo interpreta
+      // como la opcion --upload-pack (el programa que usa para el fetch),
+      // no como el nombre de un repo, logrando RCE local sin necesitar red.
+      // El chequeo de jail de mas abajo NO cubre esto: valida un path
+      // RESUELTO, pero el string original sin modificar es lo que termina
+      // en el argv de git de todas formas (ver el separador '--' agregado
+      // abajo tambien, defensa en profundidad).
+      if (looksLikeGitFlag(url)) {
+        return { success: false, data: null, error: `git:clone --url must not start with '-' (would be parsed as a git option, not a repository): '${url}'` };
+      }
       if (jailRootAbs) {
         const abs = isAbsolute(target) ? target : resolve(jailRootAbs, target);
         const check = assertInsideJail(abs);
@@ -175,8 +216,11 @@ function resolveCwd(rawCwd: string | undefined): { ok: true; cwd: string | undef
           if (!sourceCheck.ok) return { success: false, data: null, error: `git:clone --url ${sourceCheck.error}` };
         }
       }
+      // '--' separates options from operands (git clone's own usage:
+      // "[<options>] [--] <repo> [<dir>]") — a second, independent layer
+      // of defense on top of the looksLikeGitFlag() rejection above.
       const res = gitExecArgs(
-        ['clone', ...(branch ? ['-b', branch] : []), url, target],
+        ['clone', ...(branch ? ['-b', branch] : []), '--', url, target],
       );
       return { success: res.exitCode === 0, data: res, error: res.exitCode !== 0 ? res.stderr : undefined };
     }},
@@ -207,7 +251,24 @@ function resolveCwd(rawCwd: string | undefined): { ok: true; cwd: string | undef
       if (!cwdCheck.ok) return { success: false, data: null, error: cwdCheck.error };
       const remote = args.remote || 'origin';
       const branch = args.branch ? String(args.branch) : '';
-      const res = gitExecArgs(['push', remote, ...(branch ? [branch] : [])], cwdCheck.cwd);
+      // Regresion (ronda 42 del audit, CRITICAL + HIGH): --remote
+      // "--exec=<cmd>"/"--receive-pack=<cmd>" es el equivalente del lado
+      // push a clone's --upload-pack RCE de arriba. --branch "--force" (o
+      // -f/--delete/--mirror/--all) contradice directamente el propio
+      // comentario de este archivo ("No --force is implemented, so it
+      // can't destroy remote history") — ambos parametros llegaban a git
+      // como argv bare positional, sin chequeo ni separador.
+      if (looksLikeGitFlag(remote)) {
+        return { success: false, data: null, error: `git:push --remote must not start with '-' (would be parsed as a git option): '${remote}'` };
+      }
+      if (branch && looksLikeGitFlag(branch)) {
+        return { success: false, data: null, error: `git:push --branch must not start with '-' (would be parsed as a git option, e.g. --force): '${branch}'` };
+      }
+      // '--end-of-options' separates options from operands for push/pull
+      // (unlike clone, plain '--' has a DIFFERENT meaning here — ref vs
+      // pathspec disambiguation — so git added this dedicated separator).
+      // Second, independent layer of defense on top of the checks above.
+      const res = gitExecArgs(['push', '--end-of-options', remote, ...(branch ? [branch] : [])], cwdCheck.cwd);
       return { success: res.exitCode === 0, data: res, error: res.exitCode !== 0 ? res.stderr : undefined };
     }},
     { definition: pullDef, handler: async (args: any) => {
@@ -215,7 +276,16 @@ function resolveCwd(rawCwd: string | undefined): { ok: true; cwd: string | undef
       if (!cwdCheck.ok) return { success: false, data: null, error: cwdCheck.error };
       const remote = args.remote || 'origin';
       const branch = args.branch ? String(args.branch) : '';
-      const res = gitExecArgs(['pull', remote, ...(branch ? [branch] : [])], cwdCheck.cwd);
+      // Regresion (ronda 42 del audit, CRITICAL): --remote
+      // "--upload-pack=<cmd>" es el mismo RCE que en clone — git pull
+      // tambien acepta --upload-pack como opcion de fetch.
+      if (looksLikeGitFlag(remote)) {
+        return { success: false, data: null, error: `git:pull --remote must not start with '-' (would be parsed as a git option): '${remote}'` };
+      }
+      if (branch && looksLikeGitFlag(branch)) {
+        return { success: false, data: null, error: `git:pull --branch must not start with '-' (would be parsed as a git option): '${branch}'` };
+      }
+      const res = gitExecArgs(['pull', '--end-of-options', remote, ...(branch ? [branch] : [])], cwdCheck.cwd);
       return { success: res.exitCode === 0, data: res, error: res.exitCode !== 0 ? res.stderr : undefined };
     }},
   ];

@@ -413,6 +413,61 @@ describe('Git Skills', () => {
     // The sensitive var must NOT have reached git's child process.
     expect(dumped).not.toContain(canary);
   });
+
+  /**
+   * Regresion (ronda 42 del audit, CRITICAL): --url/--remote/--branch
+   * llegaban a git como argv bare positional, sin chequear si empezaban
+   * con '-' y sin separador '--'/'--end-of-options' antes del operando.
+   * Git interpreta un valor asi como una OPCION, no como dato — por
+   * ejemplo git clone/pull aceptan --upload-pack=<cmd> (el programa que
+   * usan para el fetch) y git push acepta --exec=<cmd>/--receive-pack=
+   * <cmd> (el equivalente del lado push) — ambos logran ejecucion de
+   * comandos arbitrarios LOCAL, sin necesitar red real para un clone/pull
+   * de un path local. Estos tests prueban que el rechazo pasa ANTES de
+   * que gitExecArgs() llegue a invocar git en absoluto (no hace falta un
+   * --upload-pack real: alcanza con confirmar que el string se rechaza).
+   */
+  it('GI08: git:clone --url que empieza con "-" es rechazado (previene RCE via --upload-pack)', async () => {
+    const handler = findHandler(gitCommands, 'git', 'clone');
+    const target = join(tempDir, 'should-not-exist');
+    const res = await handler({ url: '--upload-pack=touch pwned', path: target });
+    expect(res.success).toBe(false);
+    expect(res.error).toContain("must not start with '-'");
+    expect(existsSync(target)).toBe(false);
+  });
+
+  it('GI09: git:clone de un path local normal sigue funcionando (el separador "--" agregado no rompe el caso comun)', async () => {
+    const handler = findHandler(gitCommands, 'git', 'clone');
+    const target = join(tempDir, '..', 'gi09-cloned-' + Date.now());
+    try {
+      const res = await handler({ url: tempDir, path: target });
+      expect(res.success).toBe(true);
+      expect(existsSync(join(target, 'README.md'))).toBe(true);
+    } finally {
+      rmSync(target, { recursive: true, force: true });
+    }
+  });
+
+  it('GI10: git:push --remote que empieza con "-" es rechazado (previene RCE via --exec/--receive-pack)', async () => {
+    const handler = findHandler(gitCommands, 'git', 'push');
+    const res = await handler({ remote: '--exec=touch pwned', cwd: tempDir });
+    expect(res.success).toBe(false);
+    expect(res.error).toContain("must not start with '-'");
+  });
+
+  it('GI11: git:push --branch "--force" es rechazado (contradice el propio comentario "No --force is implemented")', async () => {
+    const handler = findHandler(gitCommands, 'git', 'push');
+    const res = await handler({ branch: '--force', cwd: tempDir });
+    expect(res.success).toBe(false);
+    expect(res.error).toContain("must not start with '-'");
+  });
+
+  it('GI12: git:pull --remote que empieza con "-" es rechazado (previene RCE via --upload-pack)', async () => {
+    const handler = findHandler(gitCommands, 'git', 'pull');
+    const res = await handler({ remote: '--upload-pack=touch pwned', cwd: tempDir });
+    expect(res.success).toBe(false);
+    expect(res.error).toContain("must not start with '-'");
+  });
 });
 
 /**
