@@ -104,10 +104,17 @@ function funnelSearch(
     const queryTruncated = truncateVector(queryVector, dim);
     const candidatesIn = candidates.length;
 
-    // Score each candidate at this resolution
+    // Score each candidate at this resolution. Regresion (ronda 40 del
+    // audit, finding D): cosineSimilarity() devuelve el rango crudo
+    // [-1,1] — pgvector y minimemory-HNSW clampean a [0,1] (parte del
+    // contrato documentado), pero este path no lo hacia, pudiendo
+    // devolver scores negativos para vectores opuestos. Dimension-mismatch
+    // no aplica aca: queryTruncated y candidateTruncated siempre vienen
+    // del MISMO truncateVector(dim), asi que ya tienen igual longitud por
+    // construccion — no hace falta cosineSimilaritySafe() para eso.
     for (const c of candidates) {
       const candidateTruncated = truncateVector(c.vector, dim);
-      c.score = cosineSimilarity(queryTruncated, candidateTruncated);
+      c.score = Math.max(0, Math.min(1, cosineSimilarity(queryTruncated, candidateTruncated)));
     }
 
     // Sort descending by score and keep top candidateTopK
@@ -126,9 +133,10 @@ function funnelSearch(
   const queryFull = truncateVector(queryVector, finalDim);
   const candidatesIn = candidates.length;
 
+  // Mismo clamp que arriba (ronda 40 del audit, finding D).
   for (const c of candidates) {
     const candidateFull = truncateVector(c.vector, finalDim);
-    c.score = cosineSimilarity(queryFull, candidateFull);
+    c.score = Math.max(0, Math.min(1, cosineSimilarity(queryFull, candidateFull)));
   }
 
   candidates.sort((a, b) => b.score - a.score);

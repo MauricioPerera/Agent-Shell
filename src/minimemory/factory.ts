@@ -11,7 +11,7 @@ import { createRequire } from 'node:module';
 import type { VectorStorageAdapter, CommandMetadata, VectorSearchResult } from '../vector-index/types.js';
 import type { StorageFactoryOptions, StorageFactoryResult, MiniMemoryBinding } from './types.js';
 import { MiniMemoryVectorStorage } from './vector-storage.js';
-import { cosineSimilarity } from '../vector-index/similarity.js';
+import { cosineSimilaritySafe } from '../vector-index/similarity.js';
 
 // This package builds to ESM only (tsup.config.ts: format: ['esm']). The bare
 // `require` identifier doesn't exist at runtime in ESM, and bundlers rewrite a
@@ -208,9 +208,19 @@ function createInMemoryStorage(): VectorStorageAdapter {
           continue;
         }
 
-        const score = cosineSimilarity(query.vector, entry.vector);
+        // Regresion (ronda 40 del audit, finding A+C+D): cosineSimilarity()
+        // truncaba en silencio vectores de distinta dimension y devolvia
+        // el rango crudo [-1,1] sin clampear; ademas el filtro de abajo era
+        // por EXCLUSION ("saltar si score < threshold"), y NaN < x siempre
+        // es false en JS, asi que un score NaN (embedding con un
+        // componente NaN) NUNCA se excluia — se colaba a los resultados
+        // reales y serializaba como score:null. cosineSimilaritySafe()
+        // retorna null para dimension-mismatch Y para NaN (candidato
+        // invalido), y clampea a [0,1] en el caso valido.
+        const score = cosineSimilaritySafe(query.vector, entry.vector);
+        if (score === null) continue;
 
-        if (query.threshold !== undefined && score < query.threshold) {
+        if (query.threshold !== undefined && !(score >= query.threshold)) {
           continue;
         }
 

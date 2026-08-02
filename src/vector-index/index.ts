@@ -26,7 +26,7 @@ import type {
 } from './types.js';
 import { MAX_RESULTS, VectorIndexError } from './types.js';
 import { funnelSearch } from './matryoshka.js';
-import { cosineSimilarity } from './similarity.js';
+import { cosineSimilaritySafe } from './similarity.js';
 
 export { VectorIndex };
 export { PgVectorStorageAdapter } from './pgvector-storage-adapter.js';
@@ -347,8 +347,14 @@ class VectorIndex {
       }
       if (options?.excludeIds && options.excludeIds.includes(id)) continue;
 
-      const score = cosineSimilarity(queryVector, entry.vector);
-      if (score >= threshold) {
+      // Regresion (ronda 40 del audit, findings A+D): cosineSimilaritySafe()
+      // retorna null (candidato excluido, no comparado en absoluto) si las
+      // dimensiones no coinciden en vez de truncar en silencio al mas
+      // corto, y clampea a [0,1] — antes esta busqueda podia devolver
+      // scores negativos (vectores opuestos) o comparar vectores de
+      // distinta dimension sin ningun aviso.
+      const score = cosineSimilaritySafe(queryVector, entry.vector);
+      if (score !== null && score >= threshold) {
         candidates.push({ id, score, metadata: entry.metadata });
       }
     }

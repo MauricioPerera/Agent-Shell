@@ -317,9 +317,22 @@ describe('minimemory native integration', () => {
     /**
      * Regresion: threshold=0 (umbral valido) se trataba como "sin umbral"
      * por un chequeo truthy (`query.threshold && ...`) en el fallback
-     * in-memory de factory.ts, igual que en MiniMemoryVectorStorage.
+     * in-memory de factory.ts, igual que en MiniMemoryVectorStorage. El
+     * chequeo real sigue siendo `query.threshold !== undefined`, no
+     * truthy — este test prueba que threshold SIGUE aplicando un filtro
+     * real, no que se salta.
+     *
+     * Actualizado (ronda 40 del audit, finding D): el score ya NO puede
+     * dar negativo — cosineSimilaritySafe() clampea a [0,1], consistente
+     * con pgvector/minimemory-HNSW (que siempre clampearon). El score
+     * CRUDO de vectores opuestos era -1; ahora se reporta como 0, y
+     * threshold=0 correctamente lo INCLUYE (0 >= 0), no lo excluye — ese
+     * es el comportamiento correcto, no una regresion. El escenario
+     * original (threshold=0 excluye un score negativo) ya no es
+     * construible porque ya no existen scores negativos; se prueba en
+     * cambio con threshold=0.5, que si debe excluir un score clampeado a 0.
      */
-    it('T12b: threshold=0 filtra resultados con score negativo/cero, no se ignora', async () => {
+    it('T12b: threshold aplica un filtro real (no se ignora), tanto en 0 como en un valor positivo', async () => {
       const { createVectorStorage } = await import('../src/minimemory/factory.js');
 
       const { storage } = await createVectorStorage({ dimensions: 3, prefer: 'memory' });
@@ -330,9 +343,17 @@ describe('minimemory native integration', () => {
         metadata: { namespace: 'test', command: 'cmd', description: 'desc', signature: '', parameters: [], tags: [], indexedAt: '', version: '1.0.0' },
       });
 
-      // Cosine similarity entre [1,0,0] y [-1,0,0] es -1 (< threshold 0)
-      const results = await storage.search({ vector: [1, 0, 0], topK: 10, threshold: 0 });
-      expect(results.length).toBe(0);
+      // threshold=0: el score clampeado (0, no -1) SI pasa el filtro
+      // (0 >= 0) — correcto, no un bug.
+      const atZero = await storage.search({ vector: [1, 0, 0], topK: 10, threshold: 0 });
+      expect(atZero.length).toBe(1);
+      expect(atZero[0].score).toBe(0);
+
+      // threshold=0.5: el mismo candidato (score 0) SI se excluye —
+      // confirma que el filtro de threshold sigue aplicando de verdad
+      // para un valor positivo, no solo devolviendo todo siempre.
+      const above = await storage.search({ vector: [1, 0, 0], topK: 10, threshold: 0.5 });
+      expect(above.length).toBe(0);
     });
 
     // NOTA: prefer='minimemory' con fallo de CONSTRUCCION (binding presente
