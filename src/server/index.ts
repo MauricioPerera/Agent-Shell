@@ -21,7 +21,7 @@ import { CommandRegistry } from '../command-registry/index.js';
 import { Core } from '../core/index.js';
 import { McpServer } from '../mcp/server.js';
 import { HttpSseTransport } from '../mcp/http-transport.js';
-import { registerSkills, registerShellSkills, ProcessManager } from '../skills/index.js';
+import { registerSkills, registerShellSkills, ProcessManager, CronScheduler } from '../skills/index.js';
 import { createShellAdapter } from '../just-bash/factory.js';
 import { InMemoryStorageAdapter, SessionScopedContextStore } from '../context-store/index.js';
 import { AGENT_PROFILES, resolveAgentPermissions } from '../core/agent-profiles.js';
@@ -240,10 +240,11 @@ async function main() {
 
   // Skills
   // Constructed unconditionally (even if config.skills.shell is false, so
-  // it never gets any spawned processes) so the shutdown handler below
-  // always has a real instance to destroy() — see registerShellSkills'
-  // docstring (ronda 47 del audit, HIGH).
+  // it never gets any spawned processes/scheduled tasks) so the shutdown
+  // handler below always has a real instance to destroy() — see
+  // registerShellSkills' docstring (ronda 47/50 del audit, HIGH).
   const processManager = new ProcessManager();
+  let cronScheduler = new CronScheduler();
   if (config.skills.cli) {
     const before = registry.listAll().length;
     registerSkills(registry, agentPermissions);
@@ -252,7 +253,10 @@ async function main() {
   if (config.skills.shell) {
     const before = registry.listAll().length;
     const adapter = createShellAdapter({ prefer: config.shellAdapter });
-    registerShellSkills(registry, adapter, config.jailRoot ?? undefined, processManager);
+    // Bound to the SAME adapter cron:schedule's handlers use, matching
+    // what createCronCommands() used to construct internally.
+    cronScheduler = new CronScheduler(adapter);
+    registerShellSkills(registry, adapter, config.jailRoot ?? undefined, processManager, cronScheduler);
     console.log(`  Shell skills: ${registry.listAll().length - before} commands registered (${adapter.backend} backend)`);
   }
 
@@ -330,17 +334,21 @@ async function main() {
   // Graceful shutdown. ProcessManager.destroy() existed but was never
   // reachable from any real shutdown path — a process spawned via
   // process:spawn orphaned (unkillable, since the whole registry died with
-  // this process) on SIGINT/SIGTERM (ronda 47 del audit, HIGH).
+  // this process) on SIGINT/SIGTERM (ronda 47 del audit, HIGH). Same gap
+  // for CronScheduler (ronda 50 del audit, HIGH) — there wasn't even a
+  // parameter to pass the instance through until now.
   process.on('SIGINT', async () => {
     console.log('\nShutting down...');
     await transport.stop();
     await processManager.destroy();
+    cronScheduler.destroy();
     process.exit(0);
   });
 
   process.on('SIGTERM', async () => {
     await transport.stop();
     await processManager.destroy();
+    cronScheduler.destroy();
     process.exit(0);
   });
 }

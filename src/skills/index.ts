@@ -40,7 +40,7 @@ import { createShellCommands } from './shell-exec.js';
 import { envCommands } from './shell-env.js';
 import { createWorkspaceCommands } from './workspace.js';
 import { createGitCommands } from './shell-git.js';
-import { createCronCommands } from './cron.js';
+import { createCronCommands, CronScheduler } from './cron.js';
 import { createSecretCommands } from './secret-store.js';
 import { createProcessCommands, ProcessManager } from './process-mgr.js';
 
@@ -121,8 +121,13 @@ export function registerSkills(registry: CommandRegistry, agentPermissions?: str
  *   shutdown handlers can terminate spawned children instead of orphaning
  *   them (ronda 47 del audit, HIGH — ProcessManager.destroy() existed but
  *   was never reachable from any real shutdown path).
+ * @param cronScheduler - Optional CronScheduler instance for cron:*. Same
+ *   reasoning as processManager above — ronda 50 del audit, HIGH: this
+ *   parameter didn't exist at all before, so there was no way for a
+ *   caller to obtain the scheduler to stop its timers on shutdown, even
+ *   if they wanted to.
  */
-export function registerShellSkills(registry: CommandRegistry, shellAdapter?: ShellAdapter, jailRoot?: string, processManager?: ProcessManager): void {
+export function registerShellSkills(registry: CommandRegistry, shellAdapter?: ShellAdapter, jailRoot?: string, processManager?: ProcessManager, cronScheduler?: CronScheduler): void {
   const adapter = shellAdapter || createShellAdapter();
 
   registerAll(registry, httpCommands);
@@ -132,7 +137,7 @@ export function registerShellSkills(registry: CommandRegistry, shellAdapter?: Sh
   registerAll(registry, envCommands);
   registerAll(registry, createWorkspaceCommands(undefined, adapter, jailRoot));
   registerAll(registry, createGitCommands(jailRoot));
-  registerAll(registry, createCronCommands(undefined, adapter, jailRoot));
+  registerAll(registry, createCronCommands(cronScheduler, adapter, jailRoot));
   registerAll(registry, createSecretCommands());
   registerAll(registry, createProcessCommands(processManager, jailRoot));
 }

@@ -39,6 +39,19 @@ interface CronTask {
   // registrado en history con exitCode -1) si la corrida previa sigue
   // activa.
   isRunning: boolean;
+  // Regresion (ronda 50 del audit, HIGH): cancel() borraba la entrada del
+  // Map incondicionalmente, incluso con una ejecucion en curso — el
+  // ShellAdapter no expone forma de abortar esa ejecucion (su interfaz no
+  // tiene AbortSignal), asi que el comando seguia corriendo contra un
+  // objeto `task` huerfano que nadie podia ver ni parar: el resultado
+  // (exit code, duracion) se perdia en silencio, dando al operador una
+  // falsa sensacion de "ya esta detenido". Con este flag, cancel() detiene
+  // los ticks FUTUROS de inmediato pero deja la entrada viva (visible via
+  // cron:list()/cron:history()) en vez de borrarla — mismo patron que
+  // ProcessManager, que tampoco borra un proceso ya terminado, solo deja
+  // de tratarlo como "corriendo". Un cron:schedule posterior con el MISMO
+  // nombre reemplaza una entrada cancelada e inactiva (ver schedule()).
+  cancelled?: boolean;
 }
 
 const MAX_HISTORY_PER_TASK = 20;
@@ -63,8 +76,18 @@ const MAX_INTERVAL_MS = 2_147_483_647;
 // the number of tasks/timers itself.
 const MAX_TASKS = 200;
 
+// Regresion (ronda 50 del audit, HIGH): cuando cancel() se llama sobre una
+// tarea en ejecucion, executeTask() la borra de `tasks` recien cuando esa
+// corrida termina (ver el finally() de executeTask) — sin este archivo
+// aparte, getHistory(name) buscaria la tarea en `tasks`, no la
+// encontraria (ya borrada) y devolveria [] en silencio, perdiendo el
+// resultado igual que antes del fix, solo que un tick mas tarde. Acotado
+// igual que MAX_HISTORY_PER_TASK.
+const MAX_CANCELLED_HISTORY = 50;
+
 export class CronScheduler {
   private tasks: Map<string, CronTask> = new Map();
+  private cancelledTaskHistory: Array<{ task: string; exitCode: number; duration_ms: number; timestamp: string }> = [];
   private readonly adapter: ShellAdapter;
 
   constructor(adapter?: ShellAdapter) {
@@ -107,15 +130,25 @@ export class CronScheduler {
     return { success: true };
   }
 
-  cancel(name: string): boolean {
+  /**
+   * Stops future ticks immediately. If the task has an execution in
+   * flight right now, the Map entry is kept alive (marked `cancelled`)
+   * until that execution's own finally block removes it, instead of
+   * discarding its still-pending result — see CronTask.cancelled above.
+   */
+  cancel(name: string): { cancelled: boolean; stillRunning: boolean } | null {
     const task = this.tasks.get(name);
-    if (!task) return false;
+    if (!task) return null;
     clearInterval(task.timer);
+    if (task.isRunning) {
+      task.cancelled = true;
+      return { cancelled: true, stillRunning: true };
+    }
     this.tasks.delete(name);
-    return true;
+    return { cancelled: true, stillRunning: false };
   }
 
-  list(): Array<{ name: string; command: string; interval: string; runCount: number; createdAt: string }> {
+  list(): Array<{ name: string; command: string; interval: string; runCount: number; createdAt: string; cancelling?: boolean }> {
     // Regresion (ronda 39 del audit, HIGH): expuesto sin masquear a
     // CUALQUIER sesion con solo cron:read (cross-session — CronScheduler
     // es una unica instancia compartida por todas las sesiones del
@@ -129,19 +162,27 @@ export class CronScheduler {
     return Array.from(this.tasks.values()).map(t => ({
       name: t.name, command: maskSecrets(t.command), interval: t.interval,
       runCount: t.runCount, createdAt: t.createdAt,
+      // Present only while a cancelled task's in-flight execution hasn't
+      // finished yet — see CronTask.cancelled.
+      ...(t.cancelled ? { cancelling: true } : {}),
     }));
   }
 
   getHistory(name?: string): Array<{ task: string; exitCode: number; duration_ms: number; timestamp: string }> {
     if (name) {
       const task = this.tasks.get(name);
-      if (!task) return [];
-      return task.history.map(h => ({ task: name, ...h }));
+      if (task) return task.history.map(h => ({ task: name, ...h }));
+      // The task itself may already be gone — cancel() on a still-running
+      // task keeps its Map entry alive only until that run finishes (see
+      // executeTask()'s finally), at which point it's removed and its
+      // final result is archived here instead of vanishing with it.
+      return this.cancelledTaskHistory.filter(h => h.task === name);
     }
     const all: Array<{ task: string; exitCode: number; duration_ms: number; timestamp: string }> = [];
     for (const [n, t] of this.tasks) {
       for (const h of t.history) all.push({ task: n, ...h });
     }
+    all.push(...this.cancelledTaskHistory);
     all.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
     return all.slice(0, 20);
   }
@@ -184,6 +225,18 @@ export class CronScheduler {
     } finally {
       while (task.history.length > MAX_HISTORY_PER_TASK) task.history.shift();
       task.isRunning = false;
+      // cancel() left this entry alive specifically so the run above could
+      // still record its result — now that it has, archive that result
+      // (getHistory(name) would otherwise return [] the instant this task
+      // is gone from `tasks`) and actually remove it.
+      if (task.cancelled) {
+        const last = task.history[task.history.length - 1];
+        if (last) {
+          this.cancelledTaskHistory.push({ task: task.name, ...last });
+          while (this.cancelledTaskHistory.length > MAX_CANCELLED_HISTORY) this.cancelledTaskHistory.shift();
+        }
+        this.tasks.delete(task.name);
+      }
     }
   }
 }
@@ -282,10 +335,22 @@ export function createCronCommands(scheduler?: CronScheduler, adapter?: ShellAda
       return { success: true, data: { tasks: cron.list(), count: cron.list().length } };
     }},
     { definition: cancelDef, handler: async (args: any) => {
-      const cancelled = cron.cancel(args.name);
-      return cancelled
-        ? { success: true, data: { name: args.name, cancelled: true } }
-        : { success: false, data: null, error: `Task '${args.name}' not found` };
+      const result = cron.cancel(args.name);
+      if (!result) return { success: false, data: null, error: `Task '${args.name}' not found` };
+      return {
+        success: true,
+        data: {
+          name: args.name,
+          cancelled: true,
+          // ShellAdapter has no cancellation primitive (no AbortSignal in
+          // its exec() contract) — an in-flight run can't be aborted, only
+          // prevented from firing again. Surfaced explicitly so a caller
+          // doesn't assume "cancelled" means "stopped right now".
+          ...(result.stillRunning
+            ? { note: `Task '${args.name}' had an execution in progress — it was not aborted (no future runs will fire). Check cron:history shortly for its result.` }
+            : {}),
+        },
+      };
     }},
     { definition: historyDef, handler: async (args: any) => {
       const history = cron.getHistory(args.name || undefined);

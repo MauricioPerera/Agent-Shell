@@ -959,6 +959,58 @@ describe('Cron Sandbox Adapter Injection', () => {
     await vi.advanceTimersByTimeAsync(1000);
     expect(execMock).toHaveBeenCalledWith('curl --auth "Bearer abcdefghijklmnopqrstuvwxyz1234567890"', { cwd: undefined, timeout: 60_000 });
   });
+
+  /**
+   * Regresion (ronda 50 del audit, HIGH): cancel() borraba la entrada del
+   * Map incondicionalmente, incluso con una ejecucion en curso — el
+   * ShellAdapter no expone forma de abortar esa ejecucion (sin
+   * AbortSignal en su contrato), asi que el comando seguia corriendo
+   * contra un objeto huerfano que nadie podia ver: su resultado
+   * (exit code, duracion) se perdia en silencio. Ahora cancel() detiene
+   * los ticks FUTUROS de inmediato (sin superponerse mas), pero deja la
+   * entrada viva — visible en cron:list() como `cancelling:true` — hasta
+   * que la ejecucion en curso termine y su resultado quede en history,
+   * recien ahi desaparece de verdad.
+   */
+  it('CR14: cron:cancel sobre una tarea en ejecucion no descarta su resultado en silencio', async () => {
+    let resolveRun: (v: any) => void;
+    execMock.mockImplementationOnce(() => new Promise((resolve) => { resolveRun = resolve; }));
+
+    const schedule = findHandler(cmds, 'cron', 'schedule');
+    await schedule({ name: 'cancel-while-running', command: 'sleep-forever', interval: '1s' });
+
+    await vi.advanceTimersByTimeAsync(1000); // dispara la corrida, queda colgada
+
+    const cancel = findHandler(cmds, 'cron', 'cancel');
+    const cancelRes = await cancel({ name: 'cancel-while-running' });
+    expect(cancelRes.success).toBe(true);
+    expect(cancelRes.data.cancelled).toBe(true);
+    expect(cancelRes.data.note).toBeDefined();
+
+    // La tarea sigue viva en cron:list() (con la ejecucion en curso),
+    // marcada como cancelling — no desaparecio de inmediato.
+    const list = findHandler(cmds, 'cron', 'list');
+    const listRes = await list({});
+    expect(listRes.data.count).toBe(1);
+    expect(listRes.data.tasks[0].cancelling).toBe(true);
+
+    // Ningun tick futuro dispara (el timer ya fue detenido por cancel()).
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(execMock).toHaveBeenCalledTimes(1);
+
+    // Al resolver la corrida colgada, su resultado SI queda registrado en
+    // history — no se perdio — y la entrada recien ahi desaparece.
+    resolveRun!({ stdout: '', stderr: '', exitCode: 0 });
+    await vi.advanceTimersByTimeAsync(0);
+
+    const history = findHandler(cmds, 'cron', 'history');
+    const histRes = await history({ name: 'cancel-while-running' });
+    expect(histRes.data.count).toBe(1);
+    expect(histRes.data.history[0].exitCode).toBe(0);
+
+    const listAfter = await list({});
+    expect(listAfter.data.count).toBe(0);
+  });
 });
 
 // ===========================================================================

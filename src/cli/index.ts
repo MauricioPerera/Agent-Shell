@@ -13,7 +13,7 @@ import { McpServer } from '../mcp/server.js';
 import { HttpSseTransport } from '../mcp/http-transport.js';
 import { Core } from '../core/index.js';
 import { CommandRegistry } from '../command-registry/index.js';
-import { registerSkills, registerShellSkills, ProcessManager } from '../skills/index.js';
+import { registerSkills, registerShellSkills, ProcessManager, CronScheduler } from '../skills/index.js';
 import { createShellAdapter } from '../just-bash/factory.js';
 import { InMemoryStorageAdapter, SessionScopedContextStore } from '../context-store/index.js';
 import { RBAC } from '../security/rbac.js';
@@ -175,12 +175,19 @@ function loadConfigFile(): Record<string, any> {
   }
 }
 
-function buildRegistry(args: string[], agentPermissions?: string[] | null, jailRoot?: string, shellAdapterPreference?: ShellAdapterPreference): { registry: CommandRegistry; processManager: ProcessManager } {
+function buildRegistry(args: string[], agentPermissions?: string[] | null, jailRoot?: string, shellAdapterPreference?: ShellAdapterPreference): { registry: CommandRegistry; processManager: ProcessManager; cronScheduler: CronScheduler } {
   const registry = new CommandRegistry();
   // Constructed unconditionally (even if --no-shell-skills means it never
-  // actually gets any spawned processes) so callers always have a real
-  // instance to destroy() on shutdown — see registerShellSkills' docstring.
+  // actually gets any spawned processes/scheduled tasks) so callers always
+  // have a real instance to destroy() on shutdown — see
+  // registerShellSkills' docstring.
   const processManager = new ProcessManager();
+  // Placeholder (default adapter, never actually reachable if shell skills
+  // stay disabled below) so destroy() always has a real instance to call —
+  // replaced with a real one bound to the SAME adapter cron:schedule's
+  // handlers use as soon as shell skills are enabled, matching what
+  // createCronCommands() used to construct internally.
+  let cronScheduler = new CronScheduler();
 
   if (!hasFlag(args, '--no-cli-skills')) {
     registerSkills(registry, agentPermissions);
@@ -188,10 +195,11 @@ function buildRegistry(args: string[], agentPermissions?: string[] | null, jailR
 
   if (!hasFlag(args, '--no-shell-skills')) {
     const adapter = createShellAdapter({ prefer: shellAdapterPreference });
-    registerShellSkills(registry, adapter, jailRoot, processManager);
+    cronScheduler = new CronScheduler(adapter);
+    registerShellSkills(registry, adapter, jailRoot, processManager, cronScheduler);
   }
 
-  return { registry, processManager };
+  return { registry, processManager, cronScheduler };
 }
 
 function serveStdio(args: string[]): void {
@@ -209,7 +217,7 @@ function serveStdio(args: string[]): void {
   // registry:list/describe/export can filter what they reveal by the
   // caller's own permissions — see registryAdminCommands.
   const agentPermissions = resolveAgentPermissions({ agentProfile: profile, permissions: fileConfig.permissions, rbac });
-  const { registry, processManager } = buildRegistry(args, agentPermissions, jailRoot, shellAdapterPreference);
+  const { registry, processManager, cronScheduler } = buildRegistry(args, agentPermissions, jailRoot, shellAdapterPreference);
   const coreConfig: any = { registry };
   if (profile) coreConfig.agentProfile = profile;
   if (fileConfig.permissions) coreConfig.permissions = fileConfig.permissions;
@@ -229,8 +237,10 @@ function serveStdio(args: string[]): void {
   // pero nunca se llamaba desde ningun shutdown real — un proceso spawneado
   // via process:spawn quedaba huerfano (y sin forma de matarlo, ya que el
   // registry entero moria con el proceso) al recibir SIGINT/SIGTERM.
-  process.on('SIGINT', async () => { server.stop(); await processManager.destroy(); process.exit(0); });
-  process.on('SIGTERM', async () => { server.stop(); await processManager.destroy(); process.exit(0); });
+  // Regresion (ronda 50 del audit, HIGH): mismo hueco en CronScheduler —
+  // ni siquiera existia un parametro para pasar la instancia hasta ahora.
+  process.on('SIGINT', async () => { server.stop(); await processManager.destroy(); cronScheduler.destroy(); process.exit(0); });
+  process.on('SIGTERM', async () => { server.stop(); await processManager.destroy(); cronScheduler.destroy(); process.exit(0); });
 
   server.start();
 }
@@ -255,7 +265,7 @@ async function serveHttp(args: string[]): Promise<void> {
   const rbac: RBAC | undefined = fileConfig.rbac ? new RBAC(fileConfig.rbac) : undefined;
 
   const agentPermissions = resolveAgentPermissions({ agentProfile: profile, permissions: fileConfig.permissions, rbac });
-  const { registry, processManager } = buildRegistry(args, agentPermissions, jailRoot, shellAdapterPreference);
+  const { registry, processManager, cronScheduler } = buildRegistry(args, agentPermissions, jailRoot, shellAdapterPreference);
   const totalCommands = registry.listAll().length;
 
   const coreConfig: any = { registry };
@@ -311,9 +321,10 @@ async function serveHttp(args: string[]): Promise<void> {
 
   // Regresion (ronda 47 del audit, HIGH): mismo fix que serveStdio() arriba
   // — sin esto, un proceso spawneado via process:spawn quedaba huerfano al
-  // recibir SIGINT/SIGTERM.
-  process.on('SIGINT', async () => { await transport.stop(); await processManager.destroy(); process.exit(0); });
-  process.on('SIGTERM', async () => { await transport.stop(); await processManager.destroy(); process.exit(0); });
+  // recibir SIGINT/SIGTERM. Regresion (ronda 50 del audit, HIGH): mismo
+  // hueco para CronScheduler.
+  process.on('SIGINT', async () => { await transport.stop(); await processManager.destroy(); cronScheduler.destroy(); process.exit(0); });
+  process.on('SIGTERM', async () => { await transport.stop(); await processManager.destroy(); cronScheduler.destroy(); process.exit(0); });
 }
 
 /** CLI entry point. */
