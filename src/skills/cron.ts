@@ -1,6 +1,13 @@
 /**
  * @module skills/cron
- * @description Scheduled task execution with cron expressions or shorthand intervals.
+ * @description Scheduled task execution via a plain repeating interval —
+ * NOT general cron grammar. Supported interval shapes: shorthand
+ * ('30s'/'5m'/'1h'/'2d'), '*\/N * * * *' (every N minutes), and
+ * '0 *\/N * * * *' (every N hours). No ranges, lists, day-of-week/
+ * day-of-month, seconds field, or wall-clock alignment — see
+ * parseInterval() below. Ronda 38 del audit: renamed away from "cron
+ * expressions" in this docstring, which overclaimed the actual grammar
+ * supported (the schedule() error message had the same issue, also fixed).
  */
 
 import { command } from '../command-builder/index.js';
@@ -23,9 +30,28 @@ interface CronTask {
   history: Array<{ exitCode: number; duration_ms: number; timestamp: string }>;
   createdAt: string;
   runCount: number;
+  // Regresion (ronda 38 del audit, finding #2): sin este flag, un comando
+  // mas lento que su propio intervalo (p.ej. --interval 30s con un
+  // comando que tarda 45s) apilaba ejecuciones superpuestas sin limite —
+  // cada tick de setInterval disparaba una nueva executeTask() sin
+  // esperar a que la anterior terminara. Ahora un tick se salta (queda
+  // registrado en history con exitCode -1) si la corrida previa sigue
+  // activa.
+  isRunning: boolean;
 }
 
 const MAX_HISTORY_PER_TASK = 20;
+
+// Regresion (ronda 38 del audit, finding #1 CRITICAL): setInterval/
+// setTimeout en Node usan un entero de 32 bits para el delay — cualquier
+// valor por encima de este maximo NO se rechaza ni se trata como "muy
+// lejos en el futuro": Node lo clampea EN SILENCIO a 1ms
+// (TimeoutOverflowWarning). schedule() solo chequeaba `ms < 1000`, asi
+// que un intervalo perfectamente razonable como '25d' o '30d' (2,160,000,000
+// ms > 2,147,483,647) pasaba la validacion y terminaba re-ejecutando el
+// comando programado miles de veces por segundo — un DoS auto-infligido
+// disparable con un input completamente normal, sin nada exotico.
+const MAX_INTERVAL_MS = 2_147_483_647;
 
 // Same bounded-Map + oldest-eviction pattern as ProcessManager
 // (MAX_PROCESSES) and SecretStore (MAX_SECRETS): cron:schedule under
@@ -51,7 +77,10 @@ export class CronScheduler {
 
     const ms = parseInterval(interval);
     if (ms === null || ms < 1000) {
-      return { success: false, error: `Invalid interval: '${interval}'. Use cron (*/5 * * * *) or shorthand (30s, 5m, 1h).` };
+      return { success: false, error: `Invalid interval: '${interval}'. Only '*/N * * * *' (every N minutes), '0 */N * * * *' (every N hours), or shorthand (30s, 5m, 1h, 2d) are supported — general cron grammar (ranges, lists, day-of-week/day-of-month, seconds) is not implemented.` };
+    }
+    if (ms > MAX_INTERVAL_MS) {
+      return { success: false, error: `Invalid interval: '${interval}' (${ms}ms) exceeds the maximum supported interval of ${MAX_INTERVAL_MS}ms (~24.8 days) — Node's setInterval silently misfires above this.` };
     }
 
     // Bound BEFORE inserting. Unlike the other bounded stores, the
@@ -69,7 +98,7 @@ export class CronScheduler {
 
     const task: CronTask = {
       name, command: cmd, interval, intervalMs: ms,
-      history: [], createdAt: new Date().toISOString(), runCount: 0,
+      history: [], createdAt: new Date().toISOString(), runCount: 0, isRunning: false,
       timer: setInterval(() => { void this.executeTask(task, cwd); }, ms),
     };
 
@@ -112,11 +141,39 @@ export class CronScheduler {
   }
 
   private async executeTask(task: CronTask, cwd?: string): Promise<void> {
+    // Regresion (ronda 38 del audit, finding #2): sin este guard, un tick
+    // que llega mientras la corrida anterior todavia esta activa disparaba
+    // otra ejecucion superpuesta, sin limite de cuantas podian acumularse
+    // en paralelo para el mismo task. Se salta el tick (y queda una
+    // entrada en history, exitCode -1, para que quede visible via
+    // cron:history en vez de desaparecer en silencio).
+    if (task.isRunning) {
+      task.history.push({ exitCode: -1, duration_ms: 0, timestamp: new Date().toISOString() });
+      while (task.history.length > MAX_HISTORY_PER_TASK) task.history.shift();
+      return;
+    }
+
+    task.isRunning = true;
     const start = Date.now();
-    const result = await this.adapter.exec(task.command, { cwd, timeout: 60_000 });
-    task.runCount++;
-    task.history.push({ exitCode: result.exitCode, duration_ms: Date.now() - start, timestamp: new Date().toISOString() });
-    while (task.history.length > MAX_HISTORY_PER_TASK) task.history.shift();
+    try {
+      // Regresion (ronda 38 del audit, finding #3): sin este try/catch, un
+      // ShellAdapter INYECTADO (constructor(adapter?: ShellAdapter) acepta
+      // cualquier implementacion — createCronCommands()/CronScheduler no
+      // estan atados a los 2 adapters builtin, que nunca rechazan) cuyo
+      // exec() rechace produce una promesa no manejada en cada tick — no
+      // hay ningun handler de unhandledRejection en todo el repo, asi que
+      // eso tumba el proceso entero. Ahora degrada a una corrida fallida
+      // registrada en history, en vez de crashear.
+      const result = await this.adapter.exec(task.command, { cwd, timeout: 60_000 });
+      task.runCount++;
+      task.history.push({ exitCode: result.exitCode, duration_ms: Date.now() - start, timestamp: new Date().toISOString() });
+    } catch {
+      task.runCount++;
+      task.history.push({ exitCode: -1, duration_ms: Date.now() - start, timestamp: new Date().toISOString() });
+    } finally {
+      while (task.history.length > MAX_HISTORY_PER_TASK) task.history.shift();
+      task.isRunning = false;
+    }
   }
 }
 

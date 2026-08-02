@@ -609,6 +609,26 @@ describe('Cron Skills', () => {
     expect(res.error).toContain('Invalid interval');
   });
 
+  /**
+   * Regresion (ronda 38 del audit, finding #1 CRITICAL): setInterval usa un
+   * entero de 32 bits para el delay — un valor por encima del maximo NO se
+   * rechaza en Node, se clampea EN SILENCIO a 1ms (TimeoutOverflowWarning),
+   * asi que un intervalo perfectamente razonable como '25d' terminaba
+   * re-ejecutando el comando miles de veces por segundo en vez de una vez
+   * cada 25 dias. schedule() solo chequeaba `ms < 1000` — ahora tambien
+   * rechaza `ms > MAX_INTERVAL_MS`.
+   */
+  it('CR10: cron:schedule rechaza un intervalo que excede el maximo de 32 bits de setInterval', async () => {
+    const handler = findHandler(cmds, 'cron', 'schedule');
+    const res = await handler({ name: 'too-long', command: 'echo', interval: '25d' });
+    expect(res.success).toBe(false);
+    expect(res.error).toContain('exceeds the maximum supported interval');
+
+    // Un intervalo justo por debajo del limite sigue aceptandose.
+    const ok = await handler({ name: 'ok-interval', command: 'echo', interval: '24d' });
+    expect(ok.success).toBe(true);
+  });
+
   it('CR06: cron:schedule parses shorthand intervals', async () => {
     const handler = findHandler(cmds, 'cron', 'schedule');
     for (const interval of ['10s', '5m', '1h', '1d']) {
@@ -782,6 +802,71 @@ describe('Cron Sandbox Adapter Injection', () => {
     const history = findHandler(cmds, 'cron', 'history');
     const histRes = await history({ name: 'failing' });
     expect(histRes.data.history[0].exitCode).toBe(99);
+  });
+
+  /**
+   * Regresion (ronda 38 del audit, finding #2 HIGH): sin guard de
+   * concurrencia, un tick que llega mientras la corrida anterior sigue
+   * activa (comando mas lento que su propio intervalo) disparaba OTRA
+   * ejecucion superpuesta, sin limite de cuantas podian acumularse. Este
+   * test deja el primer exec() colgado (nunca resuelve) y avanza el timer
+   * dos ticks mas — el adapter debe seguir habiendo sido llamado UNA sola
+   * vez mientras la corrida sigue activa.
+   */
+  it('CR11: un tick que llega mientras la corrida anterior sigue activa se salta (no se superpone)', async () => {
+    let resolveFirst: (v: any) => void;
+    execMock.mockImplementationOnce(() => new Promise((resolve) => { resolveFirst = resolve; }));
+
+    const schedule = findHandler(cmds, 'cron', 'schedule');
+    await schedule({ name: 'slow', command: 'sleep-forever', interval: '1s' });
+
+    await vi.advanceTimersByTimeAsync(1000); // dispara la 1ra corrida, queda colgada
+    await vi.advanceTimersByTimeAsync(1000); // 2do tick: debe saltarse
+    await vi.advanceTimersByTimeAsync(1000); // 3er tick: debe saltarse tambien
+
+    expect(execMock).toHaveBeenCalledTimes(1);
+
+    // Los ticks salteados quedan visibles en history (exitCode -1), no
+    // desaparecen en silencio.
+    const history = findHandler(cmds, 'cron', 'history');
+    const beforeResolve = await history({ name: 'slow' });
+    expect(beforeResolve.data.count).toBe(2);
+    expect(beforeResolve.data.history.every((h: any) => h.exitCode === -1)).toBe(true);
+
+    // Al resolver la corrida colgada, el siguiente tick vuelve a ejecutar
+    // normalmente.
+    resolveFirst!({ stdout: '', stderr: '', exitCode: 0 });
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(execMock).toHaveBeenCalledTimes(2);
+  });
+
+  /**
+   * Regresion (ronda 38 del audit, finding #3 MEDIUM): CronScheduler acepta
+   * cualquier ShellAdapter inyectado (no solo los 2 builtin, que nunca
+   * rechazan) — un adapter que rechaza su promesa disparaba una unhandled
+   * rejection en cada tick, y no hay ningun handler de unhandledRejection
+   * en todo el repo. Ahora degrada a una corrida fallida en history, no
+   * tumba el proceso.
+   */
+  it('CR12: un adapter inyectado que rechaza no tumba el scheduler, degrada a exitCode -1', async () => {
+    execMock.mockRejectedValueOnce(new Error('adapter exploded'));
+
+    const schedule = findHandler(cmds, 'cron', 'schedule');
+    await schedule({ name: 'throws', command: 'echo', interval: '1s' });
+
+    await vi.advanceTimersByTimeAsync(1000);
+
+    const history = findHandler(cmds, 'cron', 'history');
+    const histRes = await history({ name: 'throws' });
+    expect(histRes.data.history[0].exitCode).toBe(-1);
+
+    // El scheduler sigue vivo: el siguiente tick corre normalmente.
+    execMock.mockResolvedValueOnce({ stdout: '', stderr: '', exitCode: 0 });
+    await vi.advanceTimersByTimeAsync(1000);
+    const histRes2 = await history({ name: 'throws' });
+    expect(histRes2.data.count).toBe(2);
+    expect(histRes2.data.history[1].exitCode).toBe(0);
   });
 });
 
