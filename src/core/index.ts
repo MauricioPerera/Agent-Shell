@@ -416,7 +416,15 @@ class Core {
 
       // Apply JQ filter if present
       if (firstCmd?.jqFilter && data !== null && data !== undefined) {
-        data = this.applyJqFilter(data, firstCmd.jqFilter.raw);
+        const jqResult = this.applyJqFilter(data, firstCmd.jqFilter.raw);
+        if (!jqResult.ok) {
+          if (!isConfirmResolution) {
+            this.auditLogger?.audit('error:handler', { command: maskSecrets(cmd.slice(0, 100)), code: jqResult.code, error: jqResult.message }, sessionId);
+            this.recordHistory(cmd, 1);
+          }
+          return this.buildResponse(1, null, jqResult.message, cmd, mode, startTime);
+        }
+        data = jqResult.value;
       }
 
       // Apply format if specified
@@ -1177,13 +1185,26 @@ class Core {
     return results;
   }
 
-  private applyJqFilter(data: any, expression: string): any {
+  private applyJqFilter(
+    data: any,
+    expression: string
+  ): { ok: true; value: any } | { ok: false; code: string; message: string } {
     const result = applyFilter(data, expression);
     if (result.success) {
-      return result.result;
+      return { ok: true, value: result.result };
     }
-    // If filter fails, return null (per contract: campo no encontrado no es error)
-    return null;
+    // Regresion (ronda 57 del audit, MEDIUM): contracts/core.md documenta
+    // UN SOLO caso de degradacion a null — "campo no encontrado no es
+    // error" (E003). Antes, CUALQUIER FilterError (E001 sintaxis
+    // malformada, E002 input demasiado grande, E004 tipo incompatible,
+    // E005 tope de iteracion — el safety cap agregado en esta misma
+    // ronda) se colapsaba igual a un bare `null`, indistinguible de un
+    // campo legitimamente ausente y tragandose en silencio el
+    // diagnostico real (incluido el de seguridad de E005).
+    if (result.error.code === 'E003') {
+      return { ok: true, value: null };
+    }
+    return { ok: false, code: result.error.code, message: result.error.message };
   }
 
   private applyFormat(data: any, format: 'table' | 'csv'): string {

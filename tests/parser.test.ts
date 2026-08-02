@@ -663,6 +663,128 @@ describe('Parser', () => {
       expect(result.code).toBe(1);
       expect(result.errorType).toBe('E_UNCLOSED_QUOTE');
     });
+
+    /**
+     * @test T31 - Pipeline vacio ("&gt;&gt;" solo)
+     * @error E_EMPTY_PIPELINE
+     * @priority Alta
+     * Regresion (ronda 56 del audit, HIGH): antes producia un pipeline de
+     * 0 comandos que Core ejecutaba "con exito" (code 0) sin correr nada.
+     */
+    it('T31: retorna ParseError para pipeline vacio (">>" solo)', () => {
+      const result = parse('>>');
+
+      expect(isParseError(result)).toBe(true);
+      if (!isParseError(result)) return;
+
+      expect(result.code).toBe(1);
+      expect(result.errorType).toBe('E_EMPTY_PIPELINE');
+    });
+
+    /**
+     * @test T32 - Pipeline colgante (1 solo comando real tras el ">>")
+     * @error E_EMPTY_PIPELINE
+     * @priority Alta
+     */
+    it('T32: retorna ParseError para ">>" colgante al final (1 comando real)', () => {
+      const result = parse('a:b >>');
+
+      expect(isParseError(result)).toBe(true);
+      if (!isParseError(result)) return;
+
+      expect(result.code).toBe(1);
+      expect(result.errorType).toBe('E_EMPTY_PIPELINE');
+    });
+
+    /**
+     * @test T33 - Batch vacio tras filtrar comas sin comandos reales
+     * @error E_EMPTY_BATCH
+     * @priority Alta
+     * Regresion (ronda 56 del audit, HIGH): "batch[,]" tiene contenido
+     * pre-split no vacio (","), asi que el chequeo original de
+     * `content.length === 0` no lo atrapaba; tras filtrar segmentos
+     * vacios quedaban 0 comandos y Core "tenia exito" sobre un batch vacio.
+     */
+    it('T33: retorna ParseError para "batch[,]" (0 comandos reales)', () => {
+      const result = parse('batch[,]');
+
+      expect(isParseError(result)).toBe(true);
+      if (!isParseError(result)) return;
+
+      expect(result.code).toBe(1);
+      expect(result.errorType).toBe('E_EMPTY_BATCH');
+    });
+
+    /**
+     * @test T34 - "|" pegado a un valor sin comillas (no precedido de espacio)
+     * @error E_UNEXPECTED_TOKEN
+     * @priority Alta
+     * Regresion (ronda 56 del audit, HIGH): antes se interpretaba como
+     * inicio de filtro jq (afterPipe empezaba con "."), truncando el valor
+     * real "a" y adjuntando un jqFilter espurio ".txt" en silencio.
+     */
+    it('T34: retorna ParseError para "|" sin espacio antes, pegado a un valor', () => {
+      const result = parse('cmd1:a --path a|.txt');
+
+      expect(isParseError(result)).toBe(true);
+      if (!isParseError(result)) return;
+
+      expect(result.code).toBe(1);
+      expect(result.errorType).toBe('E_UNEXPECTED_TOKEN');
+    });
+
+    /**
+     * @test T35 - ">>" pegado a un valor sin comillas (no rodeado de espacios)
+     * @error E_UNEXPECTED_TOKEN
+     * @priority Alta
+     */
+    it('T35: retorna ParseError para ">>" sin espacios, pegado a un valor', () => {
+      const result = parse('cmd1:a --redirect a>>b');
+
+      expect(isParseError(result)).toBe(true);
+      if (!isParseError(result)) return;
+
+      expect(result.code).toBe(1);
+      expect(result.errorType).toBe('E_UNEXPECTED_TOKEN');
+    });
+
+    /**
+     * @test T36 - "[" / "]" sin comillas dentro de un valor de batch
+     * @error E_UNEXPECTED_TOKEN
+     * @priority Alta
+     * Regresion (ronda 56 del audit, HIGH): findClosingBracket() no
+     * cuenta profundidad de corchetes y se detenia en el primer "]" sin
+     * comillas — el "]" real del array quedaba adentro del "contenido" del
+     * batch, partiendolo mal (perdiendo el segundo comando "cmd2:b" del
+     * batch en silencio). Ahora el chequeo de caracteres prohibidos
+     * rechaza el segmento garbled en vez de fabricar comandos espurios.
+     */
+    it('T36: retorna ParseError (no misparse silencioso) para "[" sin comillas en un valor de batch', () => {
+      const result = parse('batch[cmd1:a --data [1,2], cmd2:b]');
+
+      expect(isParseError(result)).toBe(true);
+      if (!isParseError(result)) return;
+
+      expect(result.code).toBe(1);
+      expect(result.errorType).toBe('E_UNEXPECTED_TOKEN');
+    });
+
+    /**
+     * @test T37 - ">>", "|", "," y "[" SI funcionan si van entre comillas
+     * @priority Alta
+     * Confirma que el chequeo nuevo de caracteres prohibidos solo aplica
+     * a tokens SIN comillas — un valor citado sigue aceptando estos
+     * caracteres literalmente, tal como documenta contracts/parser.md.
+     */
+    it('T37: ">>", "|", "[" y "," entre comillas no disparan E_UNEXPECTED_TOKEN', () => {
+      const result = parse('x:y --path ">>weird|[a,b]"');
+
+      expect(isParseResult(result)).toBe(true);
+      if (!isParseResult(result)) return;
+
+      expect(result.type).toBe('single');
+      expect(result.commands[0].args.named).toEqual({ path: '>>weird|[a,b]' });
+    });
   });
 
   // ----------------------------------------------------------

@@ -82,6 +82,8 @@ import {
   nestedBatchError,
   pipelineInBatchError,
   controlCharacterError,
+  emptyPipelineError,
+  unexpectedTokenError,
 } from './errors.js';
 import { tokenize, scanQuoteChar, type Token } from './tokenizer.js';
 
@@ -150,13 +152,33 @@ export function parse(input: string): ParseResult | ParseError {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
+ * Regresion (ronda 56 del audit, HIGH): un `>>` sin comillas pegado a
+ * contenido no-whitespace (ej: `--path a>>b`, valor de un flag) se
+ * interpretaba igual como separador de pipeline, partiendo el valor real
+ * en dos y fabricando un segundo comando espurio a partir del resto — en
+ * vez de rechazarse como el `E_UNEXPECTED_TOKEN` que contracts/parser.md
+ * ya documentaba (pero nunca implementaba). Todos los ejemplos
+ * documentados usan `>>` rodeado de espacios; exigir ese limite de
+ * whitespace (o inicio/fin de string) para reconocerlo como delimitador
+ * deja que el resto del pipeline (fuera de comillas) siga fallando via
+ * el chequeo de caracteres prohibidos en tokenize/parseSingleCommand.
+ */
+function isPipelineDelimiterAt(input: string, i: number): boolean {
+  if (input[i] !== '>' || input[i + 1] !== '>') return false;
+  const beforeOk = i === 0 || /\s/.test(input[i - 1]);
+  const afterIdx = i + 2;
+  const afterOk = afterIdx >= input.length || /\s/.test(input[afterIdx]);
+  return beforeOk && afterOk;
+}
+
+/**
  * Detecta si el input contiene un operador de pipeline (`>>`) fuera de comillas.
  * Recorre caracter por caracter rastreando el estado de comillas.
  */
 function containsPipelineOutsideQuotes(input: string): boolean {
   let inQuote: string | null = null;
   for (let i = 0; i < input.length - 1; ) {
-    if (inQuote === null && input[i] === '>' && input[i + 1] === '>') {
+    if (inQuote === null && isPipelineDelimiterAt(input, i)) {
       return true;
     }
     const step = scanQuoteChar(input, i, inQuote);
@@ -219,6 +241,16 @@ function parseBatch(trimmed: string, raw: string): ParseResult | ParseError {
     if ('errorType' in result) return result;
     commands.push(result);
     offset = segStart + segTrimmed.length;
+  }
+
+  // Regresion (ronda 56 del audit, HIGH): el chequeo de `content.length === 0`
+  // arriba solo cubre el contenido crudo pre-split (`batch []`) — un batch
+  // como `batch[,]` o `batch[ , ]` tiene contenido no vacio que, tras
+  // filtrar segmentos vacios (comas iniciales/finales/dobladas), termina en
+  // 0 comandos reales. Core.executeBatch([]) ejecuta un `for` que nunca
+  // itera y devuelve code=0 "exito" sobre 0 comandos.
+  if (commands.length === 0) {
+    return emptyBatchError(openBracket, raw);
   }
 
   return { type: 'batch', commands, raw };
@@ -293,6 +325,15 @@ function parsePipeline(trimmed: string, raw: string): ParseResult | ParseError {
     offset = segStart + segTrimmed.length;
   }
 
+  // Regresion (ronda 56 del audit, HIGH): filtrar segmentos vacios (de un
+  // `>>` colgante al inicio/final, o doblado) podia dejar 0 o 1 comandos
+  // reales tras el loop — Core.executePipeline([]) "tenia exito" sobre 0
+  // comandos, y un pipeline de 1 comando viola la gramatica documentada
+  // (`<single_command> (">>" <single_command>)+`, minimo 2).
+  if (commands.length < 2) {
+    return emptyPipelineError(raw);
+  }
+
   return { type: 'pipeline', commands, raw };
 }
 
@@ -303,7 +344,7 @@ function splitByPipelineRespectingQuotes(input: string): string[] {
   let inQuote: string | null = null;
 
   for (let i = 0; i < input.length; ) {
-    if (inQuote === null && input[i] === '>' && i + 1 < input.length && input[i + 1] === '>') {
+    if (inQuote === null && isPipelineDelimiterAt(input, i)) {
       segments.push(current);
       current = '';
       i += 2; // skip both >
@@ -362,6 +403,20 @@ function parseSingleCommand(input: string, raw: string, startPos: number): Parse
     return emptyInputError(raw);
   }
 
+  // Regresion (ronda 56 del audit, HIGH): contracts/parser.md documenta
+  // `<unquoted_value> ::= [^\s|>[\],]+` — un token sin comillas nunca
+  // deberia contener '>', '|', '[', ']' o ',' — pero el tokenizer trata
+  // esos caracteres como parte normal de una palabra, asi que hasta ahora
+  // pasaban sin aviso (y el pre-procesamiento de pipeline/batch/jq-filter
+  // los reinterpretaba mal cuando SI los reconocia, en vez de rechazarlos
+  // cuando NO los reconocia por estar glued a contenido no-whitespace).
+  // El error E_UNEXPECTED_TOKEN estaba documentado pero nunca implementado.
+  for (const t of tokens) {
+    if (!t.quoted && /[|>[\],]/.test(t.value)) {
+      return unexpectedTokenError(t.value, t.position, raw);
+    }
+  }
+
   const firstToken = tokens[0];
   const identityResult = parseCommandIdentity(firstToken, raw);
   if ('errorType' in identityResult) return identityResult;
@@ -399,7 +454,16 @@ function splitJqFilter(input: string): { commandPart: string; jqPart: string | n
   let inQuote: string | null = null;
 
   for (let i = 0; i < input.length; ) {
-    if (inQuote === null && input[i] === '|') {
+    // Regresion (ronda 56 del audit, HIGH): un `|` sin comillas pegado a
+    // contenido no-whitespace (ej: `--path a|.txt`, un valor de flag que
+    // por casualidad empieza con `.` tras el pipe) se interpretaba igual
+    // como inicio de filtro jq, truncando el valor real ("a") y adjuntando
+    // un jqFilter espurio (".txt") en silencio. Todos los ejemplos
+    // documentados usan `|` precedido de espacio; exigirlo (o inicio de
+    // string) deja que un `|` glued siga como parte del commandPart, donde
+    // el chequeo de caracteres prohibidos en tokenize lo rechaza en vez de
+    // reinterpretarlo mal.
+    if (inQuote === null && input[i] === '|' && (i === 0 || /\s/.test(input[i - 1]))) {
       const afterPipe = input.substring(i + 1).trimStart();
       if (afterPipe.startsWith('.') || afterPipe.startsWith('[.')) {
         return {

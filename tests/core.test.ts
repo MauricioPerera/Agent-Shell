@@ -1036,6 +1036,39 @@ describe('Core', () => {
       expect(response.code).toBe(0);
       expect(response.data).toEqual(['Juan', 'j@t.com']);
     });
+
+    /**
+     * @test T12b - Campo jq inexistente (E003) sigue degradando a null
+     * @acceptance contracts/core.md: "campo no encontrado no es error"
+     * @priority Alta
+     * Confirma que el UNICO caso documentado de degradacion a code=0/null
+     * (E003, campo no encontrado) sigue funcionando igual tras el fix de
+     * la ronda 57 — no debe convertirse en error.
+     */
+    it('T12b: campo jq inexistente retorna code=0 y data=null (E003, sin cambios)', async () => {
+      const response = await core.exec('users:create --name Juan --email j@t.com | .nonexistent');
+
+      expect(response.code).toBe(0);
+      expect(response.data).toBeNull();
+    });
+
+    /**
+     * @test T12c - Filtro jq con tipo incompatible (E004) ya no se traga en silencio
+     * @error surfaces via response.error, code=1
+     * @priority Alta
+     * Regresion (ronda 57 del audit, MEDIUM): antes CUALQUIER FilterError
+     * (no solo E003) se colapsaba a data=null con code=0 "exito" — un
+     * ".name.sub" sobre un campo string (E004: no se puede aplicar field
+     * access sobre un string) pasaba desapercibido igual que un campo
+     * legitimamente ausente.
+     */
+    it('T12c: filtro jq con tipo incompatible (E004) retorna code=1 con el error real', async () => {
+      const response = await core.exec('users:create --name Juan --email j@t.com | .name.sub');
+
+      expect(response.code).toBe(1);
+      expect(response.data).toBeNull();
+      expect(response.error).toContain('Cannot apply');
+    });
   });
 
   // ----------------------------------------------------------

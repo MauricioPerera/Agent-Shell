@@ -22,6 +22,8 @@
  * | E_INPUT_TOO_LONG     | Input excede 4096 caracteres                 |
  * | E_PIPELINE_DEPTH     | Pipeline con mas de 10 comandos              |
  * | E_BATCH_SIZE         | Batch con mas de 20 comandos                 |
+ * | E_EMPTY_PIPELINE     | Pipeline con menos de 2 comandos reales      |
+ * | E_UNEXPECTED_TOKEN   | Token sin comillas con '>','\|','[',']',',' |
  */
 
 import type { ParseError } from './types.js';
@@ -236,6 +238,44 @@ export function pipelineInBatchError(raw: string): ParseError {
     'Pipeline (>>) is not allowed inside batch',
     0,
     raw.length,
+    raw
+  );
+}
+
+/**
+ * Regresion (ronda 56 del audit, HIGH): un pipeline con menos de 2
+ * comandos reales tras remover segmentos vacios (un `>>` colgante al
+ * inicio/final, o doble `>>`) antes se colapsaba en silencio a un
+ * pipeline de 0 o 1 comandos — Core lo ejecutaba igual y devolvia
+ * code=0 "exito" sobre 0 comandos ejecutados. La gramatica documentada
+ * (`<single_command> (">>" <single_command>)+`) exige minimo 2.
+ */
+export function emptyPipelineError(raw: string): ParseError {
+  return createParseError(
+    'E_EMPTY_PIPELINE',
+    'Empty or incomplete pipeline: at least 2 commands required (check for a leading, trailing, or doubled ">>")',
+    0,
+    raw.length,
+    raw
+  );
+}
+
+/**
+ * Regresion (ronda 56 del audit, HIGH): contracts/parser.md documenta
+ * `<unquoted_value> ::= [^\s|>[\],]+` — un valor sin comillas NUNCA
+ * deberia contener '>', '|', '[', ']' o ',' — pero nada lo enforceaba:
+ * un valor como `a>>b` o `a|.txt` sin comillas se reinterpretaba en
+ * silencio como un delimitador de pipeline/jq-filter (truncando el
+ * valor real y a veces fabricando un comando extra falso) en vez de
+ * rechazarse. El error E_UNEXPECTED_TOKEN ya estaba documentado en
+ * contracts/parser.md pero nunca implementado en ningun lado del repo.
+ */
+export function unexpectedTokenError(value: string, position: number, raw: string): ParseError {
+  return createParseError(
+    'E_UNEXPECTED_TOKEN',
+    `Unexpected token '${value}' at position ${position}: unquoted values cannot contain '>', '|', '[', ']', or ',' — quote the value if it's meant to be literal`,
+    position,
+    value.length,
     raw
   );
 }

@@ -598,6 +598,39 @@ describe('JQ Filter', () => {
       if (!isError(result)) return;
       expect(result.error.code).toBe('E001');
     });
+
+    /**
+     * Regresion (ronda 57 del audit, HIGH): MAX_ITERATION_ELEMENTS (10000)
+     * antes se chequeaba solo POR NIVEL de iteracion. Un filtro con
+     * iteraciones anidadas (".a.[].b.[]") podia producir un total = el
+     * PRODUCTO de los tamanos de cada nivel — cada nivel individualmente
+     * bajo el cap (150 < 10000) pero el total (150*150 = 22500) muy por
+     * encima — sin que ningun chequeo lo detectara. Ahora el limite es
+     * acumulativo entre niveles de iteracion anidados.
+     */
+    it('rechaza iteracion anidada cuyo total combinado excede MAX_ITERATION_ELEMENTS aunque cada nivel individual este bajo el cap', () => {
+      const data = {
+        a: Array.from({ length: 150 }, () => ({
+          b: Array.from({ length: 150 }, (_, j) => j),
+        })),
+      };
+      const result = applyFilter(data, '.a.[].b.[]');
+
+      expect(isError(result)).toBe(true);
+      if (!isError(result)) return;
+      expect(result.error.code).toBe('E005');
+    });
+
+    it('acepta iteracion anidada cuyo total combinado esta bajo MAX_ITERATION_ELEMENTS', () => {
+      const data = {
+        a: Array.from({ length: 10 }, () => ({
+          b: [1, 2, 3],
+        })),
+      };
+      const result = applyFilter(data, '.a.[].b.[]');
+
+      expect(isSuccess(result)).toBe(true);
+    });
   });
 
   // ----------------------------------------------------------

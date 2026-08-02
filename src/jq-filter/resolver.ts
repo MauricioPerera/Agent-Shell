@@ -30,7 +30,7 @@ export function resolve(data: any, parsed: ParsedExpression, originalExpression:
   }
 
   // Path resolution
-  const result = resolvePath(data, parsed.segments, originalExpression);
+  const result = resolvePath(data, parsed.segments, originalExpression, { count: 0 });
   if (!result.success) return result;
   return success(result.result, originalExpression, inputType);
 }
@@ -54,7 +54,12 @@ function resolveMultiSelect(
 }
 
 /** Resuelve un path de segmentos sobre los datos. */
-function resolvePath(data: any, segments: PathSegment[], originalExpression: string): FilterResult {
+function resolvePath(
+  data: any,
+  segments: PathSegment[],
+  originalExpression: string,
+  counter: { count: number }
+): FilterResult {
   let current = data;
   let resolvedPath = '';
 
@@ -121,8 +126,19 @@ function resolvePath(data: any, segments: PathSegment[], originalExpression: str
         return { success: true, result: [], expression: originalExpression, input_type: getInputType(data) };
       }
 
-      if (current.length > MAX_ITERATION_ELEMENTS) {
-        return iterationLimitError(originalExpression, resolvedPath, current.length);
+      // Regresion (ronda 57 del audit, HIGH): MAX_ITERATION_ELEMENTS antes
+      // se chequeaba solo POR NIVEL de iteracion (`current.length` de ESTE
+      // nivel nada mas) — un filtro con iteraciones anidadas (ej.
+      // ".a.[].b.[]") podia producir una salida total que es el PRODUCTO
+      // de los tamanos de cada nivel, cada uno individualmente bajo el
+      // cap, sin que ningun chequeo lo detectara. `counter` es el MISMO
+      // objeto compartido entre todas las llamadas recursivas de
+      // resolvePath para esta expresion (ver la llamada inicial en
+      // resolve()), asi que acumula el total de elementos iterados en
+      // CUALQUIER nivel de anidamiento.
+      counter.count += current.length;
+      if (counter.count > MAX_ITERATION_ELEMENTS) {
+        return iterationLimitError(originalExpression, resolvedPath, counter.count);
       }
 
       // Apply remaining segments to each element
@@ -135,7 +151,7 @@ function resolvePath(data: any, segments: PathSegment[], originalExpression: str
       // Map each element through remaining segments
       const results: any[] = [];
       for (const item of current) {
-        const itemResult = resolvePath(item, remainingSegments, originalExpression);
+        const itemResult = resolvePath(item, remainingSegments, originalExpression, counter);
         if (!itemResult.success) return itemResult;
         results.push((itemResult as FilterSuccess).result);
       }

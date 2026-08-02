@@ -108,8 +108,12 @@ describe('Scaffold Skills', () => {
     });
 
     const file = result.data.files['src/commands/users/create.ts'];
-    expect(file).toContain("'email'");
-    expect(file).toContain("'string'");
+    // Regresion (ronda 58 del audit, CRITICAL): p.name/p.type ahora se
+    // escapan via JSON.stringify() en vez de interpolarse crudos dentro
+    // de un literal '...' — el output pasa a ser "email"/"string"
+    // (comillas dobles), no 'email'/'string'.
+    expect(file).toContain('"email"');
+    expect(file).toContain('"string"');
     expect(file).toContain('.required()');
   });
 
@@ -130,8 +134,83 @@ describe('Scaffold Skills', () => {
 
     expect(result.success).toBe(true);
     const file = result.data.files['src/commands/users/create.ts'];
-    expect(file).toContain("'id'");
-    expect(file).toContain("'int'");
+    expect(file).toContain('"id"');
+    expect(file).toContain('"int"');
+  });
+
+  /**
+   * Regresion (ronda 58 del audit, CRITICAL): description/p.name/p.type/
+   * p.description se interpolaban crudos dentro de literales '...' en el
+   * archivo .ts generado — una comilla simple en cualquiera de esos
+   * campos cerraba el literal antes de tiempo, dejando el resto como
+   * codigo TS/JS vivo (el propio campo `instructions` de la respuesta le
+   * dice al caller que escriba el archivo e importe/compile). Ahora se
+   * escapan con JSON.stringify(), que siempre produce un literal valido
+   * sin importar el contenido.
+   */
+  it('SC11: un payload de escape en description no rompe el string literal del archivo generado', async () => {
+    const handler = findHandler(scaffoldCommands, 'scaffold', 'add-command');
+    const payload = "x'); require('child_process').execSync('calc'); //";
+    const result = await handler({ namespace: 'users', name: 'create', description: payload });
+
+    expect(result.success).toBe(true);
+    const file = result.data.files['src/commands/users/create.ts'];
+    // El payload crudo (con la comilla simple sin escapar seguida del
+    // codigo inyectado) NO debe aparecer tal cual — solo su forma
+    // escapada via JSON.stringify (comillas dobles, comilla simple
+    // interna intacta ya que JSON no la escapa).
+    expect(file).not.toContain(`.description('${payload}')`);
+    expect(file).toContain(`.description(${JSON.stringify(payload)})`);
+    // El "codigo inyectado" nunca queda como una linea de codigo propia
+    // fuera del literal de string.
+    expect(file.split('\n').some(line => line.trim() === "require('child_process').execSync('calc'); //')")).toBe(false);
+  });
+
+  it('SC12: un payload con */ en description no cierra el comentario /** */ del namespace barrel generado', async () => {
+    const handler = findHandler(scaffoldCommands, 'scaffold', 'add-namespace');
+    const payload = "*/ require('child_process').execSync('calc'); /*";
+    const result = await handler({ namespace: 'users', description: payload });
+
+    expect(result.success).toBe(true);
+    const file = result.data.files['src/commands/users/index.ts'];
+    // El "*/" del payload no debe aparecer suelto dentro del bloque
+    // /** ... */ inicial cerrandolo antes de tiempo — description ahora
+    // vive en su propia linea // Description: "..." (JSON.stringify),
+    // fuera del bloque de comentario.
+    expect(file).toContain(`// Description: ${JSON.stringify(payload)}`);
+    // El bloque /** */ del encabezado sigue intacto y cerrando donde
+    // deberia (justo antes del import), no en medio del payload.
+    const headerEnd = file.indexOf(' */');
+    expect(file.slice(0, headerEnd)).not.toContain('require(');
+  });
+
+  it('SC13: un payload de escape en un nombre/tipo/descripcion de param no rompe el archivo generado', async () => {
+    const handler = findHandler(scaffoldCommands, 'scaffold', 'add-command');
+    const result = await handler({
+      namespace: 'users', name: 'create', description: 'ok',
+      params: [{ name: "x', () => {}); process.exit(1); //", type: 'string', description: "y'); //" }],
+    });
+
+    expect(result.success).toBe(true);
+    const file = result.data.files['src/commands/users/create.ts'];
+    expect(file).not.toContain(".process.exit(1)");
+    expect(file).toContain(JSON.stringify("x', () => {}); process.exit(1); //"));
+  });
+
+  /**
+   * Regresion (ronda 58 del audit, MEDIUM): a diferencia de wizard.ts,
+   * scaffold:add-command nunca validaba params[].type contra
+   * isValidParamType — un tipo inventado se escribia sin aviso.
+   */
+  it('SC14: scaffold:add-command rechaza un params[].type invalido', async () => {
+    const handler = findHandler(scaffoldCommands, 'scaffold', 'add-command');
+    const result = await handler({
+      namespace: 'users', name: 'create', description: 'ok',
+      params: [{ name: 'x', type: 'not-a-real-type' }],
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('Unknown param type');
   });
 
   /**

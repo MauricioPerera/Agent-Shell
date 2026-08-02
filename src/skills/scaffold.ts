@@ -8,7 +8,7 @@
 
 import { command } from '../command-builder/index.js';
 import type { CommandDefinition } from '../command-registry/types.js';
-import { NAME_PATTERN } from '../command-registry/types.js';
+import { NAME_PATTERN, isValidParamType } from '../command-registry/types.js';
 
 export type SkillEntry = { definition: CommandDefinition; handler: Function };
 
@@ -110,12 +110,21 @@ export const commands: CommandEntry[] = [
 }
 
 function generateNamespaceBarrel(namespace: string, description: string): string {
+  // Regresion (ronda 58 del audit, CRITICAL): `description` es texto libre
+  // sin validar (default ''), y antes se interpolaba crudo DENTRO de este
+  // bloque /** ... */ — un valor conteniendo '*/' cerraba el comentario
+  // antes de tiempo, dejando el resto del texto como codigo TS/JS vivo en
+  // el archivo generado (que las propias `instructions` de este comando le
+  // piden al caller escribir a disco e importar). JSON.stringify() produce
+  // siempre un literal de string valido y de una sola linea (escapa
+  // comillas, backslashes, saltos de linea) sin importar el contenido, asi
+  // que se saca `description` del comentario y se pone como string.
   return `/**
  * Namespace: ${namespace}
- * ${description}
  *
  * Add command imports here and re-export them.
  */
+// Description: ${JSON.stringify(description)}
 
 import type { CommandDefinition } from 'agent-shell';
 
@@ -131,21 +140,33 @@ export const commands: CommandEntry[] = [
 }
 
 function generateCommandFile(namespace: string, name: string, description: string, params?: any[]): string {
+  // Regresion (ronda 58 del audit, CRITICAL): description/p.name/p.type/
+  // p.description son texto libre sin validar, y antes se interpolaban
+  // crudos dentro de literales de string simples ('${x}') en el archivo
+  // .ts generado — una comilla simple en cualquiera de esos campos
+  // cerraba el literal antes de tiempo, dejando el resto como codigo
+  // TS/JS vivo (mismo mecanismo que generateNamespaceBarrel arriba, pero
+  // via string breakout en vez de comment breakout). JSON.stringify()
+  // siempre produce un literal de string valido sin importar el
+  // contenido — namespace/name NO lo necesitan aca porque ya pasaron
+  // validateName()/NAME_PATTERN en el handler antes de llegar a esta
+  // funcion (solo [a-z0-9-]).
   const paramLines = (params || []).map((p: any) => {
     const req = p.required ? '.required()' : '';
     const def = p.default !== undefined ? `.default(${JSON.stringify(p.default)})` : '';
-    const desc = p.description ? `.description('${p.description}')` : '';
-    return `  .param('${p.name}', '${p.type || 'string'}', p => p${req}${def}${desc})`;
+    const desc = p.description ? `.description(${JSON.stringify(p.description)})` : '';
+    return `  .param(${JSON.stringify(p.name)}, ${JSON.stringify(p.type || 'string')}, p => p${req}${def}${desc})`;
   }).join('\n');
 
   const paramBlock = paramLines ? '\n' + paramLines : '';
+  const exampleCmd = `${namespace}:${name}${params?.length ? ' --' + params[0].name + ' value' : ''}`;
 
   return `import { command } from 'agent-shell';
 
 export const definition = command('${namespace}', '${name}')
   .version('1.0.0')
-  .description('${description}')${paramBlock}
-  .example('${namespace}:${name}${params?.length ? ' --' + params[0].name + ' value' : ''}')
+  .description(${JSON.stringify(description)})${paramBlock}
+  .example(${JSON.stringify(exampleCmd)})
   .tags('${namespace}')
   .build();
 
@@ -251,6 +272,16 @@ async function handleAddCommand(args: Record<string, any>) {
 
   const nameErr = validateName(name, 'command name');
   if (nameErr) return { success: false, data: null, error: nameErr };
+
+  // Regresion (ronda 58 del audit, MEDIUM): a diferencia de wizard.ts
+  // (handleCreateCommand/handleCreateNamespace), este handler nunca
+  // validaba params[].type — un typo o un tipo inventado se escribia sin
+  // aviso al archivo generado.
+  for (const p of params) {
+    if (p.type && !isValidParamType(p.type)) {
+      return { success: false, data: null, error: `Unknown param type: '${p.type}'. Valid: int, float, string, bool, date, json, enum(), array<>` };
+    }
+  }
 
   return {
     success: true,
