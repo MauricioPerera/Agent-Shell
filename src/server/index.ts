@@ -21,7 +21,7 @@ import { CommandRegistry } from '../command-registry/index.js';
 import { Core } from '../core/index.js';
 import { McpServer } from '../mcp/server.js';
 import { HttpSseTransport } from '../mcp/http-transport.js';
-import { registerSkills, registerShellSkills } from '../skills/index.js';
+import { registerSkills, registerShellSkills, ProcessManager } from '../skills/index.js';
 import { createShellAdapter } from '../just-bash/factory.js';
 import { InMemoryStorageAdapter, SessionScopedContextStore } from '../context-store/index.js';
 import { AGENT_PROFILES, resolveAgentPermissions } from '../core/agent-profiles.js';
@@ -239,6 +239,11 @@ async function main() {
   });
 
   // Skills
+  // Constructed unconditionally (even if config.skills.shell is false, so
+  // it never gets any spawned processes) so the shutdown handler below
+  // always has a real instance to destroy() — see registerShellSkills'
+  // docstring (ronda 47 del audit, HIGH).
+  const processManager = new ProcessManager();
   if (config.skills.cli) {
     const before = registry.listAll().length;
     registerSkills(registry, agentPermissions);
@@ -247,7 +252,7 @@ async function main() {
   if (config.skills.shell) {
     const before = registry.listAll().length;
     const adapter = createShellAdapter({ prefer: config.shellAdapter });
-    registerShellSkills(registry, adapter, config.jailRoot ?? undefined);
+    registerShellSkills(registry, adapter, config.jailRoot ?? undefined, processManager);
     console.log(`  Shell skills: ${registry.listAll().length - before} commands registered (${adapter.backend} backend)`);
   }
 
@@ -322,15 +327,20 @@ async function main() {
     console.log(`(configured token: ${maskedToken})`);
   }
 
-  // Graceful shutdown
+  // Graceful shutdown. ProcessManager.destroy() existed but was never
+  // reachable from any real shutdown path — a process spawned via
+  // process:spawn orphaned (unkillable, since the whole registry died with
+  // this process) on SIGINT/SIGTERM (ronda 47 del audit, HIGH).
   process.on('SIGINT', async () => {
     console.log('\nShutting down...');
     await transport.stop();
+    await processManager.destroy();
     process.exit(0);
   });
 
   process.on('SIGTERM', async () => {
     await transport.stop();
+    await processManager.destroy();
     process.exit(0);
   });
 }

@@ -1276,6 +1276,91 @@ describe('Process Manager Skills', () => {
       rmSync(scriptDir, { recursive: true, force: true });
     }
   });
+
+  /**
+   * Regresion (ronda 47 del audit, MEDIUM F2): kill() era fire-and-forget —
+   * enviaba SIGTERM y retornaba `true` de inmediato, sin esperar el evento
+   * 'close' (que llega en un tick posterior). Un caller que revisara
+   * process:list() apenas kill() resolvia podia ver el proceso TODAVIA
+   * corriendo. kill() ahora es async y espera la muerte real (via el mismo
+   * terminate() que destroy() y la evicción de MAX_PROCESSES usan).
+   */
+  it('PM07: kill() espera a que el proceso realmente muera antes de resolver', async () => {
+    const spawn = findHandler(cmds, 'process', 'spawn');
+    const isWindows = process.platform === 'win32';
+    await spawn({ name: 'kill-wait-check', command: isWindows ? 'ping -n 100 127.0.0.1' : 'sleep 100' });
+
+    const kill = findHandler(cmds, 'process', 'kill');
+    const res = await kill({ name: 'kill-wait-check' });
+    expect(res.success).toBe(true);
+
+    const list = findHandler(cmds, 'process', 'list');
+    const listRes = await list({});
+    const entry = listRes.data.processes.find((p: any) => p.name === 'kill-wait-check');
+    expect(entry.running).toBe(false);
+  });
+
+  /**
+   * Regresion (ronda 47 del audit, MEDIUM F2): ningun path de este archivo
+   * escalaba a SIGKILL — un proceso que ignora SIGTERM (trap '' TERM)
+   * seguia corriendo para siempre. Solo POSIX: en Windows, ChildProcess.kill()
+   * ya es forzoso sin importar el signal pasado (comportamiento documentado
+   * de Node en ese platform), asi que no hay nada que "escalar" ahi.
+   */
+  it.skipIf(process.platform === 'win32')(
+    'PM08: destroy() escala a SIGKILL si el proceso ignora SIGTERM',
+    async () => {
+      const spawn = findHandler(cmds, 'process', 'spawn');
+      await spawn({ name: 'ignores-term', command: "trap '' TERM; sleep 100" });
+
+      await pm.destroy();
+
+      expect(pm.list().length).toBe(0);
+    },
+    10_000,
+  );
+
+  /**
+   * Regresion (ronda 47 del audit, MEDIUM F3): el cap anterior (200 chunks)
+   * acotaba la CANTIDAD de eventos 'data', no los bytes — un solo chunk
+   * podia ser de cualquier tamano. Este test genera bastante mas que el
+   * cap de 10MB en un solo proceso y confirma que lo capturado quedo
+   * acotado, no el total real emitido.
+   */
+  it('PM09: acota stdout/stderr por BYTES, no por cantidad de chunks', async () => {
+    const scriptDir = mkdtempSync(join(tmpdir(), 'pm-bigout-'));
+    const scriptPath = join(scriptDir, 'big-output.js').replace(/\\/g, '/');
+    // 15 chunks de 1MB = 15MB, bien por encima del cap de 10MB.
+    writeFileSync(scriptPath, `
+      const chunk = 'x'.repeat(1024 * 1024);
+      for (let i = 0; i < 15; i++) process.stdout.write(chunk);
+    `);
+
+    const spawn = findHandler(cmds, 'process', 'spawn');
+    const logs = findHandler(cmds, 'process', 'logs');
+    try {
+      const res = await spawn({ name: 'big-output', command: `node "${scriptPath}"` });
+      expect(res.success).toBe(true);
+
+      // Espera a que el proceso termine de escribir y cerrar.
+      for (let i = 0; i < 40; i++) {
+        const list = pm.list();
+        const entry = list.find(p => p.name === 'big-output');
+        if (entry && !entry.running) break;
+        await new Promise(r => setTimeout(r, 250));
+      }
+
+      const logRes = await logs({ name: 'big-output' });
+      expect(logRes.success).toBe(true);
+      const capturedBytes = Buffer.byteLength(logRes.data.stdout, 'utf-8');
+      // Se escribieron 15MB reales; lo capturado debe quedar bien por
+      // debajo (acotado a ~10MB + el ultimo chunk que empujo el total
+      // por encima del cap antes de que la evicción lo recortara).
+      expect(capturedBytes).toBeLessThan(12 * 1024 * 1024);
+    } finally {
+      rmSync(scriptDir, { recursive: true, force: true });
+    }
+  }, 15_000);
 });
 
 /**

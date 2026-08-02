@@ -13,7 +13,7 @@ import { McpServer } from '../mcp/server.js';
 import { HttpSseTransport } from '../mcp/http-transport.js';
 import { Core } from '../core/index.js';
 import { CommandRegistry } from '../command-registry/index.js';
-import { registerSkills, registerShellSkills } from '../skills/index.js';
+import { registerSkills, registerShellSkills, ProcessManager } from '../skills/index.js';
 import { createShellAdapter } from '../just-bash/factory.js';
 import { InMemoryStorageAdapter, SessionScopedContextStore } from '../context-store/index.js';
 import { RBAC } from '../security/rbac.js';
@@ -175,8 +175,12 @@ function loadConfigFile(): Record<string, any> {
   }
 }
 
-function buildRegistry(args: string[], agentPermissions?: string[] | null, jailRoot?: string, shellAdapterPreference?: ShellAdapterPreference): CommandRegistry {
+function buildRegistry(args: string[], agentPermissions?: string[] | null, jailRoot?: string, shellAdapterPreference?: ShellAdapterPreference): { registry: CommandRegistry; processManager: ProcessManager } {
   const registry = new CommandRegistry();
+  // Constructed unconditionally (even if --no-shell-skills means it never
+  // actually gets any spawned processes) so callers always have a real
+  // instance to destroy() on shutdown — see registerShellSkills' docstring.
+  const processManager = new ProcessManager();
 
   if (!hasFlag(args, '--no-cli-skills')) {
     registerSkills(registry, agentPermissions);
@@ -184,10 +188,10 @@ function buildRegistry(args: string[], agentPermissions?: string[] | null, jailR
 
   if (!hasFlag(args, '--no-shell-skills')) {
     const adapter = createShellAdapter({ prefer: shellAdapterPreference });
-    registerShellSkills(registry, adapter, jailRoot);
+    registerShellSkills(registry, adapter, jailRoot, processManager);
   }
 
-  return registry;
+  return { registry, processManager };
 }
 
 function serveStdio(args: string[]): void {
@@ -205,7 +209,7 @@ function serveStdio(args: string[]): void {
   // registry:list/describe/export can filter what they reveal by the
   // caller's own permissions — see registryAdminCommands.
   const agentPermissions = resolveAgentPermissions({ agentProfile: profile, permissions: fileConfig.permissions, rbac });
-  const registry = buildRegistry(args, agentPermissions, jailRoot, shellAdapterPreference);
+  const { registry, processManager } = buildRegistry(args, agentPermissions, jailRoot, shellAdapterPreference);
   const coreConfig: any = { registry };
   if (profile) coreConfig.agentProfile = profile;
   if (fileConfig.permissions) coreConfig.permissions = fileConfig.permissions;
@@ -221,8 +225,12 @@ function serveStdio(args: string[]): void {
   const core = new Core(coreConfig);
   const server = new McpServer({ core, version: VERSION });
 
-  process.on('SIGINT', () => { server.stop(); process.exit(0); });
-  process.on('SIGTERM', () => { server.stop(); process.exit(0); });
+  // Regresion (ronda 47 del audit, HIGH): ProcessManager.destroy() existia
+  // pero nunca se llamaba desde ningun shutdown real — un proceso spawneado
+  // via process:spawn quedaba huerfano (y sin forma de matarlo, ya que el
+  // registry entero moria con el proceso) al recibir SIGINT/SIGTERM.
+  process.on('SIGINT', async () => { server.stop(); await processManager.destroy(); process.exit(0); });
+  process.on('SIGTERM', async () => { server.stop(); await processManager.destroy(); process.exit(0); });
 
   server.start();
 }
@@ -247,7 +255,7 @@ async function serveHttp(args: string[]): Promise<void> {
   const rbac: RBAC | undefined = fileConfig.rbac ? new RBAC(fileConfig.rbac) : undefined;
 
   const agentPermissions = resolveAgentPermissions({ agentProfile: profile, permissions: fileConfig.permissions, rbac });
-  const registry = buildRegistry(args, agentPermissions, jailRoot, shellAdapterPreference);
+  const { registry, processManager } = buildRegistry(args, agentPermissions, jailRoot, shellAdapterPreference);
   const totalCommands = registry.listAll().length;
 
   const coreConfig: any = { registry };
@@ -301,8 +309,11 @@ async function serveHttp(args: string[]): Promise<void> {
     console.warn('  Use --profile <admin|operator|reader|restricted> or AGENT_SHELL_PROFILE to scope access.\n');
   }
 
-  process.on('SIGINT', async () => { await transport.stop(); process.exit(0); });
-  process.on('SIGTERM', async () => { await transport.stop(); process.exit(0); });
+  // Regresion (ronda 47 del audit, HIGH): mismo fix que serveStdio() arriba
+  // — sin esto, un proceso spawneado via process:spawn quedaba huerfano al
+  // recibir SIGINT/SIGTERM.
+  process.on('SIGINT', async () => { await transport.stop(); await processManager.destroy(); process.exit(0); });
+  process.on('SIGTERM', async () => { await transport.stop(); await processManager.destroy(); process.exit(0); });
 }
 
 /** CLI entry point. */

@@ -15,18 +15,56 @@ import { createPathJail } from '../security/path-jail.js';
 // ProcessManager
 // ---------------------------------------------------------------------------
 
+/** Chunks of captured output plus a running byte total, so eviction doesn't need to re-sum the array on every push. */
+interface OutputBuffer {
+  chunks: string[];
+  bytes: number;
+}
+
 interface ManagedProcess {
   name: string;
   command: string;
   pid: number;
   process: ChildProcess;
-  stdout: string[];
-  stderr: string[];
+  stdout: OutputBuffer;
+  stderr: OutputBuffer;
   startedAt: string;
   exitCode: number | null;
 }
 
-const MAX_OUTPUT_LINES = 200;
+/**
+ * Regresion (ronda 47 del audit, MEDIUM F3): el cap anterior (200 chunks)
+ * acotaba la CANTIDAD de eventos 'data' guardados, no los bytes — pese al
+ * nombre, no hacia split por linea, asi que un solo chunk podia ser de
+ * cualquier tamano tal como lo entrega el pipe del SO. Mas debil que el
+ * cap por bytes que este mismo repo ya aplica en sinks comparables
+ * (shell-git.ts y NativeShellAdapter.exec via `maxBuffer: 10 * 1024 *
+ * 1024`). Este cap aplica el mismo limite, por bytes, independientemente
+ * para stdout y stderr de cada proceso trackeado.
+ */
+const MAX_OUTPUT_BYTES = 10 * 1024 * 1024;
+
+/** Appends `data` to `buffer`, evicting the oldest chunks (FIFO) while over MAX_OUTPUT_BYTES. */
+function appendCapped(buffer: OutputBuffer, data: Buffer): void {
+  const text = data.toString();
+  buffer.chunks.push(text);
+  buffer.bytes += Buffer.byteLength(text, 'utf-8');
+  while (buffer.bytes > MAX_OUTPUT_BYTES && buffer.chunks.length > 0) {
+    const removed = buffer.chunks.shift()!;
+    buffer.bytes -= Buffer.byteLength(removed, 'utf-8');
+  }
+}
+
+/**
+ * Grace period between SIGTERM and escalating to SIGKILL (ronda 47 del
+ * audit, MEDIUM F2). Every signal-sending path in this file previously
+ * sent SIGTERM only, with no escalation and no verification the process
+ * actually died — terminate() below is now the single place that does
+ * both, used by kill(), destroy(), and the MAX_PROCESSES eviction path.
+ */
+const TERMINATE_GRACE_MS = 3000;
+/** Bound on how long terminate() waits for the close event after SIGKILL — a process stuck in an uninterruptible syscall must not hang the caller forever. */
+const KILL_WAIT_MS = 2000;
 
 // Unlike a finished process (whose entry only holds inert buffered
 // output), an unbounded number of DISTINCT names spawned over the
@@ -60,8 +98,13 @@ export class ProcessManager {
       const oldestKey = this.processes.keys().next().value;
       if (oldestKey !== undefined) {
         const oldest = this.processes.get(oldestKey)!;
+        // Fire-and-forget: spawn() stays synchronous (evicting process #201
+        // must not block spawning process #202), but the evictee still gets
+        // the same SIGTERM->SIGKILL escalation as kill()/destroy() instead
+        // of a single best-effort SIGTERM that could leave it running
+        // forever if it ignores SIGTERM (ronda 47 del audit, MEDIUM F2).
         if (oldest.exitCode === null) {
-          try { oldest.process.kill('SIGTERM'); } catch { /* ignore */ }
+          this.terminate(oldest).catch(() => { /* ignore */ });
         }
         this.processes.delete(oldestKey);
       }
@@ -103,18 +146,12 @@ export class ProcessManager {
       // (spawn() ya corrio con el `cmd` real momentos antes) — no afecta
       // la ejecucion real, solo lo que list() expone despues.
       name, command: maskSecrets(cmd), pid: proc.pid, process: proc,
-      stdout: [], stderr: [], startedAt: new Date().toISOString(), exitCode: null,
+      stdout: { chunks: [], bytes: 0 }, stderr: { chunks: [], bytes: 0 },
+      startedAt: new Date().toISOString(), exitCode: null,
     };
 
-    proc.stdout?.on('data', (data: Buffer) => {
-      managed.stdout.push(data.toString());
-      while (managed.stdout.length > MAX_OUTPUT_LINES) managed.stdout.shift();
-    });
-
-    proc.stderr?.on('data', (data: Buffer) => {
-      managed.stderr.push(data.toString());
-      while (managed.stderr.length > MAX_OUTPUT_LINES) managed.stderr.shift();
-    });
+    proc.stdout?.on('data', (data: Buffer) => appendCapped(managed.stdout, data));
+    proc.stderr?.on('data', (data: Buffer) => appendCapped(managed.stderr, data));
 
     proc.on('close', (code) => {
       managed.exitCode = code ?? 1;
@@ -133,17 +170,52 @@ export class ProcessManager {
     }));
   }
 
-  kill(name: string): boolean {
+  /**
+   * Sends SIGTERM and waits for the process to actually exit before
+   * resolving `true` — unlike the previous fire-and-forget version, a
+   * caller awaiting kill() now gets a real signal of whether the process
+   * died, not just that a signal was sent (ronda 47 del audit, MEDIUM F2).
+   * Escalation/verification itself lives in terminate() below, shared
+   * with destroy() and the MAX_PROCESSES eviction path.
+   */
+  async kill(name: string): Promise<boolean> {
     const proc = this.processes.get(name);
     if (!proc || proc.exitCode !== null) return false;
-    try { proc.process.kill('SIGTERM'); } catch { /* ignore */ }
+    await this.terminate(proc);
     return true;
   }
 
   logs(name: string): { stdout: string; stderr: string } | null {
     const proc = this.processes.get(name);
     if (!proc) return null;
-    return { stdout: proc.stdout.join(''), stderr: proc.stderr.join('') };
+    return { stdout: proc.stdout.chunks.join(''), stderr: proc.stderr.chunks.join('') };
+  }
+
+  /** Resolves true once `proc` closes, or false if `timeoutMs` elapses first. */
+  private waitForExit(proc: ManagedProcess, timeoutMs: number): Promise<boolean> {
+    return new Promise<boolean>((resolveWait) => {
+      if (proc.exitCode !== null) { resolveWait(true); return; }
+      const onClose = () => { clearTimeout(timer); resolveWait(true); };
+      const timer = setTimeout(() => { proc.process.off('close', onClose); resolveWait(false); }, timeoutMs);
+      proc.process.once('close', onClose);
+    });
+  }
+
+  /**
+   * Sends SIGTERM, waits up to TERMINATE_GRACE_MS for the process to exit,
+   * and escalates to SIGKILL (waiting up to KILL_WAIT_MS more) if it's
+   * still alive — the single place every signal-sending path in this file
+   * routes through (kill(), destroy(), MAX_PROCESSES eviction). Previously
+   * each path sent only SIGTERM with no escalation and no verification the
+   * process actually died (ronda 47 del audit, MEDIUM F2).
+   */
+  private async terminate(proc: ManagedProcess): Promise<void> {
+    if (proc.exitCode !== null) return;
+    try { proc.process.kill('SIGTERM'); } catch { /* ignore */ }
+    const exited = await this.waitForExit(proc, TERMINATE_GRACE_MS);
+    if (exited || proc.exitCode !== null) return;
+    try { proc.process.kill('SIGKILL'); } catch { /* ignore */ }
+    await this.waitForExit(proc, KILL_WAIT_MS);
   }
 
   /**
@@ -152,20 +224,12 @@ export class ProcessManager {
    * a child process keeps its `cwd` directory locked until it fully exits —
    * a caller that deletes that directory right after destroy() (e.g. test
    * cleanup) previously hit an intermittent EPERM because destroy() only
-   * fired SIGTERM and returned immediately. A per-process timeout guards
-   * against a process that ignores SIGTERM hanging destroy() forever.
+   * fired SIGTERM and returned immediately.
    */
   async destroy(): Promise<void> {
-    const waits: Promise<void>[] = [];
-    for (const proc of this.processes.values()) {
-      if (proc.exitCode === null) {
-        waits.push(new Promise<void>((resolve) => {
-          const timer = setTimeout(resolve, 2000);
-          proc.process.once('close', () => { clearTimeout(timer); resolve(); });
-        }));
-        try { proc.process.kill('SIGTERM'); } catch { /* ignore */ }
-      }
-    }
+    const waits = Array.from(this.processes.values())
+      .filter((proc) => proc.exitCode === null)
+      .map((proc) => this.terminate(proc));
     await Promise.all(waits);
     this.processes.clear();
   }
@@ -248,7 +312,7 @@ export function createProcessCommands(manager?: ProcessManager, jailRoot?: strin
       return { success: true, data: { processes: procs, count: procs.length } };
     }},
     { definition: killDef, handler: async (args: any) => {
-      const killed = pm.kill(args.name);
+      const killed = await pm.kill(args.name);
       return killed
         ? { success: true, data: { name: args.name, killed: true } }
         : { success: false, data: null, error: `Process '${args.name}' not found or already stopped` };

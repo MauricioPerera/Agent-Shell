@@ -42,7 +42,7 @@ import { createWorkspaceCommands } from './workspace.js';
 import { createGitCommands } from './shell-git.js';
 import { createCronCommands } from './cron.js';
 import { createSecretCommands } from './secret-store.js';
-import { createProcessCommands } from './process-mgr.js';
+import { createProcessCommands, ProcessManager } from './process-mgr.js';
 
 export type { SkillEntry } from './scaffold.js';
 export { scaffoldCommands } from './scaffold.js';
@@ -114,8 +114,15 @@ export function registerSkills(registry: CommandRegistry, agentPermissions?: str
  *   server/index.ts are the only real callers of this function and must
  *   forward their own jailRoot config through here for the containment
  *   checks to have any effect.
+ * @param processManager - Optional ProcessManager instance for process:*.
+ *   Omitted = a fresh internal instance (prior behavior — but then the
+ *   caller has no reference to call destroy() on later). cli/index.ts and
+ *   server/index.ts now construct one themselves and pass it in so their
+ *   shutdown handlers can terminate spawned children instead of orphaning
+ *   them (ronda 47 del audit, HIGH — ProcessManager.destroy() existed but
+ *   was never reachable from any real shutdown path).
  */
-export function registerShellSkills(registry: CommandRegistry, shellAdapter?: ShellAdapter, jailRoot?: string): void {
+export function registerShellSkills(registry: CommandRegistry, shellAdapter?: ShellAdapter, jailRoot?: string, processManager?: ProcessManager): void {
   const adapter = shellAdapter || createShellAdapter();
 
   registerAll(registry, httpCommands);
@@ -127,7 +134,7 @@ export function registerShellSkills(registry: CommandRegistry, shellAdapter?: Sh
   registerAll(registry, createGitCommands(jailRoot));
   registerAll(registry, createCronCommands(undefined, adapter, jailRoot));
   registerAll(registry, createSecretCommands());
-  registerAll(registry, createProcessCommands(undefined, jailRoot));
+  registerAll(registry, createProcessCommands(processManager, jailRoot));
 }
 
 /** Registers ALL skills (CLI creation + shell). */
