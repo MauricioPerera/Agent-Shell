@@ -502,9 +502,11 @@ class Core {
       return this.validateCommand(registeredCmd, args, typedArgs);
     }
 
-    // Dry-run mode: return simulated data without calling handler
+    // Dry-run mode: return simulated data without calling handler.
+    // maskSecrets() on the echoed-back args (ronda 39 del audit, CRITICAL)
+    // — see the comment on validateCommand()'s return above for why.
     if (flags.dryRun) {
-      return { dryRun: true, command: `${namespace}:${command}`, args: typedArgs };
+      return { dryRun: true, command: `${namespace}:${command}`, args: maskSecrets(typedArgs) };
     }
 
     // Confirm mode: stash the resolved handler+args (already permission-
@@ -562,7 +564,13 @@ class Core {
       confirmRequired: true,
       preview: {
         command: `${namespace}:${command}`,
-        args: handlerArgs,
+        // maskSecrets() on the PREVIEW copy only (ronda 39 del audit,
+        // CRITICAL) — handlerArgs itself stays unmasked in the stashed
+        // pendingConfirms entry above, since resolveConfirmation() needs
+        // the REAL value to actually run the handler when the token is
+        // confirmed. maskSecrets() returns a new object, never mutates
+        // its input, so this doesn't touch the stashed copy.
+        args: maskSecrets(handlerArgs),
         effect: registeredCmd.longDescription || registeredCmd.description,
         reversible: registeredCmd.reversible === true,
       },
@@ -898,7 +906,19 @@ class Core {
       return { _error: { code: 1, error: errors.join('; ') } };
     }
 
-    return { valid: true, command: `${registeredCmd.namespace}:${registeredCmd.name}`, resolvedArgs };
+    // Regresion (ronda 39 del audit, CRITICAL): esta rama devolvia
+    // resolvedArgs SIN pasar por maskSecrets() — a diferencia del command
+    // STRING crudo (ya masqueado en recordHistory), los args tipo-
+    // convertidos nunca pasaban por ningun filtro. Un caller normal
+    // (secret:set --value hunter2 --validate, o cualquier comando con un
+    // Authorization: Bearer <token> en un arg) recibia el valor sensible
+    // en texto plano en la respuesta. maskSecrets() sigue sin detectar un
+    // valor arbitrario sin forma reconocible bajo una key generica como
+    // --value (limitacion preexistente y documentada, no algo que este
+    // fix agrave ni resuelva) — pero SI cubre Bearer/JWT/AWS-key/
+    // password=/hex-secret/url-credentials, la misma cobertura que ya
+    // tiene el command string.
+    return { valid: true, command: `${registeredCmd.namespace}:${registeredCmd.name}`, resolvedArgs: maskSecrets(resolvedArgs) };
   }
 
   /**
@@ -1028,7 +1048,15 @@ class Core {
       // flag was read nowhere in this method: a step tagged --dry-run
       // still ran its handler for real.
       if (flags.dryRun) {
-        previousData = { dryRun: true, command: `${namespace}:${command}`, args: typeCheck.args };
+        // maskSecrets() (ronda 39 del audit, CRITICAL) — see the comment
+        // on validateCommand()'s return for why. Masking here (not just
+        // on the FINAL step's response) means a masked placeholder, not
+        // the real value, is what a later simulated step's own
+        // $input.field reference resolves against — intentional: nothing
+        // executes for real in a dry-run chain, so there's no correctness
+        // cost, only the security upside of never letting a secret value
+        // surface at ANY point in the response, not just the last step.
+        previousData = { dryRun: true, command: `${namespace}:${command}`, args: maskSecrets(typeCheck.args) };
         auditStep('command:executed', stepLabel, { mode: 'dry-run' });
         isFirstStep = false;
         continue;

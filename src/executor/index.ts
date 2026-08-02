@@ -220,11 +220,20 @@ export class Executor {
       mode = 'confirm';
     }
 
+    // Regresion (ronda 39 del audit, CRITICAL): validate/dry-run/confirm
+    // echoaban validatedArgs SIN pasar por maskSecrets() — a diferencia
+    // del command STRING crudo (ya masqueado en recordHistory), los args
+    // tipo-convertidos nunca pasaban por ningun filtro. maskSecrets()
+    // sigue sin detectar un valor arbitrario sin forma reconocible bajo
+    // una key generica como --value (limitacion preexistente y
+    // documentada) — pero SI cubre Bearer/JWT/AWS-key/password=/
+    // hex-secret/url-credentials, la misma cobertura que ya tiene el
+    // command string.
     if (mode === 'validate') {
       return {
         code: 0,
         success: true,
-        data: { valid: true, command: fullName, resolvedArgs: validatedArgs },
+        data: { valid: true, command: fullName, resolvedArgs: maskSecrets(validatedArgs) },
         error: null,
         meta: this.buildMeta(fullName, 'validate', Date.now() - startTime, null, definition.reversible),
       };
@@ -236,7 +245,7 @@ export class Executor {
         success: true,
         data: {
           wouldExecute: fullName,
-          withArgs: validatedArgs,
+          withArgs: maskSecrets(validatedArgs),
           expectedEffect: definition.effect || definition.description,
         },
         error: null,
@@ -260,7 +269,12 @@ export class Executor {
         data: {
           preview: {
             command: fullName,
-            args: validatedArgs,
+            // maskSecrets() on the PREVIEW copy only — the stashed
+            // pendingConfirms entry above keeps the real, unmasked
+            // validatedArgs, since the actual handler invocation on
+            // confirm needs the real value. maskSecrets() returns a new
+            // object, never mutates its input.
+            args: maskSecrets(validatedArgs),
             effect: definition.effect || definition.description,
             reversible: definition.reversible,
           },

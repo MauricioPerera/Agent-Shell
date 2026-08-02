@@ -375,6 +375,19 @@ describe('Core', () => {
     });
 
     /**
+     * Regresion (ronda 39 del audit, CRITICAL): igual que T06n para
+     * --confirm, la respuesta de --dry-run devolvia los args tipo-
+     * convertidos sin maskSecrets().
+     */
+    it('T05b: --dry-run enmascara valores con forma de secreto en args', async () => {
+      const response = await core.exec('users:create --name Juan --email j@t.com --auth "Bearer abcdefghijklmnopqrstuvwxyz1234567890" --dry-run');
+
+      expect(response.code).toBe(0);
+      expect(response.data.args.auth).toBe('Bearer [REDACTED]');
+      expect(response.data.args.name).toBe('Juan');
+    });
+
+    /**
      * @test T06 - Comando validate sin args requeridos
      * @acceptance code=1 por falta de args
      * @priority Alta
@@ -404,6 +417,18 @@ describe('Core', () => {
       // age es type:'int' — confirma que resolvedArgs trae el valor YA
       // convertido (numero), no el string crudo '30' que tipeo el caller.
       expect(typeof response.data.resolvedArgs.age).toBe('number');
+    });
+
+    /**
+     * Regresion (ronda 39 del audit, CRITICAL): igual que T05b/T06n,
+     * resolvedArgs devolvia los args sin maskSecrets().
+     */
+    it('T06o: --validate enmascara valores con forma de secreto en resolvedArgs', async () => {
+      const response = await core.exec('users:setProfile --age 30 --role admin --auth "Bearer abcdefghijklmnopqrstuvwxyz1234567890" --validate');
+
+      expect(response.code).toBe(0);
+      expect(response.data.resolvedArgs.auth).toBe('Bearer [REDACTED]');
+      expect(response.data.resolvedArgs.age).toBe(30);
     });
 
     /**
@@ -448,6 +473,24 @@ describe('Core', () => {
       // resultado, ya que el mock no tiene side effects observables aparte
       // de su valor de retorno — el siguiente test prueba que SI corre
       // recien al confirmar.
+    });
+
+    /**
+     * Regresion (ronda 39 del audit, CRITICAL): preview.args devolvia los
+     * args tipo-convertidos SIN pasar por maskSecrets() — un Authorization:
+     * Bearer <token> (o cualquier valor con forma reconocible por
+     * secret-patterns.ts) pasado como argumento salia en texto plano en
+     * la respuesta del preview. La copia STASHEADA para la resolucion real
+     * (pendingConfirms) sigue con el valor REAL sin masquear — el test
+     * T06c mas abajo, sin modificar, prueba que confirmar sigue
+     * funcionando con normalidad.
+     */
+    it('T06n: preview.args enmascara valores con forma de secreto (Bearer token), sin afectar la resolucion real', async () => {
+      const response = await core.exec('users:delete --id 5 --auth "Bearer abcdefghijklmnopqrstuvwxyz1234567890" --confirm');
+
+      expect(response.code).toBe(4);
+      expect(response.data.preview.args.auth).toBe('Bearer [REDACTED]');
+      expect(response.data.preview.args.id).toBe(5);
     });
 
     it('T06c: confirm <token> ejecuta el comando pendiente y retorna su resultado real', async () => {

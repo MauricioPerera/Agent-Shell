@@ -563,6 +563,25 @@ describe('Executor', () => {
     });
 
     /**
+     * Regresion (ronda 39 del audit, CRITICAL): withArgs devolvia
+     * validatedArgs sin pasar por maskSecrets() — un Authorization: Bearer
+     * <token> (o cualquier valor con forma reconocible por
+     * secret-patterns.ts) pasado como argumento salia en texto plano.
+     */
+    it('T07b: withArgs enmascara valores con forma de secreto', async () => {
+      // validateArgs() (executor/index.ts) solo preserva keys DECLARADAS en
+      // args[] — a diferencia de Core, descarta silenciosamente cualquier
+      // flag no declarado. Se usa 'email' (declarado, string, sin formato
+      // validado) para llevar el valor con forma de secreto.
+      const parsed = createSingleParseResult('users', 'create', { name: 'Ana', email: 'Bearer abcdefghijklmnopqrstuvwxyz1234567890' }, { dryRun: true });
+      const result = await executor.execute(parsed) as ExecutionResult;
+
+      expect(result.code).toBe(0);
+      expect(result.data.withArgs.email).toBe('Bearer [REDACTED]');
+      expect(result.data.withArgs.name).toBe('Ana');
+    });
+
+    /**
      * @test T25 - Historial NO en dry-run
      * @mustnot Registrar en historial en modo dry-run
      * @priority Alta
@@ -588,6 +607,18 @@ describe('Executor', () => {
       expect(result.code).toBe(0);
       expect(result.data.valid).toBe(true);
       expect(result.meta.mode).toBe('validate');
+    });
+
+    /**
+     * Regresion (ronda 39 del audit, CRITICAL): resolvedArgs devolvia
+     * validatedArgs sin pasar por maskSecrets().
+     */
+    it('T08b: resolvedArgs enmascara valores con forma de secreto', async () => {
+      const parsed = createSingleParseResult('users', 'create', { name: 'Ana', email: 'Bearer abcdefghijklmnopqrstuvwxyz1234567890' }, { validate: true });
+      const result = await executor.execute(parsed) as ExecutionResult;
+
+      expect(result.code).toBe(0);
+      expect(result.data.resolvedArgs.email).toBe('Bearer [REDACTED]');
     });
 
     /**
@@ -618,6 +649,29 @@ describe('Executor', () => {
       expect(result.data.confirmToken).not.toBeNull();
       expect(result.data.preview).toBeDefined();
       expect(result.meta.mode).toBe('confirm');
+    });
+
+    /**
+     * Regresion (ronda 39 del audit, CRITICAL): preview.args devolvia
+     * validatedArgs sin maskSecrets(). La copia stasheada en pendingConfirms
+     * sigue con el valor real — T11 (sin modificar) prueba que confirmar
+     * sigue funcionando con normalidad.
+     */
+    it('T10b: preview.args enmascara valores con forma de secreto, sin afectar la resolucion real', async () => {
+      const parsed = createSingleParseResult('users', 'create', { name: 'Ana', email: 'Bearer abcdefghijklmnopqrstuvwxyz1234567890' }, { confirm: true });
+      const result = await executor.execute(parsed) as ExecutionResult;
+
+      expect(result.code).toBe(4);
+      expect(result.data.preview.args.email).toBe('Bearer [REDACTED]');
+
+      // La resolucion real sigue funcionando con el valor REAL (stasheado
+      // sin masquear en pendingConfirms) — confirma que el fix no rompe
+      // el ciclo de vida normal de --confirm (T11 prueba lo mismo sin
+      // secretos de por medio).
+      const token = result.data.confirmToken;
+      const confirmed = await executor.confirm(token);
+      expect(confirmed.code).toBe(0);
+      expect((confirmed.data as any).email).toBe('Bearer abcdefghijklmnopqrstuvwxyz1234567890');
     });
 
     /**
