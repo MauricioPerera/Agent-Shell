@@ -202,6 +202,56 @@ describe('HttpSseTransport', () => {
       await transport.stop(); // should not throw
     });
 
+    /**
+     * Regresion (ronda 41 del audit, HIGH): stop() solo cerraba las
+     * conexiones SSE trackeadas; server.close() por si solo espera a que
+     * las conexiones EXISTENTES se cierren solas, sin importar si son
+     * SSE o keep-alive de /rpc. Una conexion keep-alive de /rpc en idle
+     * (sin request en vuelo, pero sin cerrar) no se cierra por si sola
+     * hasta su propio keepAliveTimeout (Node default ~5s) o hasta que el
+     * peer la cierre — reproducido antes del fix: stop() tardaba ~7s con
+     * una sola conexion idle abierta. closeIdleConnections()/
+     * closeAllConnections() deben acotar esto a un margen chico.
+     */
+    it('T02b: stop() resuelve rapido aunque haya una conexion keep-alive de /rpc abierta e idle', async () => {
+      transport = new HttpSseTransport({ port: 0 });
+      transport.onMessage(createMockHandler());
+      await transport.start();
+      const port = transport.port;
+
+      const { Agent } = await import('node:http');
+      const keepAliveAgent = new Agent({ keepAlive: true, maxSockets: 1 });
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const req = httpRequest(
+            {
+              hostname: '127.0.0.1',
+              port,
+              path: '/rpc',
+              method: 'POST',
+              agent: keepAliveAgent,
+              headers: { 'Content-Type': 'application/json' },
+            },
+            (res) => {
+              res.on('data', () => {});
+              res.on('end', () => resolve());
+            }
+          );
+          req.on('error', reject);
+          req.end(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' }));
+        });
+
+        // The socket is now idle but the agent keeps it open (keep-alive).
+        const start = Date.now();
+        await transport.stop();
+        const elapsed = Date.now() - start;
+
+        expect(elapsed).toBeLessThan(2000);
+      } finally {
+        keepAliveAgent.destroy();
+      }
+    });
+
     it('T05: port 0 asigna puerto aleatorio', async () => {
       transport = new HttpSseTransport({ port: 0 });
       transport.onMessage(createMockHandler());

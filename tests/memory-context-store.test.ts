@@ -203,6 +203,55 @@ describe('SessionScopedContextStore', () => {
     await scoped.set('key', '"stdio-value"'); // sin sessionId
     expect(created).toEqual([]);
   });
+
+  /**
+   * Regresion (ronda 41 del audit, MEDIUM-HIGH): getStore() era un check-
+   * then-act async — "let store = map.get(key); if (!store) { await
+   * adapter.initialize(key); store = new ContextStore(...); map.set(key,
+   * store); }". Dos llamadas CONCURRENTES para el mismo sessionId NUEVO
+   * ven ambas store===undefined antes de que ninguna alcance a escribir
+   * en el map, asi que cada una construye su PROPIA instancia de
+   * ContextStore — cada instancia tiene su propia cola FIFO interna
+   * (this.queue en src/context-store/index.ts), asi que NO se serializan
+   * entre si: ambas hacen loadStore() sobre un backend vacio, escriben
+   * claves distintas, y quien hace saveStore() al final pisa el trabajo
+   * del otro. Este adapter hace un round-trip JSON real (como SQLite/
+   * Encrypted) para que el bug NO quede mudo por una referencia
+   * compartida (a diferencia de InMemoryStorageAdapter, que comparte el
+   * mismo objeto SessionStore entre instancias y por eso enmascaraba el
+   * bug incluso en la version vieja).
+   */
+  it('SC08: dos escrituras concurrentes para un sessionId NUEVO no se pisan entre si (race TOCTOU en getStore)', async () => {
+    class JsonRoundTripAdapter {
+      readonly name = 'json-roundtrip';
+      private raw = new Map<string, string>();
+      async initialize(id: string) {
+        if (!this.raw.has(id)) {
+          this.raw.set(id, JSON.stringify({ context: { entries: {} }, history: [], undo_snapshots: [], createdAt: new Date().toISOString(), lastAccessAt: new Date().toISOString() }));
+        }
+      }
+      async load(id: string) {
+        const s = this.raw.get(id);
+        return s ? JSON.parse(s) : null;
+      }
+      async save(id: string, store: any) {
+        this.raw.set(id, JSON.stringify(store));
+      }
+      async destroy(id: string) { this.raw.delete(id); }
+      async healthCheck() { return true; }
+      async dispose() { this.raw.clear(); }
+    }
+
+    const scoped = new SessionScopedContextStore(new JsonRoundTripAdapter() as any);
+
+    await Promise.all([
+      scoped.set('key1', '"value1"', 'brand-new-session'),
+      scoped.set('key2', '"value2"', 'brand-new-session'),
+    ]);
+
+    const all = await scoped.getAll('brand-new-session');
+    expect(all.data).toEqual({ key1: 'value1', key2: 'value2' });
+  });
 });
 
 // ===========================================================================

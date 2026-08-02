@@ -28,7 +28,7 @@ interface ContextStoreResult {
 }
 
 export class SessionScopedContextStore {
-  private readonly stores = new Map<string, ContextStore>();
+  private readonly stores = new Map<string, Promise<ContextStore>>();
 
   constructor(
     private readonly adapter: StorageAdapter,
@@ -74,21 +74,42 @@ export class SessionScopedContextStore {
    * direct/library caller that predates session scoping. A real sessionId
    * (HttpSseTransport always supplies one) gets its own isolated instance.
    */
-  private async getStore(sessionId?: string): Promise<ContextStore> {
+  private getStore(sessionId?: string): Promise<ContextStore> {
     const key = sessionId || DEFAULT_SESSION;
-    let store = this.stores.get(key);
-    if (!store) {
+    let storePromise = this.stores.get(key);
+    if (!storePromise) {
       // Bound the map BEFORE inserting — same reasoning as
       // WorkspaceSessionStore in src/skills/workspace.ts.
       if (this.stores.size >= MAX_SESSIONS) {
         const oldestKey = this.stores.keys().next().value;
         if (oldestKey !== undefined) this.stores.delete(oldestKey);
       }
-      await this.adapter.initialize(key);
-      store = new ContextStore(this.adapter, key, this.config);
-      this.stores.set(key, store);
+      // Regresion (ronda 41 del audit, MEDIUM-HIGH): la version anterior
+      // era un check-then-act async ("let store = map.get(key); if (!store)
+      // { await adapter.initialize(key); store = new ContextStore(...);
+      // map.set(key, store); }") — dos llamadas concurrentes para el MISMO
+      // sessionId nuevo ven ambas store===undefined, ambas construyen su
+      // propio ContextStore, y la segunda pisa a la primera en el map
+      // (lost update; con InMemoryStorageAdapter el bug queda mudo porque
+      // el objeto subyacente es compartido, pero con SQLite/Encrypted -que
+      // hacen un round-trip JSON completo sin referencia compartida- es un
+      // lost-update real). Fix: cachear la PROMESA en el map de forma
+      // sincrona ANTES de cualquier await, para que la segunda llamada
+      // concurrente encuentre la promesa ya en curso en vez de arrancar
+      // su propia construccion.
+      storePromise = (async () => {
+        await this.adapter.initialize(key);
+        return new ContextStore(this.adapter, key, this.config);
+      })();
+      // Si initialize()/construccion falla, no dejar la promesa rechazada
+      // envenenando el map para siempre — permitir que una llamada futura
+      // reintente en vez de heredar el mismo rechazo indefinidamente.
+      storePromise.catch(() => {
+        if (this.stores.get(key) === storePromise) this.stores.delete(key);
+      });
+      this.stores.set(key, storePromise);
       if (sessionId !== undefined) this.onSessionCreated?.(sessionId);
     }
-    return store;
+    return storePromise;
   }
 }

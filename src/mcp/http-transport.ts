@@ -135,9 +135,32 @@ export class HttpSseTransport {
     }
     this.clients.clear();
 
+    const server = this.server;
+    // Regresion (ronda 41 del audit, HIGH): server.close() deja de aceptar
+    // conexiones nuevas pero espera a que las EXISTENTES se cierren solas
+    // -- una conexion keep-alive de /rpc en idle (sin request en vuelo) no
+    // se cierra por si sola hasta su propio keepAliveTimeout (~5s) o hasta
+    // que el peer la cierre, asi que stop() podia colgarse indefinidamente
+    // (reproducido: ~7s con una sola conexion idle abierta). closeIdle-
+    // Connections() cierra ahora mismo las que estan idle; closeAll-
+    // Connections() tras un margen acotado cierra el resto (con requests
+    // en vuelo) para que stop() siempre resuelva en tiempo acotado. Ambos
+    // metodos son Node >=18.2 -- package.json declara ">=18.0.0", de ahi
+    // el feature-detection en vez de asumir que existen.
+    if (typeof server.closeIdleConnections === 'function') {
+      server.closeIdleConnections();
+    }
+    const forceCloseTimer = setTimeout(() => {
+      if (typeof server.closeAllConnections === 'function') {
+        server.closeAllConnections();
+      }
+    }, 1000);
+    forceCloseTimer.unref();
+
     // Close HTTP server
     return new Promise<void>((resolve) => {
-      this.server!.close(() => {
+      server.close(() => {
+        clearTimeout(forceCloseTimer);
         this.server = null;
         resolve();
       });
