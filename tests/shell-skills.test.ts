@@ -415,6 +415,146 @@ describe('HTTP Skills', () => {
     expect(result.success).toBe(true);
     expect(globalThis.fetch).toHaveBeenCalledTimes(2);
   });
+
+  // -------------------------------------------------------------------------
+  // Ronda 48 del audit: response size cap, cross-origin redirect header
+  // stripping, AbortSignal wiring, and the broken JSON-parse fallback.
+  // -------------------------------------------------------------------------
+
+  /**
+   * Regresion (ronda 48 del audit, HIGH #2): baseHeaders se reusaba sin
+   * cambios en CADA hop de un redirect, sin importar si el origin cambiaba
+   * — un caller pasando --headers '{"Authorization":"Bearer <secreto>"}'
+   * a una URL confiable que luego 302-eaba a un origin distinto (atacante)
+   * reenviaba el header verbatim. stripSensitiveHeadersForRedirect() ahora
+   * lo saca cuando el origin del siguiente hop difiere del actual.
+   */
+  it('HT16: no reenvia Authorization a un redirect cross-origin', async () => {
+    let call = 0;
+    globalThis.fetch = vi.fn(async (_url: string, opts?: any) => {
+      call++;
+      if (call === 1) {
+        expect(opts.headers.Authorization).toBe('Bearer secret-token');
+        return {
+          status: 302,
+          headers: new Headers({ location: 'https://attacker.example.com/collect' }),
+          json: async () => ({}),
+          text: async () => '',
+        };
+      }
+      expect(opts.headers.Authorization).toBeUndefined();
+      return {
+        status: 200,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => ({ ok: true }),
+        text: async () => JSON.stringify({ ok: true }),
+      };
+    }) as any;
+
+    const handler = findHandler(httpCommands, 'http', 'get');
+    const result = await handler({ url: 'https://trusted.example.com/x', headers: { Authorization: 'Bearer secret-token' } });
+
+    expect(result.success).toBe(true);
+    expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('HT17: SI mantiene Authorization en un redirect same-origin (no over-stripea)', async () => {
+    let call = 0;
+    globalThis.fetch = vi.fn(async (_url: string, opts?: any) => {
+      call++;
+      if (call === 1) {
+        return {
+          status: 302,
+          headers: new Headers({ location: 'https://trusted.example.com/y' }),
+          json: async () => ({}),
+          text: async () => '',
+        };
+      }
+      expect(opts.headers.Authorization).toBe('Bearer secret-token');
+      return {
+        status: 200,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => ({ ok: true }),
+        text: async () => JSON.stringify({ ok: true }),
+      };
+    }) as any;
+
+    const handler = findHandler(httpCommands, 'http', 'get');
+    const result = await handler({ url: 'https://trusted.example.com/x', headers: { Authorization: 'Bearer secret-token' } });
+
+    expect(result.success).toBe(true);
+    expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+  });
+
+  /**
+   * Regresion (ronda 48 del audit, HIGH #1): no habia ningun cap de tamano
+   * en la respuesta bufferizada — a diferencia del guard inbound de
+   * http-transport.ts (maxBodySize). Este mock simula un body en streaming
+   * real (via getReader(), como el Response real de undici) para ejercitar
+   * el loop de lectura con cap, no el fallback de res.text() que usan los
+   * demas mocks de este archivo.
+   */
+  it('HT18: rechaza una respuesta que excede el tamano maximo en vez de bufferizarla sin limite', async () => {
+    const bigChunk = new Uint8Array(6 * 1024 * 1024); // 6MB por chunk
+    let reads = 0;
+    globalThis.fetch = vi.fn(async () => ({
+      status: 200,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      body: {
+        getReader: () => ({
+          read: async () => {
+            reads++;
+            if (reads > 2) return { done: true, value: undefined };
+            return { done: false, value: bigChunk }; // 2 chunks = 12MB > cap de 10MB
+          },
+          cancel: async () => {},
+        }),
+      },
+    })) as any;
+
+    const handler = findHandler(httpCommands, 'http', 'get');
+    const result = await handler({ url: 'https://api.test.com/huge' });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('exceeds maximum size');
+  });
+
+  /**
+   * Regresion (ronda 48 del audit, MEDIUM #6): res.json() consume el body
+   * stream; cuando fallaba por JSON invalido, el fallback `await res.text()`
+   * tiraba "Body is unusable: Body has already been read" en vez de
+   * devolver el texto real. Leer el texto UNA sola vez y despues intentar
+   * JSON.parse sobre esa copia en memoria elimina el doble-consumo.
+   */
+  it('HT19: un body con content-type json pero JSON invalido devuelve el texto crudo, no tira error', async () => {
+    globalThis.fetch = vi.fn(async () => ({
+      status: 200,
+      headers: new Headers({ 'content-type': 'application/json' }),
+      text: async () => 'not valid json{',
+    })) as any;
+
+    const handler = findHandler(httpCommands, 'http', 'get');
+    const result = await handler({ url: 'https://api.test.com/bad-json' });
+
+    expect(result.success).toBe(true);
+    expect(result.data.body).toBe('not valid json{');
+  });
+
+  /**
+   * Regresion (ronda 48 del audit, #4): ningun handler leia el 3er
+   * argumento ({sessionId, signal}) que Core.invokeHandler() inyecta para
+   * cancelacion cooperativa — el AbortSignal se perdia en silencio, asi
+   * que el timeout de Core no cancelaba el fetch real en curso.
+   */
+  it('HT20: reenvia el AbortSignal de Core al fetch subyacente', async () => {
+    const handler = findHandler(httpCommands, 'http', 'get');
+    const controller = new AbortController();
+    await handler({ url: 'https://api.test.com/data' }, null, { signal: controller.signal });
+
+    const fetchMock = globalThis.fetch as any;
+    const [, opts] = fetchMock.mock.calls[0];
+    expect(opts.signal).toBe(controller.signal);
+  });
 });
 
 // ===========================================================================

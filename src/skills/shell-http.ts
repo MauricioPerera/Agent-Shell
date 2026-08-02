@@ -221,6 +221,85 @@ const MAX_REDIRECTS = 5;
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
 /**
+ * Bounds how many response bytes doFetch() will buffer into memory (ronda
+ * 48 del audit, HIGH). There was previously no equivalent to http-
+ * transport.ts's inbound `maxBodySize` guard on this OUTBOUND-facing path —
+ * a target returning a multi-gigabyte or slow-drip body got fully buffered
+ * with no cap. 10MB matches the byte-cap convention already established
+ * elsewhere in this codebase for comparable output-capture paths (git.ts's
+ * and the native shell adapter's `maxBuffer: 10 * 1024 * 1024`).
+ */
+const MAX_RESPONSE_BODY_SIZE = 10 * 1024 * 1024;
+
+/**
+ * Headers that must NOT survive a cross-origin redirect hop (ronda 48 del
+ * audit, HIGH). Without this, `baseHeaders` was reused unchanged on every
+ * redirect regardless of origin change — a caller passing `Authorization:
+ * Bearer <secret>` to a trusted URL that later 302s to an attacker-
+ * controlled origin had that header forwarded verbatim. Mirrors the
+ * stripping behavior browsers/fetch apply automatically for `redirect:
+ * 'follow'`, reimplemented here since this file deliberately uses
+ * `redirect: 'manual'` to re-run the SSRF guard on every hop.
+ */
+const SENSITIVE_REDIRECT_HEADERS = new Set(['authorization', 'cookie', 'proxy-authorization']);
+
+/** Drops sensitive headers from `headers` when `fromOrigin` !== `toOrigin`. */
+function stripSensitiveHeadersForRedirect(
+  headers: Record<string, string>,
+  fromOrigin: string,
+  toOrigin: string,
+): Record<string, string> {
+  if (fromOrigin === toOrigin) return headers;
+  const result: Record<string, string> = {};
+  for (const [k, v] of Object.entries(headers)) {
+    if (!SENSITIVE_REDIRECT_HEADERS.has(k.toLowerCase())) result[k] = v;
+  }
+  return result;
+}
+
+/**
+ * Reads a Response body up to `maxBytes`, throwing instead of buffering
+ * past the limit (ronda 48 del audit, HIGH — see MAX_RESPONSE_BODY_SIZE).
+ * Returns the raw text exactly once — the caller then attempts JSON.parse
+ * on it directly instead of calling res.json()/res.text() separately,
+ * which fixes a second bug (ronda 48, MEDIUM): res.json() consumes the
+ * body stream, so a JSON-parse failure made the previous try/catch
+ * fallback's `res.text()` throw ("Body is unusable: Body has already been
+ * read") instead of returning the real (malformed-but-useful) response text.
+ */
+async function readLimitedBody(res: any, maxBytes: number): Promise<string> {
+  const reader = res.body?.getReader?.();
+  if (!reader) {
+    // No streaming body available (e.g. a bodyless 204/304/HEAD response,
+    // or a Response-shaped test double without a real ReadableStream) —
+    // fall back to text() directly, uncapped. Real undici Responses
+    // always expose a streaming .body for any response with content, so
+    // production traffic still goes through the byte-capped loop below.
+    if (typeof res.text === 'function') return await res.text();
+    return '';
+  }
+  let total = 0;
+  const chunks: Uint8Array[] = [];
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) {
+        total += value.byteLength;
+        if (total > maxBytes) {
+          throw new Error(`Response body exceeds maximum size of ${maxBytes} bytes`);
+        }
+        chunks.push(value);
+      }
+    }
+  } catch (err) {
+    await reader.cancel().catch(() => {});
+    throw err;
+  }
+  return Buffer.concat(chunks.map((c) => Buffer.from(c))).toString('utf-8');
+}
+
+/**
  * Fetch follows redirects by default, and a redirect target is not covered by
  * the assertUrlSafe() call the caller already made on the original URL. An
  * external server can respond 302 -> http://169.254.169.254/... and bypass
@@ -235,8 +314,8 @@ const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
  * match a Dispatcher instance from a different undici module instance.
  * undici's own exported fetch is guaranteed to accept undici's own Agent.
  */
-async function doFetch(url: string, method: string, body?: any, headers?: Record<string, string>): Promise<any> {
-  const baseHeaders = headers || {};
+async function doFetch(url: string, method: string, body?: any, headers?: Record<string, string>, signal?: AbortSignal): Promise<any> {
+  let currentHeaders = headers || {};
   let currentUrl = url;
   let currentMethod = method;
   let currentBody = body;
@@ -244,10 +323,11 @@ async function doFetch(url: string, method: string, body?: any, headers?: Record
   for (let redirectCount = 0; ; redirectCount++) {
     const { pinnedAddress, family } = await assertUrlSafe(currentUrl);
 
-    const opts: RequestInit = { method: currentMethod, headers: { ...baseHeaders }, redirect: 'manual' };
+    const opts: RequestInit = { method: currentMethod, headers: { ...currentHeaders }, redirect: 'manual' };
+    if (signal) (opts as any).signal = signal;
     if (currentBody && currentMethod !== 'GET' && currentMethod !== 'HEAD') {
       opts.body = typeof currentBody === 'string' ? currentBody : JSON.stringify(currentBody);
-      if (!baseHeaders['content-type'] && !baseHeaders['Content-Type']) {
+      if (!currentHeaders['content-type'] && !currentHeaders['Content-Type']) {
         (opts.headers as Record<string, string>)['Content-Type'] = 'application/json';
       }
     }
@@ -288,7 +368,9 @@ async function doFetch(url: string, method: string, body?: any, headers?: Record
         if (redirectCount >= MAX_REDIRECTS) {
           throw new Error(`Blocked: too many redirects (max ${MAX_REDIRECTS})`);
         }
-        currentUrl = new URL(location, currentUrl).toString();
+        const nextUrl = new URL(location, currentUrl).toString();
+        currentHeaders = stripSensitiveHeadersForRedirect(currentHeaders, new URL(currentUrl).origin, new URL(nextUrl).origin);
+        currentUrl = nextUrl;
         // 303 always downgrades to GET with no body; 301/302 downgrade non-GET/HEAD
         // to GET too (long-standing fetch/browser behavior); 307/308 preserve both.
         if (res.status === 303 || ((res.status === 301 || res.status === 302) && currentMethod !== 'GET' && currentMethod !== 'HEAD')) {
@@ -299,11 +381,16 @@ async function doFetch(url: string, method: string, body?: any, headers?: Record
       }
 
       const contentType = res.headers.get('content-type') || '';
+      const rawText = await readLimitedBody(res, MAX_RESPONSE_BODY_SIZE);
       let resBody: any;
-      try {
-        resBody = contentType.includes('application/json') ? await res.json() : await res.text();
-      } catch {
-        resBody = await res.text();
+      if (contentType.includes('application/json')) {
+        try {
+          resBody = JSON.parse(rawText);
+        } catch {
+          resBody = rawText;
+        }
+      } else {
+        resBody = rawText;
       }
 
       const resHeaders: Record<string, string> = {};
@@ -361,10 +448,15 @@ requestDef.requiredPermissions = ['http:write'];
 export const httpCommands: SkillEntry[] = [
   {
     definition: getDef,
-    handler: async (args: any) => {
+    // Regresion (ronda 48 del audit, #4): ningun handler de este archivo
+    // leia el 3er argumento ({sessionId, signal}) que Core.invokeHandler()
+    // ya inyecta para cancelacion cooperativa — el AbortSignal se perdia
+    // en silencio, asi que cuando Core se rendia por timeout, el fetch
+    // real seguia corriendo (y bufferizando datos) en segundo plano.
+    handler: async (args: any, _input: any, ctx?: { signal?: AbortSignal }) => {
       try {
         const headers = typeof args.headers === 'string' ? JSON.parse(args.headers) : args.headers;
-        const data = await doFetch(args.url, 'GET', undefined, headers || undefined);
+        const data = await doFetch(args.url, 'GET', undefined, headers || undefined, ctx?.signal);
         return { success: true, data };
       } catch (err: any) {
         return { success: false, data: null, error: `HTTP GET failed: ${err.message}` };
@@ -373,11 +465,11 @@ export const httpCommands: SkillEntry[] = [
   },
   {
     definition: postDef,
-    handler: async (args: any) => {
+    handler: async (args: any, _input: any, ctx?: { signal?: AbortSignal }) => {
       try {
         const body = typeof args.body === 'string' ? JSON.parse(args.body) : args.body;
         const headers = typeof args.headers === 'string' ? JSON.parse(args.headers) : args.headers;
-        const data = await doFetch(args.url, 'POST', body, headers || undefined);
+        const data = await doFetch(args.url, 'POST', body, headers || undefined, ctx?.signal);
         return { success: true, data };
       } catch (err: any) {
         return { success: false, data: null, error: `HTTP POST failed: ${err.message}` };
@@ -386,12 +478,12 @@ export const httpCommands: SkillEntry[] = [
   },
   {
     definition: requestDef,
-    handler: async (args: any) => {
+    handler: async (args: any, _input: any, ctx?: { signal?: AbortSignal }) => {
       try {
         const method = (args.method || 'GET').toUpperCase();
         const body = typeof args.body === 'string' ? JSON.parse(args.body) : args.body;
         const headers = typeof args.headers === 'string' ? JSON.parse(args.headers) : args.headers;
-        const data = await doFetch(args.url, method, body, headers || undefined);
+        const data = await doFetch(args.url, method, body, headers || undefined, ctx?.signal);
         return { success: true, data };
       } catch (err: any) {
         return { success: false, data: null, error: `HTTP ${args.method || 'GET'} failed: ${err.message}` };
