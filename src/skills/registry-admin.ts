@@ -111,7 +111,10 @@ export function registryAdminCommands(registry: CommandRegistry, agentPermission
         if (format === 'compact') {
           commands = registry.toCompactTextBatch(defs);
         } else {
-          commands = defs;
+          // Regresion (ronda 54 del audit, MEDIUM): mismo hueco que
+          // registry:describe — defs son las definiciones VIVAS del
+          // registry (filterByPermissions solo filtra, no clona).
+          commands = defs.map(d => structuredClone(d));
         }
 
         return {
@@ -142,7 +145,17 @@ export function registryAdminCommands(registry: CommandRegistry, agentPermission
 
         return {
           success: true,
-          data: { definition, compact },
+          // Regresion (ronda 54 del audit, MEDIUM): registry.resolve()/
+          // .get() devuelven la definicion VIVA guardada en el registry
+          // (solo register() clona, ver command-registry/index.ts) — sin
+          // este structuredClone(), un caller embebido en el mismo
+          // proceso que mutara data.definition.requiredPermissions (u
+          // otro array anidado) corrompia el registry para siempre, para
+          // cualquier sesion futura que resolviera ese mismo comando. No
+          // explotable via MCP/HTTP (la respuesta se serializa a JSON
+          // antes de salir del proceso), pero si via cualquier caller
+          // in-process de Core/Executor/CommandRegistry como libreria.
+          data: { definition: structuredClone(definition), compact },
         };
       },
     },
@@ -192,7 +205,9 @@ export function registryAdminCommands(registry: CommandRegistry, agentPermission
           data: {
             exportedAt: new Date().toISOString(),
             count: defs.length,
-            definitions: defs,
+            // Regresion (ronda 54 del audit, MEDIUM): mismo hueco que
+            // registry:describe/list — defs son las definiciones VIVAS.
+            definitions: defs.map(d => structuredClone(d)),
           },
         };
       },

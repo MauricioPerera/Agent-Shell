@@ -12,6 +12,7 @@ import { maskSecrets } from '../security/secret-patterns.js';
 import { matchPermissions } from '../security/permission-matcher.js';
 import { PendingConfirmStore } from '../shared/pending-confirm-store.js';
 import { SlidingWindowRateLimiter } from '../shared/sliding-window-rate-limiter.js';
+import { ENUM_TYPE_PATTERN, ARRAY_TYPE_PATTERN, parseEnumValues, parseConstraints } from '../command-registry/types.js';
 
 export { type ExecutionResult, type ExecutionError, type ExecutionMeta, type BatchResult, type PipelineResult, type PipelineStep, type ExecutionContext, type ExecutorConfig, type HistoryStore, type ExecutorRegistry } from './types.js';
 
@@ -474,30 +475,40 @@ export class Executor {
     return { ok: true, args: result };
   }
 
+  // Regresion (ronda 54 del audit, MEDIUM-HIGH): esta funcion comparaba
+  // `def.type === 'array'`/`'enum'` (tipos literales que ningun param real
+  // tiene — el command-builder publico solo produce 'array<T>'/
+  // 'enum(a,b,c)', ver ARRAY_TYPE_PATTERN/ENUM_TYPE_PATTERN) y leia
+  // `def.constraints.min` etc. directamente sobre un STRING
+  // ('min:0,max:100', el unico formato que ParamBuilder.constraints()
+  // produce) — un string no tiene esas propiedades. Las tres ramas nunca
+  // disparaban para ningun param declarado via el builder publico:
+  // array/enum caian a "Unknown type - pass through" sin wrappear/
+  // validar, y CUALQUIER tipo con constraints las ignoraba en silencio.
+  // parseConstraints()/parseEnumValues()/*_TYPE_PATTERN
+  // (command-registry/types.ts) son ahora la unica fuente de verdad.
   private convertType(value: any, def: any): { value?: any; error?: string } {
+    const constraints = parseConstraints(def.constraints);
+
     // If already the right type (e.g., arrays passed directly)
-    if (def.type === 'array') {
+    if (def.type === 'array' || ARRAY_TYPE_PATTERN.test(def.type)) {
       const arr = Array.isArray(value) ? value : [value];
-      if (def.constraints) {
-        if (def.constraints.minItems !== undefined && arr.length < def.constraints.minItems) {
-          return { error: `Argument '--${def.name}' violates constraint: minItems ${def.constraints.minItems}` };
-        }
-        if (def.constraints.maxItems !== undefined && arr.length > def.constraints.maxItems) {
-          return { error: `Argument '--${def.name}' violates constraint: maxItems ${def.constraints.maxItems}` };
-        }
+      if (constraints.minItems !== undefined && arr.length < constraints.minItems) {
+        return { error: `Argument '--${def.name}' violates constraint: minItems ${constraints.minItems}` };
+      }
+      if (constraints.maxItems !== undefined && arr.length > constraints.maxItems) {
+        return { error: `Argument '--${def.name}' violates constraint: maxItems ${constraints.maxItems}` };
       }
       return { value: arr };
     }
 
     if (def.type === 'string') {
       const str = String(value);
-      if (def.constraints) {
-        if (def.constraints.minLength !== undefined && str.length < def.constraints.minLength) {
-          return { error: `Argument '--${def.name}' violates constraint: minLength ${def.constraints.minLength}` };
-        }
-        if (def.constraints.maxLength !== undefined && str.length > def.constraints.maxLength) {
-          return { error: `Argument '--${def.name}' violates constraint: maxLength ${def.constraints.maxLength}` };
-        }
+      if (constraints.minLength !== undefined && str.length < constraints.minLength) {
+        return { error: `Argument '--${def.name}' violates constraint: minLength ${constraints.minLength}` };
+      }
+      if (constraints.maxLength !== undefined && str.length > constraints.maxLength) {
+        return { error: `Argument '--${def.name}' violates constraint: maxLength ${constraints.maxLength}` };
       }
       return { value: str };
     }
@@ -508,13 +519,11 @@ export class Executor {
         return { error: `Argument '--${def.name}' expects int, got '${value}'` };
       }
       // Check constraints
-      if (def.constraints) {
-        if (def.constraints.min !== undefined && num < def.constraints.min) {
-          return { error: `Argument '--${def.name}' violates constraint: min ${def.constraints.min}` };
-        }
-        if (def.constraints.max !== undefined && num > def.constraints.max) {
-          return { error: `Argument '--${def.name}' violates constraint: max ${def.constraints.max}` };
-        }
+      if (constraints.min !== undefined && num < constraints.min) {
+        return { error: `Argument '--${def.name}' violates constraint: min ${constraints.min}` };
+      }
+      if (constraints.max !== undefined && num > constraints.max) {
+        return { error: `Argument '--${def.name}' violates constraint: max ${constraints.max}` };
       }
       return { value: num };
     }
@@ -524,13 +533,11 @@ export class Executor {
       if (isNaN(num)) {
         return { error: `Argument '--${def.name}' expects float, got '${value}'` };
       }
-      if (def.constraints) {
-        if (def.constraints.min !== undefined && num < def.constraints.min) {
-          return { error: `Argument '--${def.name}' violates constraint: min ${def.constraints.min}` };
-        }
-        if (def.constraints.max !== undefined && num > def.constraints.max) {
-          return { error: `Argument '--${def.name}' violates constraint: max ${def.constraints.max}` };
-        }
+      if (constraints.min !== undefined && num < constraints.min) {
+        return { error: `Argument '--${def.name}' violates constraint: min ${constraints.min}` };
+      }
+      if (constraints.max !== undefined && num > constraints.max) {
+        return { error: `Argument '--${def.name}' violates constraint: max ${constraints.max}` };
       }
       return { value: num };
     }
@@ -552,7 +559,7 @@ export class Executor {
     if (def.type === 'json') {
       try {
         const parsed = typeof value === 'string' ? JSON.parse(value) : value;
-        const maxDepth = def.constraints?.maxDepth ?? 10;
+        const maxDepth = constraints.maxDepth ?? 10;
         const depth = getJsonDepth(parsed);
         if (depth > maxDepth) {
           return { error: `Argument '--${def.name}' JSON exceeds max depth of ${maxDepth} (found ${depth})` };
@@ -563,8 +570,8 @@ export class Executor {
       }
     }
 
-    if (def.type === 'enum') {
-      const allowed = def.enumValues || [];
+    if (def.type === 'enum' || ENUM_TYPE_PATTERN.test(def.type)) {
+      const allowed = def.enumValues || parseEnumValues(def.type);
       if (!allowed.includes(value)) {
         return { error: `Argument '--${def.name}' must be one of: ${allowed.join(', ')}` };
       }

@@ -341,6 +341,40 @@ describe('Registry Admin Skills', () => {
     expect(result.error).toContain('not found');
   });
 
+  /**
+   * Regresion (ronda 54 del audit, MEDIUM): registry.resolve()/.get()
+   * devuelven la definicion VIVA guardada en el registry (solo register()
+   * clona) — sin clonar aca tambien, un caller que mutara
+   * result.data.definition.requiredPermissions corrompia el registry para
+   * siempre, para cualquier resolucion futura de ese mismo comando (por
+   * cualquier sesion). No explotable via MCP/HTTP (la respuesta se
+   * serializa a JSON antes de salir del proceso), pero si via cualquier
+   * caller in-process de Core/Executor/CommandRegistry como libreria.
+   */
+  it('RA04b: mutar la definicion devuelta por registry:describe no corrompe el registry', async () => {
+    const handler = findHandler(adminEntries, 'registry', 'describe');
+    const result = await handler({ command: 'scaffold:init' });
+
+    result.data.definition.requiredPermissions = ['hacked:everything'];
+    (result.data.definition.tags as string[]).push('mutated');
+
+    const result2 = await handler({ command: 'scaffold:init' });
+    expect(result2.data.definition.requiredPermissions).not.toEqual(['hacked:everything']);
+    expect(result2.data.definition.tags).not.toContain('mutated');
+  });
+
+  it('RA07b: mutar una definicion devuelta por registry:list (view:full) no corrompe el registry', async () => {
+    const listHandler = findHandler(adminEntries, 'registry', 'list');
+    const describeHandler = findHandler(adminEntries, 'registry', 'describe');
+
+    const listResult = await listHandler({ view: 'full' });
+    const scaffoldInit = listResult.data.commands.find((c: any) => c.namespace === 'scaffold' && c.name === 'init');
+    scaffoldInit.requiredPermissions = ['hacked:everything'];
+
+    const describeResult = await describeHandler({ command: 'scaffold:init' });
+    expect(describeResult.data.definition.requiredPermissions).not.toEqual(['hacked:everything']);
+  });
+
   it('RA06: registry:stats returns correct counts', async () => {
     const handler = findHandler(adminEntries, 'registry', 'stats');
     const result = await handler({});

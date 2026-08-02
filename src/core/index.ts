@@ -14,6 +14,7 @@ import { maskSecrets } from '../security/secret-patterns.js';
 import { resolveAgentPermissions } from './agent-profiles.js';
 import { PendingConfirmStore } from '../shared/pending-confirm-store.js';
 import { SlidingWindowRateLimiter } from '../shared/sliding-window-rate-limiter.js';
+import { ENUM_TYPE_PATTERN, ARRAY_TYPE_PATTERN, parseEnumValues, parseConstraints } from '../command-registry/types.js';
 import type { AuditLogger } from '../security/audit-logger.js';
 import type { ParseResult, ParsedCommand, ParseError } from '../parser/index.js';
 import type { CoreResponse, CoreConfig, CoreRegistry, CoreVectorIndex, CoreContextStore, LogEntry } from './types.js';
@@ -679,7 +680,13 @@ class Core {
         if (!isVisibleToAgent(definition.requiredPermissions, this.agentPermissions)) {
           return { _error: { code: 3, error: `Permission denied: cannot describe ${target}` } };
         }
-        return definition;
+        // Regresion (ronda 54 del audit, MEDIUM): registry.get() devuelve
+        // la definicion VIVA guardada en el registry (solo register()
+        // clona) — sin este structuredClone(), un caller embebido en el
+        // mismo proceso que mutara el objeto devuelto (p.ej.
+        // requiredPermissions) corrompia el registry para siempre. Mismo
+        // fix que registry:describe en registry-admin.ts.
+        return structuredClone(definition);
       }
 
       case 'context': {
@@ -758,28 +765,38 @@ class Core {
    * a behavior change.
    */
   private convertType(value: any, def: any): { value?: any; error?: string } {
-    if (def.type === 'array') {
+    // Regresion (ronda 54 del audit, MEDIUM-HIGH): esta funcion comparaba
+    // `def.type === 'array'`/`'enum'` (tipos literales que ningun param
+    // real tiene — el command-builder publico solo produce 'array<T>'/
+    // 'enum(a,b,c)', ver ARRAY_TYPE_PATTERN/ENUM_TYPE_PATTERN) y leia
+    // `def.constraints.min` etc. directamente sobre un STRING
+    // ('min:0,max:100', el unico formato que ParamBuilder.constraints()
+    // produce) — un string no tiene esas propiedades. Las tres ramas
+    // nunca disparaban para ningun param declarado via el builder
+    // publico: array/enum caian a "Unknown type - pass through" sin
+    // wrappear/validar, y CUALQUIER tipo con constraints las ignoraba en
+    // silencio. parseConstraints()/parseEnumValues()/*_TYPE_PATTERN
+    // (command-registry/types.ts) son ahora la unica fuente de verdad.
+    const constraints = parseConstraints(def.constraints);
+
+    if (def.type === 'array' || ARRAY_TYPE_PATTERN.test(def.type)) {
       const arr = Array.isArray(value) ? value : [value];
-      if (def.constraints) {
-        if (def.constraints.minItems !== undefined && arr.length < def.constraints.minItems) {
-          return { error: `Argument '--${def.name}' violates constraint: minItems ${def.constraints.minItems}` };
-        }
-        if (def.constraints.maxItems !== undefined && arr.length > def.constraints.maxItems) {
-          return { error: `Argument '--${def.name}' violates constraint: maxItems ${def.constraints.maxItems}` };
-        }
+      if (constraints.minItems !== undefined && arr.length < constraints.minItems) {
+        return { error: `Argument '--${def.name}' violates constraint: minItems ${constraints.minItems}` };
+      }
+      if (constraints.maxItems !== undefined && arr.length > constraints.maxItems) {
+        return { error: `Argument '--${def.name}' violates constraint: maxItems ${constraints.maxItems}` };
       }
       return { value: arr };
     }
 
     if (def.type === 'string') {
       const str = String(value);
-      if (def.constraints) {
-        if (def.constraints.minLength !== undefined && str.length < def.constraints.minLength) {
-          return { error: `Argument '--${def.name}' violates constraint: minLength ${def.constraints.minLength}` };
-        }
-        if (def.constraints.maxLength !== undefined && str.length > def.constraints.maxLength) {
-          return { error: `Argument '--${def.name}' violates constraint: maxLength ${def.constraints.maxLength}` };
-        }
+      if (constraints.minLength !== undefined && str.length < constraints.minLength) {
+        return { error: `Argument '--${def.name}' violates constraint: minLength ${constraints.minLength}` };
+      }
+      if (constraints.maxLength !== undefined && str.length > constraints.maxLength) {
+        return { error: `Argument '--${def.name}' violates constraint: maxLength ${constraints.maxLength}` };
       }
       return { value: str };
     }
@@ -789,13 +806,11 @@ class Core {
       if (isNaN(num) || !Number.isInteger(num)) {
         return { error: `Argument '--${def.name}' expects int, got '${value}'` };
       }
-      if (def.constraints) {
-        if (def.constraints.min !== undefined && num < def.constraints.min) {
-          return { error: `Argument '--${def.name}' violates constraint: min ${def.constraints.min}` };
-        }
-        if (def.constraints.max !== undefined && num > def.constraints.max) {
-          return { error: `Argument '--${def.name}' violates constraint: max ${def.constraints.max}` };
-        }
+      if (constraints.min !== undefined && num < constraints.min) {
+        return { error: `Argument '--${def.name}' violates constraint: min ${constraints.min}` };
+      }
+      if (constraints.max !== undefined && num > constraints.max) {
+        return { error: `Argument '--${def.name}' violates constraint: max ${constraints.max}` };
       }
       return { value: num };
     }
@@ -805,13 +820,11 @@ class Core {
       if (isNaN(num)) {
         return { error: `Argument '--${def.name}' expects float, got '${value}'` };
       }
-      if (def.constraints) {
-        if (def.constraints.min !== undefined && num < def.constraints.min) {
-          return { error: `Argument '--${def.name}' violates constraint: min ${def.constraints.min}` };
-        }
-        if (def.constraints.max !== undefined && num > def.constraints.max) {
-          return { error: `Argument '--${def.name}' violates constraint: max ${def.constraints.max}` };
-        }
+      if (constraints.min !== undefined && num < constraints.min) {
+        return { error: `Argument '--${def.name}' violates constraint: min ${constraints.min}` };
+      }
+      if (constraints.max !== undefined && num > constraints.max) {
+        return { error: `Argument '--${def.name}' violates constraint: max ${constraints.max}` };
       }
       return { value: num };
     }
@@ -833,7 +846,7 @@ class Core {
     if (def.type === 'json') {
       try {
         const parsed = typeof value === 'string' ? JSON.parse(value) : value;
-        const maxDepth = def.constraints?.maxDepth ?? 10;
+        const maxDepth = constraints.maxDepth ?? 10;
         const depth = getJsonDepth(parsed);
         if (depth > maxDepth) {
           return { error: `Argument '--${def.name}' JSON exceeds max depth of ${maxDepth} (found ${depth})` };
@@ -844,8 +857,8 @@ class Core {
       }
     }
 
-    if (def.type === 'enum') {
-      const allowed = def.enumValues || [];
+    if (def.type === 'enum' || ENUM_TYPE_PATTERN.test(def.type)) {
+      const allowed = def.enumValues || parseEnumValues(def.type);
       if (!allowed.includes(value)) {
         return { error: `Argument '--${def.name}' must be one of: ${allowed.join(', ')}` };
       }

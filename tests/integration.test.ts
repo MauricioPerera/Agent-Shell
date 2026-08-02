@@ -127,7 +127,12 @@ function createIntegrationRegistry() {
     get(namespace: string, name: string) {
       const cmd = commands.get(`${namespace}:${name}`);
       if (!cmd) return { ok: false, error: { code: 'COMMAND_NOT_FOUND', message: `Command ${namespace}:${name} not found` } };
-      return { ok: true, value: { definition: cmd, handler: cmd.handler, registeredAt: new Date().toISOString() } };
+      // definition must NOT include the handler function — the real
+      // CommandRegistry keeps them as separate fields; Core's describe
+      // builtin now does structuredClone(definition) (ronda 54 del
+      // audit), which throws on a non-cloneable value like a function.
+      const { handler, ...definition } = cmd;
+      return { ok: true, value: { definition, handler, registeredAt: new Date().toISOString() } };
     },
     resolve(namespace: string, name: string) {
       return this.get(namespace, name);

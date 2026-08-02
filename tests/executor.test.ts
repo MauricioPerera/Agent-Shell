@@ -499,6 +499,45 @@ describe('Executor', () => {
       expect(result.code).toBe(1);
       expect(result.error!.type).toBe('E_INVALID_ARGS');
     });
+
+    /**
+     * Regresion (ronda 54 del audit, MEDIUM-HIGH): convertType() comparaba
+     * `def.type === 'enum'` y leia `def.constraints.min` etc. directamente
+     * sobre un STRING — pero el UNICO shape que el command-builder publico
+     * realmente produce es type:'enum(a,b,c)' y constraints como string
+     * ('min:1,max:120', ver ParamBuilder.constraints()). T30/T32 arriba
+     * solo prueban el shape LEGACY (constraints como objeto, type:'enum'+
+     * enumValues) — que sigue funcionando por compatibilidad. Este test
+     * prueba el shape REAL.
+     */
+    it('T30b/T32b: valida constraints-como-string y enum(...) — el shape real del command-builder publico', async () => {
+      registry = createMockRegistry({
+        'test:builder-shape': {
+          definition: {
+            namespace: 'test', command: 'builder-shape',
+            args: [
+              { name: 'age', type: 'int', required: true, constraints: 'min:1,max:120' },
+              { name: 'status', type: 'enum(a,b)', required: true },
+            ],
+            description: 'Test', effect: 'Test',
+            reversible: false, requiredPermissions: [],
+          },
+          handler: async (args: any) => args,
+        },
+      });
+      executor = new Executor(registry, context);
+
+      const tooHigh = await executor.execute(createSingleParseResult('test', 'builder-shape', { age: '150', status: 'a' })) as ExecutionResult;
+      expect(tooHigh.code).toBe(1);
+      expect(tooHigh.error!.type).toBe('E_INVALID_ARGS');
+
+      const badEnum = await executor.execute(createSingleParseResult('test', 'builder-shape', { age: '30', status: 'c' })) as ExecutionResult;
+      expect(badEnum.code).toBe(1);
+      expect(badEnum.error!.type).toBe('E_INVALID_ARGS');
+
+      const ok = await executor.execute(createSingleParseResult('test', 'builder-shape', { age: '30', status: 'b' })) as ExecutionResult;
+      expect(ok.code).toBe(0);
+    });
   });
 
   // ----------------------------------------------------------

@@ -50,7 +50,10 @@ function createMockRegistry() {
       const key = `${namespace}:${name}`;
       const cmd = commands.get(key);
       if (!cmd) return { ok: false, error: { code: 'COMMAND_NOT_FOUND', message: `Command ${namespace}:${name} not found` } };
-      return { ok: true, value: { definition: cmd, handler: cmd.handler, registeredAt: new Date().toISOString() } };
+      // definition must NOT include the handler function — see the same
+      // fix in core.test.ts/integration.test.ts (ronda 54 del audit).
+      const { handler, ...definition } = cmd;
+      return { ok: true, value: { definition, handler, registeredAt: new Date().toISOString() } };
     },
   };
 }

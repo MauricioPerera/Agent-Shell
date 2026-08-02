@@ -151,6 +151,28 @@ function createMockRegistry() {
     undoable: false,
   });
 
+  // Regresion (ronda 54 del audit, MEDIUM-HIGH): a diferencia de
+  // users:setProfile arriba (que usa el shape LEGACY type:'enum'+
+  // enumValues y constraints como objeto, ambos preservados por
+  // compatibilidad), este comando usa el UNICO shape que el
+  // command-builder publico realmente produce — type:'enum(...)' y
+  // constraints como STRING ('min:0,max:150') — para probar que
+  // convertType() valida ese formato real, no solo el legacy.
+  commands.set('users:setProfileBuilderShape', {
+    namespace: 'users',
+    name: 'setProfileBuilderShape',
+    version: '1.0.0',
+    description: 'Igual que setProfile, pero con el shape real que produce el command-builder publico',
+    params: [
+      { name: 'age', type: 'int', required: true, constraints: 'min:0,max:150' },
+      { name: 'role', type: 'enum(admin,user)', required: true },
+    ],
+    handler: async (args: any) => {
+      return { success: true, data: args };
+    },
+    undoable: false,
+  });
+
   commands.set('echo:args', {
     namespace: 'echo',
     name: 'args',
@@ -168,7 +190,13 @@ function createMockRegistry() {
       const key = `${namespace}:${name}`;
       const cmd = commands.get(key);
       if (!cmd) return { ok: false, error: { code: 'COMMAND_NOT_FOUND', message: `Command ${namespace}:${name} not found` } };
-      return { ok: true, value: { definition: cmd, handler: cmd.handler, registeredAt: new Date().toISOString() } };
+      // definition must NOT include the handler function — the real
+      // CommandRegistry keeps them as separate fields (ver
+      // command-registry/types.ts's RegisteredCommand), and Core's
+      // describe builtin now does structuredClone(definition) (ronda 54
+      // del audit), which throws on a non-cloneable value like a function.
+      const { handler, ...definition } = cmd;
+      return { ok: true, value: { definition, handler, registeredAt: new Date().toISOString() } };
     },
     resolve(namespace: string, name: string) {
       return this.get(namespace, name);
@@ -873,6 +901,43 @@ describe('Core', () => {
     });
   });
 
+  /**
+   * Regresion (ronda 54 del audit, MEDIUM-HIGH): convertType() comparaba
+   * `def.type === 'array'`/`'enum'` (tipos literales que ningun param
+   * declarado via el command-builder PUBLICO tiene — ese builder solo
+   * produce 'array<T>'/'enum(a,b,c)') y leia `def.constraints.min` etc.
+   * directamente sobre un STRING ('min:0,max:100', el unico formato que
+   * ParamBuilder.constraints() produce) — un string no tiene esas
+   * propiedades. Ambas ramas nunca disparaban para NINGUN param real
+   * declarado via el builder publico. Los tests de arriba (describe
+   * 'Conversion de tipos y constraints de params') solo prueban el shape
+   * LEGACY (type:'enum'+enumValues, constraints como objeto) — que
+   * siempre funciono y sigue funcionando por compatibilidad. Este bloque
+   * prueba especificamente el shape REAL que produce el builder publico.
+   */
+  describe('Conversion de tipos y constraints — shape real del command-builder', () => {
+    it('valida constraints min/max declaradas como STRING (min:0,max:150)', async () => {
+      const ok = await core.exec('users:setProfileBuilderShape --age 30 --role admin');
+      expect(ok.code).toBe(0);
+      expect(ok.data.age).toBe(30);
+
+      const tooHigh = await core.exec('users:setProfileBuilderShape --age 200 --role admin');
+      expect(tooHigh.code).toBe(1);
+      expect(tooHigh.error).toContain('constraint: max');
+    });
+
+    it("valida un param type:'enum(admin,user)' (el formato que produce .param(name, 'enum(...)'))", async () => {
+      const ok = await core.exec('users:setProfileBuilderShape --age 30 --role user');
+      expect(ok.code).toBe(0);
+      expect(ok.data.role).toBe('user');
+
+      const rejected = await core.exec('users:setProfileBuilderShape --age 30 --role superadmin');
+      expect(rejected.code).toBe(1);
+      expect(rejected.error).toContain('must be one of');
+      expect(rejected.error).toContain('admin');
+    });
+  });
+
   // ----------------------------------------------------------
   // Seccion 6: Batch
   // ----------------------------------------------------------
@@ -1101,6 +1166,23 @@ describe('Core', () => {
 
       expect(response.code).toBe(2);
       expect(response.error).toBeDefined();
+    });
+
+    /**
+     * Regresion (ronda 54 del audit, MEDIUM): registry.get() devuelve la
+     * definicion VIVA guardada en el registry (solo register() clona) —
+     * sin structuredClone() aca, un caller embebido en el mismo proceso
+     * que mutara response.data (p.ej. requiredPermissions) corrompia el
+     * registry para siempre, para cualquier resolucion futura de ese
+     * mismo comando, por cualquier sesion.
+     */
+    it('T24b: mutar la definicion devuelta por describe no corrompe el registry', async () => {
+      const response = await core.exec('describe users:create');
+      response.data.params.push({ name: 'injected', type: 'string' });
+
+      const response2 = await core.exec('describe users:create');
+      expect(response2.data.params).toHaveLength(response.data.params.length - 1);
+      expect(response2.data.params.some((p: any) => p.name === 'injected')).toBe(false);
     });
   });
 
