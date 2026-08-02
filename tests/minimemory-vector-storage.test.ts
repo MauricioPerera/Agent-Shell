@@ -1109,9 +1109,14 @@ describe('MiniMemoryVectorStorage', () => {
     });
 
     /**
-     * @test Search maneja distance undefined como 0
+     * Regresion (ronda 40 del audit, finding B): `raw.distance || 0`
+     * trataba distance undefined/NaN igual que una distancia genuinamente
+     * perfecta (0) — colapsando a score=1, el MEJOR match posible, en vez
+     * de excluir un resultado con dato invalido. Este test antes fijaba
+     * exactamente ese comportamiento buggy; ahora fija el corregido:
+     * distance undefined excluye el candidato, no lo asciende al top.
      */
-    it('search trata distance undefined como 0 (score = 1)', async () => {
+    it('search excluye un candidato con distance undefined (no lo trata como el mejor match)', async () => {
       getDb().search.mockReturnValueOnce([
         { id: 'cmd:test', metadata: { namespace: 'test', tags: '[]', parameters: '[]' } },
       ]);
@@ -1121,7 +1126,20 @@ describe('MiniMemoryVectorStorage', () => {
         topK: 5,
       });
 
-      expect(results[0].score).toBe(1.0);
+      expect(results).toEqual([]);
+    });
+
+    it('search excluye un candidato con distance NaN (no lo trata como el mejor match)', async () => {
+      getDb().search.mockReturnValueOnce([
+        { id: 'cmd:test', distance: NaN, metadata: { namespace: 'test', tags: '[]', parameters: '[]' } },
+      ]);
+
+      const results = await storage.search({
+        vector: createVector(768),
+        topK: 5,
+      });
+
+      expect(results).toEqual([]);
     });
   });
 });

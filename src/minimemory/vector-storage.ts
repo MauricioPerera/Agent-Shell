@@ -174,12 +174,22 @@ export class MiniMemoryVectorStorage implements VectorStorageAdapter {
     const results: VectorSearchResult[] = [];
 
     for (const raw of rawResults) {
+      // Regresion (ronda 40 del audit, finding B): `raw.distance || 0`
+      // trata NaN/undefined/null como distancia 0 (por la falsy-ness de
+      // NaN en JS) — un score NaN del binding nativo (degradado/corrupto)
+      // colapsaba a "1 - 0 = 1", el MEJOR match posible, en vez de ser
+      // excluido. Ahora una distancia invalida excluye el candidato
+      // directamente, en vez de asignarle cualquier score.
+      if (raw.distance === undefined || raw.distance === null || Number.isNaN(raw.distance)) {
+        continue;
+      }
+
       // Convert distance to similarity score (minimemory returns distance).
       // Clamped to [0,1]: the contract documents scores in that range, which
       // only holds unconditionally for cosine distance (bounded [0,2]) —
       // dot_product/euclidean distance isn't bounded the same way and can
       // otherwise push the raw "1 - distance" outside [0,1].
-      const score = Math.max(0, Math.min(1, 1 - (raw.distance || 0)));
+      const score = Math.max(0, Math.min(1, 1 - raw.distance));
 
       if (query.threshold !== undefined && score < query.threshold) {
         continue;
