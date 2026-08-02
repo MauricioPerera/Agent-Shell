@@ -190,6 +190,73 @@ class Core {
   }
 
   /**
+   * Invokes a command handler, racing it against `timeouts.executor_ms`
+   * when configured — a per-command budget separate from (and nested
+   * inside) `exec()`'s single request-wide `timeouts.global_ms`.
+   *
+   * Regresion (ronda 37 del audit): CoreConfig.timeouts.executor_ms was
+   * declared in core/types.ts but never read anywhere — Core only had the
+   * one blunt request-wide global timeout wrapping parse+resolve+every
+   * pipeline/batch step+jq+format+pagination as a single unit (`exec()`
+   * above). Executor times out EACH handler invocation individually via
+   * its own executeWithTimeout() — a single hung command in a batch/
+   * pipeline killed the ENTIRE Core request (discarding any already-
+   * succeeded results) instead of failing just that one command. Not
+   * enabled by default (undefined = no per-command cap, same as before
+   * this fix) — only wired when an operator explicitly opts in via
+   * `timeouts.executor_ms`, to avoid silently changing behavior for
+   * existing deployments that only ever relied on global_ms.
+   *
+   * Composes the per-command AbortController with the outer `signal`
+   * (Core's own request-wide one) manually rather than via `AbortSignal.
+   * any()` — that API needs Node 20.3+, and this package's `engines`
+   * field supports Node >=18.
+   */
+  private async invokeHandler(
+    handler: Function,
+    args: any,
+    input: any,
+    sessionId: string | undefined,
+    outerSignal: AbortSignal | undefined,
+    label: string,
+  ): Promise<any> {
+    const perCommandTimeout = this.config.timeouts?.executor_ms;
+    if (!perCommandTimeout) {
+      return handler(args, input, { sessionId, signal: outerSignal });
+    }
+
+    const controller = new AbortController();
+    const onOuterAbort = () => controller.abort();
+    if (outerSignal?.aborted) controller.abort();
+    outerSignal?.addEventListener('abort', onOuterAbort);
+
+    let timerId: ReturnType<typeof setTimeout>;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timerId = setTimeout(() => {
+        controller.abort();
+        reject(new Error(`${label} timed out after ${perCommandTimeout}ms`));
+      }, perCommandTimeout);
+    });
+
+    // No dedicated 'error:timeout' audit here (unlike exec()'s outer
+    // global-timeout catch) — the timeout Error thrown below propagates to
+    // each call site's own error handling, which already converts it into
+    // the normal `_error` shape and lets execInternal's generic block
+    // audit it as 'error:handler' (message still says "timed out after
+    // Xms"). A second, dedicated audit call here would double the event
+    // for the same failure.
+    try {
+      return await Promise.race([
+        Promise.resolve(handler(args, input, { sessionId, signal: controller.signal })),
+        timeoutPromise,
+      ]);
+    } finally {
+      clearTimeout(timerId!);
+      outerSignal?.removeEventListener('abort', onOuterAbort);
+    }
+  }
+
+  /**
    * Retorna el protocolo de interaccion completo (estatico).
    */
   help(): string {
@@ -272,6 +339,17 @@ class Core {
         this.cleanExpiredConfirms();
       }
 
+      // Regresion (ronda 37 del audit): executePipeline() ahora audita cada
+      // paso individualmente bajo SU PROPIO namespace:command (ver dentro
+      // de ese metodo) — el bloque generico de abajo, que etiqueta con el
+      // string COMPLETO del pipeline truncado a 100 chars, quedaria
+      // duplicando esa señal con una etiqueta mucho menos precisa (ambigua
+      // sobre CUAL paso de una cadena larga fallo/tuvo exito). Se salta
+      // SOLO el auditLogger.audit (no el recordHistory, que sigue
+      // grabando una unica entrada para el pipeline completo, igual que
+      // ya hace executeBatch con el string del batch).
+      const isPipeline = result.type === 'pipeline';
+
       // Route based on parse result type
       let data: any;
 
@@ -301,10 +379,12 @@ class Core {
         // aca (no para el resto de comandos/pipelines/batch, que no
         // tienen ningun otro punto de auditoria propio).
         if (!isConfirmResolution) {
-          // code 3 is reserved exclusively for permission/rate-limit denial
-          // across Core (see HELP_TEXT: "code 3: Permission denied / rate
-          // limit") — every other code here is a lookup/handler failure.
-          this.auditLogger?.audit(code === 3 ? 'permission:denied' : 'error:handler', { command: cmd.slice(0, 100), code, error }, sessionId);
+          if (!isPipeline) {
+            // code 3 is reserved exclusively for permission/rate-limit denial
+            // across Core (see HELP_TEXT: "code 3: Permission denied / rate
+            // limit") — every other code here is a lookup/handler failure.
+            this.auditLogger?.audit(code === 3 ? 'permission:denied' : 'error:handler', { command: cmd.slice(0, 100), code, error }, sessionId);
+          }
           this.recordHistory(cmd, code);
         }
         return this.buildResponse(code, null, error, cmd, mode, startTime);
@@ -345,7 +425,9 @@ class Core {
       // literal "confirm <token>" string.
       if (!isConfirmResolution) {
         this.recordHistory(cmd, 0);
-        this.auditLogger?.audit('command:executed', { command: cmd.slice(0, 100), duration_ms: Date.now() - startTime }, sessionId);
+        if (!isPipeline) {
+          this.auditLogger?.audit('command:executed', { command: cmd.slice(0, 100), duration_ms: Date.now() - startTime }, sessionId);
+        }
       }
       return this.buildResponse(0, data, null, cmd, mode, startTime);
     } catch (err: any) {
@@ -417,7 +499,7 @@ class Core {
 
     // Validate mode: check required params (types already checked above)
     if (flags.validate) {
-      return this.validateCommand(registeredCmd, args);
+      return this.validateCommand(registeredCmd, args, typedArgs);
     }
 
     // Dry-run mode: return simulated data without calling handler
@@ -450,9 +532,15 @@ class Core {
     // convention — on failure, propagate it as the same _error shape the caller
     // (execInternal) already checks for lookup/permission failures, instead of
     // silently discarding `error` and reporting success with null data.
-    // The 3rd arg unifies what Core and Executor each used to pass ad hoc
-    // (see src/shared/handler-context.ts).
-    const result = await registeredCmd.handler(typedArgs, null, { sessionId, signal });
+    // invokeHandler() races it against timeouts.executor_ms when configured
+    // (ronda 37 del audit) — a timeout throws, caught below and converted to
+    // the same _error shape a business-logic failure already uses.
+    let result: any;
+    try {
+      result = await this.invokeHandler(registeredCmd.handler, typedArgs, null, sessionId, signal, `${namespace}:${command}`);
+    } catch (err: any) {
+      return { _error: { code: 1, error: err.message || `Command failed: ${namespace}:${command}` } };
+    }
     if (result && typeof result === 'object' && result.success === false) {
       return { _error: { code: 1, error: result.error || `Command failed: ${namespace}:${command}` } };
     }
@@ -494,9 +582,22 @@ class Core {
       return { _error: { code: 2, error: 'Invalid or expired confirmation token' } };
     }
     const pending = resolved.payload;
-
-    const result = await pending.registeredCmd.handler(pending.handlerArgs, null, { sessionId: pending.sessionId, signal });
     const resolvedCommand = `${pending.namespace}:${pending.command}`;
+
+    // invokeHandler() races the handler against timeouts.executor_ms when
+    // configured (ronda 37 del audit) — a timeout throws, caught below and
+    // funneled into the SAME audited error:handler + _error path the
+    // result.success===false branch already uses, since this method (unlike
+    // executeCommand/executePipeline) owns its own audit entirely and can't
+    // rely on execInternal's generic block, which skips confirm resolutions.
+    let result: any;
+    try {
+      result = await this.invokeHandler(pending.registeredCmd.handler, pending.handlerArgs, null, pending.sessionId, signal, resolvedCommand);
+    } catch (err: any) {
+      const timeoutError = err.message || `Command failed: ${resolvedCommand}`;
+      this.auditLogger?.audit('error:handler', { command: resolvedCommand, error: timeoutError }, pending.sessionId);
+      return { _error: { code: 1, error: timeoutError } };
+    }
     if (result && typeof result === 'object' && result.success === false) {
       const failError = result.error || `Command failed: ${resolvedCommand}`;
       // The generic execInternal post-processing skips its own audit for
@@ -769,7 +870,20 @@ class Core {
     return { ok: true, args: result };
   }
 
-  private validateCommand(registeredCmd: any, args: any): any {
+  /**
+   * `resolvedArgs` is the already type-converted/constraint-checked args
+   * object (executeCommand()/executePipeline() compute this moments
+   * earlier via convertArgTypes() and previously discarded it here) —
+   * Executor's equivalent (E_validate branch) includes it, matching
+   * contracts/executor.md's documented {valid, command, resolvedArgs}
+   * shape. Regresion (ronda 37 del audit): Core's version omitted it
+   * entirely, so a pipeline step under --validate fed the NEXT step a
+   * {valid, command} object with no fields to resolve $input.field
+   * against — e.g. `users:get --id 1 --validate >> orders:list --user-id
+   * $input.id` left $input.id unresolved under Core (Executor resolves it
+   * via resolvedArgs.id).
+   */
+  private validateCommand(registeredCmd: any, args: any, resolvedArgs: Record<string, any>): any {
     const errors: string[] = [];
 
     if (registeredCmd.params) {
@@ -784,7 +898,7 @@ class Core {
       return { _error: { code: 1, error: errors.join('; ') } };
     }
 
-    return { valid: true, command: `${registeredCmd.namespace}:${registeredCmd.name}` };
+    return { valid: true, command: `${registeredCmd.namespace}:${registeredCmd.name}`, resolvedArgs };
   }
 
   /**
@@ -833,6 +947,19 @@ class Core {
     let previousData: any = null;
     let isFirstStep = true;
 
+    // Regresion (ronda 37 del audit): executePipeline() nunca llamaba
+    // this.auditLogger directamente — cada paso exitoso/fallido caia al
+    // bloque generico de execInternal, que audita UN SOLO evento etiquetado
+    // con el string COMPLETO del pipeline (truncado a 100 chars), ambiguo
+    // sobre cual paso especifico fallo/tuvo exito en una cadena larga.
+    // executeBatch() ya audita cada item individualmente desde la ronda 28
+    // — este metodo ahora hace lo mismo por paso, bajo su propio
+    // namespace:command, y execInternal salta su propio audit generico
+    // para pipelines (ver isPipeline ahi) para no duplicar la señal.
+    const auditStep = (type: 'permission:denied' | 'error:handler' | 'command:executed', stepLabel: string, extra?: Record<string, any>) => {
+      this.auditLogger?.audit(type, { command: stepLabel, ...extra }, sessionId);
+    };
+
     for (const cmd of commands) {
       const { namespace, command, args } = cmd;
       const flags = globalDryRun ? { ...cmd.flags, dryRun: true } : cmd.flags;
@@ -841,14 +968,18 @@ class Core {
         return { _error: { code: 1, error: `Pipeline command must have namespace` } };
       }
 
+      const stepLabel = `${namespace}:${command}`;
+
       const lookupResult = this.registry.get(namespace, command);
       if (!lookupResult.ok) {
+        auditStep('error:handler', stepLabel, { code: 2, error: `Command not found: ${namespace}:${command}` });
         return { _error: { code: 2, error: `Command not found: ${namespace}:${command}` } };
       }
       const registeredCmd = { ...lookupResult.value.definition, handler: lookupResult.value.handler };
 
       // Check agent permissions for each pipeline step
       if (!isVisibleToAgent(registeredCmd.requiredPermissions, this.agentPermissions)) {
+        auditStep('permission:denied', stepLabel, { code: 3, error: `Permission denied at pipeline step: ${namespace}:${command}` });
         return { _error: { code: 3, error: `Permission denied at pipeline step: ${namespace}:${command}` } };
       }
 
@@ -866,7 +997,9 @@ class Core {
       // single-command path (executeCommand), applied per pipeline step.
       const typeCheck = registeredCmd.params ? this.convertArgTypes(handlerArgs, registeredCmd.params) : { ok: true as const, args: handlerArgs };
       if (!typeCheck.ok) {
-        return { _error: { code: 1, error: `Pipeline failed at ${namespace}:${command}: ${typeCheck.error}` } };
+        const typeErrMsg = `Pipeline failed at ${namespace}:${command}: ${typeCheck.error}`;
+        auditStep('error:handler', stepLabel, { code: 1, error: typeErrMsg });
+        return { _error: { code: 1, error: typeErrMsg } };
       }
 
       // Validate mode — same check executeCommand() applies, previously
@@ -877,8 +1010,12 @@ class Core {
       // command} shape as the next step's $input, mirroring Executor's
       // identical continue-through-validate pipeline semantics.
       if (flags.validate) {
-        previousData = this.validateCommand(registeredCmd, { named: namedArgs, positional: args.positional });
-        if (previousData && previousData._error) return previousData;
+        previousData = this.validateCommand(registeredCmd, { named: namedArgs, positional: args.positional }, typeCheck.args);
+        if (previousData && previousData._error) {
+          auditStep('error:handler', stepLabel, { code: previousData._error.code, error: previousData._error.error });
+          return previousData;
+        }
+        auditStep('command:executed', stepLabel, { mode: 'validate' });
         isFirstStep = false;
         continue;
       }
@@ -892,6 +1029,7 @@ class Core {
       // still ran its handler for real.
       if (flags.dryRun) {
         previousData = { dryRun: true, command: `${namespace}:${command}`, args: typeCheck.args };
+        auditStep('command:executed', stepLabel, { mode: 'dry-run' });
         isFirstStep = false;
         continue;
       }
@@ -911,12 +1049,27 @@ class Core {
         return this.requestConfirmation(namespace, command, registeredCmd, typeCheck.args, sessionId);
       }
 
-      const result = await registeredCmd.handler(typeCheck.args, previousData, { sessionId, signal });
+      // invokeHandler() races the handler against timeouts.executor_ms when
+      // configured (ronda 37 del audit) — a timeout throws, caught below
+      // and funneled into the same per-step audit + _error path a normal
+      // handler failure already uses, so ONE hung step no longer kills the
+      // whole pipeline's already-succeeded prior steps' results silently.
+      let result: any;
+      try {
+        result = await this.invokeHandler(registeredCmd.handler, typeCheck.args, previousData, sessionId, signal, stepLabel);
+      } catch (err: any) {
+        const timeoutErrMsg = err.message || `Pipeline failed at ${namespace}:${command}`;
+        auditStep('error:handler', stepLabel, { code: 1, error: timeoutErrMsg });
+        return { _error: { code: 1, error: timeoutErrMsg } };
+      }
       if (!result.success) {
         const detail = result.error ? `: ${result.error}` : '';
-        return { _error: { code: 1, error: `Pipeline failed at ${namespace}:${command}${detail}` } };
+        const handlerErrMsg = `Pipeline failed at ${namespace}:${command}${detail}`;
+        auditStep('error:handler', stepLabel, { code: 1, error: handlerErrMsg });
+        return { _error: { code: 1, error: handlerErrMsg } };
       }
 
+      auditStep('command:executed', stepLabel);
       previousData = result.data;
       isFirstStep = false;
     }

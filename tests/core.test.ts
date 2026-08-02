@@ -387,6 +387,26 @@ describe('Core', () => {
     });
 
     /**
+     * Regresion (ronda 37 del audit): validateCommand() devolvia solo
+     * {valid, command}, descartando los args ya tipo-convertidos que
+     * executeCommand() habia calculado momentos antes — Executor SI incluye
+     * resolvedArgs (contracts/executor.md), y Core lo omitia por completo.
+     */
+    it('T06m: exec con --validate incluye resolvedArgs con los args tipo-convertidos', async () => {
+      const response = await core.exec('users:setProfile --age 30 --role admin --validate');
+
+      expect(response.code).toBe(0);
+      expect(response.data).toEqual({
+        valid: true,
+        command: 'users:setProfile',
+        resolvedArgs: { age: 30, role: 'admin' },
+      });
+      // age es type:'int' — confirma que resolvedArgs trae el valor YA
+      // convertido (numero), no el string crudo '30' que tipeo el caller.
+      expect(typeof response.data.resolvedArgs.age).toBe('number');
+    });
+
+    /**
      * Regresion (ronda 31 del audit): convertArgTypes() solo chequeaba
      * presencia de params requeridos bajo --validate (validateCommand()) —
      * un caller normal, SIN --validate, que omitia un param requerido
@@ -711,7 +731,11 @@ describe('Core', () => {
       expect(response.code).toBe(0);
       // Si el handler real hubiera corrido, retornaria { id: 42, name:
       // 'Ana', email: 'a@b.com' } en vez de la forma de validacion.
-      expect(response.data).toEqual({ valid: true, command: 'users:create' });
+      expect(response.data).toEqual({
+        valid: true,
+        command: 'users:create',
+        resolvedArgs: { name: 'Ana', email: 'a@b.com' },
+      });
     });
 
     it('un param requerido faltante bajo --validate en un paso de pipeline aborta con code=1', async () => {
@@ -719,6 +743,22 @@ describe('Core', () => {
 
       expect(response.code).toBe(1);
       expect(response.error).toContain('email');
+    });
+
+    /**
+     * Nota (ronda 37 del audit): resolveInputRefs() solo hace lookup PLANO
+     * de un nivel ($input.<field> = previousData[field]) — ni Core ni
+     * Executor soportan rutas anidadas como $input.resolvedArgs.id. Como
+     * el resolvedArgs agregado arriba queda ANIDADO dentro de {valid,
+     * command, resolvedArgs}, $input.id NO resuelve contra el resultado de
+     * un paso --validate en NINGUNO de los dos engines — mismo
+     * comportamiento en ambos, no una regresion nueva de este fix.
+     */
+    it('$input.field NO resuelve contra un paso --validate anterior (resolvedArgs queda anidado, no plano) — mismo limite que Executor', async () => {
+      const response = await core.exec('users:get --id 1 --validate >> echo:args --user-id $input.id');
+
+      expect(response.code).toBe(0);
+      expect(response.data['user-id']).toBe('$input.id');
     });
   });
 
@@ -820,6 +860,43 @@ describe('Core', () => {
       expect(response.data.length).toBe(3);
       // El segundo debe tener error
       expect(response.data[1].code).not.toBe(0);
+    });
+
+    /**
+     * Regresion (ronda 37 del audit): Core solo tenia UN timeout global
+     * envolviendo el request COMPLETO (parse + cada paso de pipeline/batch
+     * + jq + format + pagination) — un comando colgado dentro de un batch
+     * mataba TODO el request (descartando resultados ya exitosos de otros
+     * items) recien a los timeouts.global_ms, en vez de fallar SOLO ese
+     * comando de inmediato. CoreConfig.timeouts.executor_ms estaba
+     * declarado pero jamas leido en ningun lado. Ahora se cablea (opt-in,
+     * sin default): con executor_ms configurado, un item colgado en un
+     * batch falla individualmente y el batch sigue con los items
+     * restantes, en vez de que TODO el request espere hasta global_ms.
+     */
+    it('T10b: timeouts.executor_ms hace fallar SOLO el item colgado de un batch, sin esperar global_ms', async () => {
+      const hangRegistry = {
+        get(namespace: string, name: string) {
+          if (namespace === 'users' && name === 'list') {
+            return { ok: true, value: { definition: { namespace: 'users', name: 'list', params: [] }, handler: async () => ({ success: true, data: [1] }) } };
+          }
+          if (namespace === 'slow' && name === 'handler') {
+            return { ok: true, value: { definition: { namespace: 'slow', name: 'handler', params: [] }, handler: () => new Promise(() => {}) } };
+          }
+          return { ok: false, error: { code: 'NOT_FOUND', message: 'not found' } };
+        },
+      };
+      const timeoutCore = new Core({ registry: hangRegistry as any, timeouts: { executor_ms: 30, global_ms: 60_000 } });
+
+      const response = await timeoutCore.exec('batch [slow:handler, users:list]');
+
+      expect(response.code).toBe(1);
+      expect(response.data[0].code).toBe(1);
+      expect(response.data[0].error).toContain('timed out after 30ms');
+      // El segundo item corrio y tuvo exito — la falla del primero no tumbo
+      // el request entero (que es exactamente lo que pasaba antes de este
+      // fix, con el hang solo detenido a los global_ms).
+      expect(response.data[1].code).toBe(0);
     });
   });
 

@@ -344,4 +344,46 @@ describe('Core + AuditLogger', () => {
     expect(failed[0].data.command).toBe('users:delete');
     expect(failed[0].sessionId).toBe('session-L');
   });
+
+  /**
+   * Regresion (ronda 37 del audit): executePipeline() nunca llamaba
+   * auditLogger directamente — cada paso caia al bloque generico de
+   * execInternal, que audita UN SOLO evento etiquetado con el string
+   * COMPLETO del pipeline (ambiguo sobre cual paso especifico fallo/tuvo
+   * exito). executeBatch() ya audita cada item individualmente desde la
+   * ronda 28 (ver AU11); este test fija el mismo comportamiento para
+   * pipelines.
+   */
+  it('AU16: pipeline audita cada paso individualmente (command:executed y error:handler), bajo SU PROPIO namespace:command', async () => {
+    const auditLogger = new AuditLogger('default');
+    const events = collectEvents(auditLogger);
+    const core = new Core({ registry: createMockRegistry() as any, auditLogger });
+
+    await core.exec('users:list >> users:fail', 'session-M');
+
+    const executed = events.find(e => e.type === 'command:executed' && e.data.command === 'users:list');
+    const failed = events.find(e => e.type === 'error:handler' && e.data.command === 'users:fail');
+    expect(executed).toBeDefined();
+    expect(executed.sessionId).toBe('session-M');
+    expect(failed).toBeDefined();
+    expect(failed.sessionId).toBe('session-M');
+  });
+
+  /**
+   * Misma regresion que AU16: confirma que el bloque generico de
+   * execInternal NO duplica la señal con un evento adicional etiquetado
+   * con el string completo del pipeline ("users:list >> users:fail") —
+   * solo deben existir los 2 eventos por-paso de AU16, nada mas.
+   */
+  it('AU17: pipeline NO genera un evento generico adicional etiquetado con el string completo del pipeline', async () => {
+    const auditLogger = new AuditLogger('default');
+    const events = collectEvents(auditLogger);
+    const core = new Core({ registry: createMockRegistry() as any, auditLogger });
+
+    await core.exec('users:list >> users:fail', 'session-N');
+
+    const genericPipelineEvent = events.find(e => typeof e.data?.command === 'string' && e.data.command.includes('>>'));
+    expect(genericPipelineEvent).toBeUndefined();
+    expect(events.filter(e => e.type === 'command:executed' || e.type === 'error:handler')).toHaveLength(2);
+  });
 });
