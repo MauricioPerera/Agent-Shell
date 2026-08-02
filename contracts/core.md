@@ -543,7 +543,7 @@ FilterError {
 
 - **Tamano maximo de cmd**: 4096 caracteres (proteccion contra input excesivo)
 - **Profundidad maxima de pipe**: 10 comandos encadenados
-- **Tamano maximo de batch**: 50 comandos por batch
+- **Tamano maximo de batch**: 20 comandos por batch (implementado como `maxBatchSize` hardcodeado en `executeBatch()`, no configurable — coincide con el default de `ExecutorConfig.maxBatchSize`, aunque Core no lo expone via config. Corregido ronda 37 del audit: este contrato decia 50, desalineado del codigo real desde siempre)
 - **Tamano maximo de Response.data**: 1MB (si excede, paginar)
 - **Timeout global por request**: 30 segundos (suma de todos los subsistemas)
 - **Rate limit default**: 120 requests/minuto, burst de 20
@@ -718,7 +718,7 @@ Agente llama: cli_exec("users:create --name Juan --email j@t.com --dry-run | .id
 - Rate limiting con sliding window + burst control (120 req/min, burst 20/s configurable)
 - Timeout global de 30s por request (configurable via `timeouts.global_ms`)
 - Validacion de pipeline depth (max 10 comandos)
-- Validacion de batch size (max 50 comandos)
+- Validacion de batch size (max 20 comandos, hardcodeado — ver seccion 6 arriba)
 - CoreConfig expandido con `timeouts`, `rateLimit`, `logging`, `defaults` sub-objects
 - LogEntry interface y CoreLogger inline (INFO/WARN/ERROR)
 - Logging: INFO al ejecutar, WARN si duration > 5s, ERROR en fallos
