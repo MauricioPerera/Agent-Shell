@@ -15,6 +15,7 @@ import type { SkillEntry } from './scaffold.js';
 import type { ShellAdapter } from '../just-bash/types.js';
 import { NativeShellAdapter } from '../just-bash/adapter.js';
 import { createPathJail } from '../security/path-jail.js';
+import { maskSecrets } from '../security/secret-patterns.js';
 import { resolve, isAbsolute } from 'node:path';
 
 // ---------------------------------------------------------------------------
@@ -115,8 +116,18 @@ export class CronScheduler {
   }
 
   list(): Array<{ name: string; command: string; interval: string; runCount: number; createdAt: string }> {
+    // Regresion (ronda 39 del audit, HIGH): expuesto sin masquear a
+    // CUALQUIER sesion con solo cron:read (cross-session — CronScheduler
+    // es una unica instancia compartida por todas las sesiones del
+    // proceso), igual que el finding gemelo en ProcessManager.list().
+    // A diferencia de ese caso, aca NO se puede masquear en el momento
+    // de guardar: executeTask() re-lee task.command en CADA tick para
+    // efectivamente ejecutarlo (linea ~167) — masquear el valor guardado
+    // rompería la tarea programada (ejecutaria el placeholder redactado en
+    // vez del comando real). Se enmascara aca, solo en la lectura de
+    // salida, dejando task.command intacto para la ejecucion real.
     return Array.from(this.tasks.values()).map(t => ({
-      name: t.name, command: t.command, interval: t.interval,
+      name: t.name, command: maskSecrets(t.command), interval: t.interval,
       runCount: t.runCount, createdAt: t.createdAt,
     }));
   }

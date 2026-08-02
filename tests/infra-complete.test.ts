@@ -581,6 +581,24 @@ describe('Cron Skills', () => {
     expect(res.data.count).toBe(2);
   });
 
+  /**
+   * Regresion (ronda 39 del audit, HIGH): mismo finding que PM02b, en el
+   * gemelo de ProcessManager — cron:list() exponia el command guardado sin
+   * masquear a cualquier sesion con solo cron:read. A diferencia de
+   * ProcessManager, aca el masking tiene que pasar en la LECTURA (list()),
+   * no al guardar: executeTask() re-lee task.command en cada tick para
+   * ejecutarlo de verdad.
+   */
+  it('CR02b: cron:list enmascara valores con forma de secreto en el command guardado', async () => {
+    const schedule = findHandler(cmds, 'cron', 'schedule');
+    await schedule({ name: 'leaky', command: 'curl --auth "Bearer abcdefghijklmnopqrstuvwxyz1234567890"', interval: '1m' });
+
+    const list = findHandler(cmds, 'cron', 'list');
+    const res = await list({});
+    expect(res.data.tasks[0].command).toContain('Bearer [REDACTED]');
+    expect(res.data.tasks[0].command).not.toContain('abcdefghijklmnopqrstuvwxyz1234567890');
+  });
+
   it('CR03: cron:cancel removes task', async () => {
     const schedule = findHandler(cmds, 'cron', 'schedule');
     await schedule({ name: 'temp', command: 'echo temp', interval: '10s' });
@@ -868,6 +886,24 @@ describe('Cron Sandbox Adapter Injection', () => {
     expect(histRes2.data.count).toBe(2);
     expect(histRes2.data.history[1].exitCode).toBe(0);
   });
+
+  /**
+   * Complementa CR02b: el masking de cron:list() (ronda 39 del audit) es
+   * SOLO en la lectura — confirma que executeTask() sigue ejecutando el
+   * comando REAL (sin enmascarar) via el adapter, no el placeholder
+   * redactado que ahora ve cron:list().
+   */
+  it('CR13: la ejecucion real de una tarea sigue usando el comando SIN enmascarar, aunque cron:list() lo muestre redactado', async () => {
+    const schedule = findHandler(cmds, 'cron', 'schedule');
+    await schedule({ name: 'real-exec', command: 'curl --auth "Bearer abcdefghijklmnopqrstuvwxyz1234567890"', interval: '1s' });
+
+    const list = findHandler(cmds, 'cron', 'list');
+    const listRes = await list({});
+    expect(listRes.data.tasks[0].command).toContain('[REDACTED]');
+
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(execMock).toHaveBeenCalledWith('curl --auth "Bearer abcdefghijklmnopqrstuvwxyz1234567890"', { cwd: undefined, timeout: 60_000 });
+  });
 });
 
 // ===========================================================================
@@ -1098,6 +1134,24 @@ describe('Process Manager Skills', () => {
     expect(res.data.count).toBe(1);
     expect(res.data.processes[0].name).toBe('proc1');
     expect(res.data.processes[0].running).toBe(true);
+  });
+
+  /**
+   * Regresion (ronda 39 del audit, HIGH): ManagedProcess.command guardaba
+   * el string crudo, expuesto sin masquear via process:list() a CUALQUIER
+   * sesion con solo process:read — cross-session, ya que ProcessManager es
+   * una unica instancia compartida por todo el proceso.
+   */
+  it('PM02b: process:list enmascara valores con forma de secreto en el command guardado', async () => {
+    const spawn = findHandler(cmds, 'process', 'spawn');
+    const isWindows = process.platform === 'win32';
+    const base = isWindows ? 'ping -n 10 127.0.0.1' : 'sleep 10';
+    await spawn({ name: 'leaky', command: `${base} --auth "Bearer abcdefghijklmnopqrstuvwxyz1234567890"` });
+
+    const list = findHandler(cmds, 'process', 'list');
+    const res = await list({});
+    expect(res.data.processes[0].command).toContain('Bearer [REDACTED]');
+    expect(res.data.processes[0].command).not.toContain('abcdefghijklmnopqrstuvwxyz1234567890');
   });
 
   it('PM03: process:kill stops a process', async () => {

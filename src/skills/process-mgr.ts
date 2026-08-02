@@ -8,7 +8,7 @@ import { command } from '../command-builder/index.js';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { resolve, isAbsolute } from 'node:path';
 import type { SkillEntry } from './scaffold.js';
-import { filterSensitiveEnv } from '../security/secret-patterns.js';
+import { filterSensitiveEnv, maskSecrets } from '../security/secret-patterns.js';
 import { createPathJail } from '../security/path-jail.js';
 
 // ---------------------------------------------------------------------------
@@ -91,7 +91,18 @@ export class ProcessManager {
     }
 
     const managed: ManagedProcess = {
-      name, command: cmd, pid: proc.pid, process: proc,
+      // Regresion (ronda 39 del audit, HIGH): ManagedProcess.command
+      // guardaba el string crudo, expuesto sin masquear via process:list()
+      // a CUALQUIER sesion con solo process:read — un permiso sin ninguna
+      // relacion con el origen de la credencial que el comando original
+      // pudiera llevar (p.ej. --command "curl -H 'Authorization: Bearer
+      // sk-XXX' ..."). ProcessManager es una unica instancia compartida
+      // por TODAS las sesiones del proceso (mismo registry, mismo Core),
+      // asi que esto persistia cross-session hasta MAX_PROCESSES=200
+      // entradas. maskSecrets() se aplica aca, sobre el valor GUARDADO
+      // (spawn() ya corrio con el `cmd` real momentos antes) — no afecta
+      // la ejecucion real, solo lo que list() expone despues.
+      name, command: maskSecrets(cmd), pid: proc.pid, process: proc,
       stdout: [], stderr: [], startedAt: new Date().toISOString(), exitCode: null,
     };
 
