@@ -138,4 +138,26 @@ describe('PendingConfirmStore', () => {
       expect(result.payload.args).toEqual({ id: 1 });
     }
   });
+
+  /**
+   * Regresion (ronda 46 del audit, HIGH): create() no tenia ningun tope de
+   * tamano — un caller que sigue pidiendo confirmaciones sin resolverlas
+   * nunca hacia crecer el map sin limite (el rateLimit que lo frenaria no
+   * esta wireado por defecto en el CLI/server shipeado). Mismo patron de
+   * MAX_SESSIONS ya usado en otros stores acotados de esta base de codigo.
+   */
+  it('T10: create() acota el tamano del store — supera el limite evict-ea el token mas viejo (FIFO)', () => {
+    const store = new PendingConfirmStore<number>(60_000);
+    const MAX_PENDING = 1000; // debe coincidir con la constante interna del modulo
+
+    const firstToken = store.create(0);
+    for (let i = 1; i < MAX_PENDING; i++) store.create(i);
+    expect(store.size).toBe(MAX_PENDING);
+
+    // Un token mas alla del limite: el mas viejo (firstToken) se evict-ea.
+    const overflowToken = store.create(MAX_PENDING);
+    expect(store.size).toBe(MAX_PENDING);
+    expect(store.resolve(firstToken)).toEqual({ status: 'not_found' });
+    expect(store.resolve(overflowToken)).toEqual({ status: 'ok', payload: MAX_PENDING });
+  });
 });

@@ -14,6 +14,17 @@
 
 import { randomUUID } from 'node:crypto';
 
+/**
+ * Bounds how many pending confirm tokens this store holds at once. Without
+ * this, a caller that keeps issuing --confirm-requiring commands without
+ * ever resolving them grows the map without limit — the rateLimit config
+ * that would throttle this isn't wired by default in the shipped CLI/
+ * server, so in practice nothing else stops it. Same evict-before-insert
+ * FIFO pattern already used for MAX_SESSIONS in WorkspaceSessionStore/
+ * SessionScopedContextStore/InMemoryStorageAdapter (ronda 46 del audit).
+ */
+const MAX_PENDING = 1000;
+
 interface StoredEntry<T> {
   payload: T;
   createdAt: number;
@@ -50,6 +61,16 @@ export class PendingConfirmStore<T> {
   /** Genera un token nuevo, guarda el payload, y lo retorna. */
   create(payload: T): string {
     const token = randomUUID();
+    // Bound the map BEFORE inserting — same reasoning as MAX_SESSIONS
+    // elsewhere in this codebase. Evicts the OLDEST pending confirm (Map
+    // iteration order is insertion order) to make room; a token evicted
+    // this way simply stops existing, same as one that expires unresolved
+    // via sweepExpired() — the caller who requested it just never manages
+    // to resolve it, same failure mode as letting the TTL lapse.
+    if (this.entries.size >= MAX_PENDING) {
+      const oldestToken = this.entries.keys().next().value;
+      if (oldestToken !== undefined) this.entries.delete(oldestToken);
+    }
     this.entries.set(token, { payload, createdAt: Date.now() });
     return token;
   }
