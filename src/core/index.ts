@@ -281,7 +281,16 @@ class Core {
 
     // Rate limit check
     if (!this.checkRateLimit()) {
-      this.auditLogger?.audit('permission:denied', { command: cmd.slice(0, 50), reason: 'rate-limit' }, sessionId);
+      // Regresion (ronda 49 del audit, HIGH): este y los demas audit()
+      // de exec()/execInternal()/executeBatch() pasaban el texto CRUDO
+      // del comando (p.ej. "secret:set --value hunter2") sin pasar por
+      // maskSecrets() — a diferencia de recordHistory(), dos lineas mas
+      // abajo en esta misma clase, que si lo hace. Cualquier listener de
+      // AuditLogger (el logger de stderr de produccion, un futuro sink
+      // persistente/SIEM) recibia el secreto en texto plano. Misma clase
+      // de fuga que la ronda 39 ya cerro para otro canal (los preview de
+      // dry-run/validate/confirm).
+      this.auditLogger?.audit('permission:denied', { command: maskSecrets(cmd.slice(0, 50)), reason: 'rate-limit' }, sessionId);
       return this.buildResponse(3, null, 'Rate limit exceeded', cmd.slice(0, 50), mode, startTime);
     }
 
@@ -297,7 +306,7 @@ class Core {
     try {
       return await this.withTimeout(this.execInternal(cmd, startTime, sessionId, controller.signal), globalTimeout, 'Request', controller);
     } catch (err: any) {
-      this.auditLogger?.audit('error:timeout', { command: cmd.slice(0, 50), timeout_ms: globalTimeout }, sessionId);
+      this.auditLogger?.audit('error:timeout', { command: maskSecrets(cmd.slice(0, 50)), timeout_ms: globalTimeout }, sessionId);
       return this.buildResponse(1, null, err.message || 'Request timed out', cmd.slice(0, 50), mode, startTime);
     }
   }
@@ -383,7 +392,7 @@ class Core {
             // code 3 is reserved exclusively for permission/rate-limit denial
             // across Core (see HELP_TEXT: "code 3: Permission denied / rate
             // limit") — every other code here is a lookup/handler failure.
-            this.auditLogger?.audit(code === 3 ? 'permission:denied' : 'error:handler', { command: cmd.slice(0, 100), code, error }, sessionId);
+            this.auditLogger?.audit(code === 3 ? 'permission:denied' : 'error:handler', { command: maskSecrets(cmd.slice(0, 100)), code, error }, sessionId);
           }
           this.recordHistory(cmd, code);
         }
@@ -426,12 +435,12 @@ class Core {
       if (!isConfirmResolution) {
         this.recordHistory(cmd, 0);
         if (!isPipeline) {
-          this.auditLogger?.audit('command:executed', { command: cmd.slice(0, 100), duration_ms: Date.now() - startTime }, sessionId);
+          this.auditLogger?.audit('command:executed', { command: maskSecrets(cmd.slice(0, 100)), duration_ms: Date.now() - startTime }, sessionId);
         }
       }
       return this.buildResponse(0, data, null, cmd, mode, startTime);
     } catch (err: any) {
-      this.auditLogger?.audit('error:handler', { command: cmd.slice(0, 100), error: err.message }, sessionId);
+      this.auditLogger?.audit('error:handler', { command: maskSecrets(cmd.slice(0, 100)), error: err.message }, sessionId);
       return this.buildResponse(1, null, err.message || 'Unknown error', cmd, mode, startTime);
     }
   }
@@ -848,9 +857,7 @@ class Core {
   }
 
   /**
-   * Runs convertType() over every param present in handlerArgs, leaving
-   * absent params untouched (Core doesn't apply param.default anywhere —
-   * a separate, pre-existing gap out of scope here).
+   * Runs convertType() over every param present in handlerArgs.
    *
    * Regresion (ronda 31 del audit): required-param presence solo se
    * chequeaba bajo --validate (validateCommand()) — un caller normal (sin
@@ -858,13 +865,24 @@ class Core {
    * con ese arg en undefined, en vez de rechazar con E_INVALID_ARGS como
    * ya hace Executor (validateArgs(), incondicional en todo modo). Ahora
    * se enforce aca tambien, no solo bajo --validate.
+   *
+   * Regresion (ronda 49 del audit, MEDIUM-HIGH): un param ausente pasaba
+   * directo a `continue` sin aplicar `def.default` — a diferencia de
+   * Executor.validateArgs(), que si lo hace (para required Y optional).
+   * Varios skills shipeados (shell-git.ts, shell-exec.ts, workspace.ts,
+   * registry-admin.ts, etc.) usan optionalParam(name, type, defaultValue)
+   * confiando en que el framework aplique ese default — sin este fix, un
+   * handler que lea directamente `args.foo` (sin su propio `?? fallback`
+   * defensivo) recibia `undefined` en vez del default declarado.
    */
   private convertArgTypes(handlerArgs: Record<string, any>, params: any[]): { ok: true; args: Record<string, any> } | { ok: false; error: string } {
     const result: Record<string, any> = { ...handlerArgs };
     for (const def of params) {
       const rawValue = handlerArgs[def.name];
       if (rawValue === undefined || rawValue === null) {
-        if (def.required) {
+        if (def.default !== undefined) {
+          result[def.name] = def.default;
+        } else if (def.required) {
           return { ok: false, error: `Missing required parameter: ${def.name}` };
         }
         continue;
@@ -1120,7 +1138,11 @@ class Core {
       // and pipeline paths (lines ~293-337 above) were silently skipped for
       // every batched command, a total audit blind spot in Core (the engine
       // cli/index.ts and server/index.ts actually construct).
-      const label = cmd.meta.rawSegment.slice(0, 100);
+      // Regresion (ronda 49 del audit, HIGH): label era el texto CRUDO del
+      // segmento del batch (p.ej. "secret:set --value hunter2"), sin pasar
+      // por maskSecrets() antes de los 3 audit() de abajo — mismo hueco que
+      // el resto de exec()/execInternal(), cerrado aca igual.
+      const label = maskSecrets(cmd.meta.rawSegment.slice(0, 100));
       try {
         const data = await this.executeCommand(cmd, sessionId, signal);
         if (data && typeof data === 'object' && '_error' in data) {

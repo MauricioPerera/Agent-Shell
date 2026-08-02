@@ -34,6 +34,16 @@ function createMockRegistry() {
     namespace: 'users', name: 'fail', version: '1.0.0', description: 'Siempre falla', params: [],
     handler: async () => ({ success: false, data: null, error: 'Something specific went wrong' }),
   });
+  commands.set('secret:set', {
+    namespace: 'secret', name: 'set', version: '1.0.0', description: 'Guarda un secreto (fixture de test)',
+    params: [{ name: 'value', type: 'string', required: false }],
+    handler: async () => ({ success: true, data: { set: true } }),
+  });
+  commands.set('secret:fail', {
+    namespace: 'secret', name: 'fail', version: '1.0.0', description: 'Siempre falla, con secreto en el args (fixture de test)',
+    params: [{ name: 'value', type: 'string', required: false }],
+    handler: async () => ({ success: false, data: null, error: 'boom' }),
+  });
 
   return {
     get(namespace: string, name: string) {
@@ -385,5 +395,154 @@ describe('Core + AuditLogger', () => {
     const genericPipelineEvent = events.find(e => typeof e.data?.command === 'string' && e.data.command.includes('>>'));
     expect(genericPipelineEvent).toBeUndefined();
     expect(events.filter(e => e.type === 'command:executed' || e.type === 'error:handler')).toHaveLength(2);
+  });
+
+  /**
+   * Regresion (ronda 49 del audit, HIGH): exec()/execInternal()/
+   * executeBatch() pasaban el texto CRUDO del comando a auditLogger.audit()
+   * sin pasar por maskSecrets(), a diferencia de recordHistory() dos lineas
+   * mas abajo en la misma clase. Un comando con un secreto inline (p.ej.
+   * "password=hunter2secret") quedaba en texto plano en cualquier listener
+   * de auditoria (el logger de stderr de produccion, un futuro sink
+   * persistente/SIEM). Estos tests cubren los 8 call sites tocados.
+   */
+  it('AU18: command:executed enmascara secretos inline en el texto del comando', async () => {
+    const auditLogger = new AuditLogger('default');
+    const events = collectEvents(auditLogger);
+    const core = new Core({ registry: createMockRegistry() as any, auditLogger });
+
+    await core.exec('secret:set --value password=hunter2secret', 'session-O');
+
+    const evt = events.find(e => e.type === 'command:executed');
+    expect(evt).toBeDefined();
+    expect(evt.data.command).not.toContain('hunter2secret');
+    expect(evt.data.command).toContain('[REDACTED:password]');
+  });
+
+  it('AU19: error:handler (falla generica) enmascara secretos inline en el texto del comando', async () => {
+    const auditLogger = new AuditLogger('default');
+    const events = collectEvents(auditLogger);
+    const core = new Core({ registry: createMockRegistry() as any, auditLogger });
+
+    await core.exec('secret:fail --value password=hunter2secret', 'session-P');
+
+    const evt = events.find(e => e.type === 'error:handler');
+    expect(evt).toBeDefined();
+    expect(evt.data.command).not.toContain('hunter2secret');
+    expect(evt.data.command).toContain('[REDACTED:password]');
+  });
+
+  it('AU20: permission:denied (rate-limit) enmascara secretos inline en el texto del comando', async () => {
+    const auditLogger = new AuditLogger('default');
+    const events = collectEvents(auditLogger);
+    const core = new Core({ registry: createMockRegistry() as any, auditLogger, rateLimit: { maxRequests: 1, windowMs: 60_000 } });
+
+    await core.exec('secret:set --value password=hunter2secret', 'session-Q');
+    await core.exec('secret:set --value password=hunter2secret', 'session-Q');
+
+    const evt = events.find(e => e.type === 'permission:denied' && e.data.reason === 'rate-limit');
+    expect(evt).toBeDefined();
+    expect(evt.data.command).not.toContain('hunter2secret');
+    expect(evt.data.command).toContain('[REDACTED:password]');
+  });
+
+  it('AU21: error:timeout enmascara secretos inline en el texto del comando', async () => {
+    const auditLogger = new AuditLogger('default');
+    const events = collectEvents(auditLogger);
+    const slowRegistry = {
+      get(namespace: string, name: string) {
+        if (namespace === 'slow' && name === 'handler') {
+          return {
+            ok: true,
+            value: {
+              definition: { namespace: 'slow', name: 'handler', params: [{ name: 'value', type: 'string', required: false }] },
+              handler: () => new Promise(() => {}), // never resolves
+            },
+          };
+        }
+        return { ok: false, error: { code: 'NOT_FOUND', message: 'not found' } };
+      },
+    };
+    const core = new Core({ registry: slowRegistry as any, auditLogger, timeouts: { global_ms: 30 } });
+
+    await core.exec('slow:handler --value password=hunter2secret', 'session-R');
+
+    const evt = events.find(e => e.type === 'error:timeout');
+    expect(evt).toBeDefined();
+    expect(evt.data.command).not.toContain('hunter2secret');
+    expect(evt.data.command).toContain('[REDACTED:password]');
+  });
+
+  it('AU22: batch[] enmascara secretos inline en el texto de cada item', async () => {
+    const auditLogger = new AuditLogger('default');
+    const events = collectEvents(auditLogger);
+    const core = new Core({ registry: createMockRegistry() as any, auditLogger });
+
+    await core.exec('batch[secret:set --value password=hunter2secret]', 'session-S');
+
+    const evt = events.find(e => e.type === 'command:executed' && e.data.command?.includes('secret:set'));
+    expect(evt).toBeDefined();
+    expect(evt.data.command).not.toContain('hunter2secret');
+    expect(evt.data.command).toContain('[REDACTED:password]');
+  });
+
+  /**
+   * Regresion (ronda 49 del audit, MEDIUM-HIGH): convertArgTypes() nunca
+   * aplicaba param.default para un param ausente — a diferencia de
+   * Executor.validateArgs(), que si lo hace (tanto para required como
+   * optional). Un handler que confiara en el default declarado por
+   * optionalParam() (patron usado en 40+ lugares en los skills shipeados)
+   * recibia undefined en vez del valor default.
+   */
+  it('AU23: convertArgTypes aplica param.default para un param optional ausente', async () => {
+    const registry = {
+      get(namespace: string, name: string) {
+        if (namespace === 'greet' && name === 'hello') {
+          return {
+            ok: true,
+            value: {
+              definition: {
+                namespace: 'greet', name: 'hello',
+                params: [{ name: 'greeting', type: 'string', required: false, default: 'hi' }],
+              },
+              handler: async (args: any) => ({ success: true, data: { greeting: args.greeting } }),
+            },
+          };
+        }
+        return { ok: false, error: { code: 'NOT_FOUND', message: 'not found' } };
+      },
+    };
+    const core = new Core({ registry: registry as any });
+
+    const res = await core.exec('greet:hello');
+
+    expect(res.code).toBe(0);
+    expect(res.data.greeting).toBe('hi');
+  });
+
+  it('AU24: convertArgTypes aplica param.default para un param required ausente (evita el error de required)', async () => {
+    const registry = {
+      get(namespace: string, name: string) {
+        if (namespace === 'greet' && name === 'hello2') {
+          return {
+            ok: true,
+            value: {
+              definition: {
+                namespace: 'greet', name: 'hello2',
+                params: [{ name: 'greeting', type: 'string', required: true, default: 'hi' }],
+              },
+              handler: async (args: any) => ({ success: true, data: { greeting: args.greeting } }),
+            },
+          };
+        }
+        return { ok: false, error: { code: 'NOT_FOUND', message: 'not found' } };
+      },
+    };
+    const core = new Core({ registry: registry as any });
+
+    const res = await core.exec('greet:hello2');
+
+    expect(res.code).toBe(0);
+    expect(res.data.greeting).toBe('hi');
   });
 });
