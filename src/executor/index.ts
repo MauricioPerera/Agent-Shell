@@ -203,7 +203,14 @@ export class Executor {
         // disclosing the RBAC permission-string vocabulary that would fix
         // it — a caller iterating denied commands could otherwise
         // reconstruct that taxonomy one denial at a time.
-        this.context.auditLogger?.audit('permission:denied', { command: fullName, required: definition.requiredPermissions });
+        // Defense-in-depth (ronda 43 del audit, HIGH): AuditLogger.audit()
+        // ya clona `data` internamente, pero pasar una copia superficial
+        // aca tambien evita depender de esa unica capa — `definition` es
+        // el objeto que devuelve CommandRegistry.resolve()/.get(), que NO
+        // clona (a diferencia de register()), asi que sin esto cualquier
+        // consumidor de este array seguiria compartiendo la referencia
+        // viva del registry.
+        this.context.auditLogger?.audit('permission:denied', { command: fullName, required: [...definition.requiredPermissions] });
         return this.errorResult(3, 'E_FORBIDDEN', `Permission denied: ${fullName}`, this.getMode(cmd.flags), fullName);
       }
     }

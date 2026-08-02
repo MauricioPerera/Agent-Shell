@@ -34,14 +34,48 @@ export class AuditLogger extends EventEmitter {
       type,
       timestamp: new Date().toISOString(),
       sessionId: sessionId ?? this.defaultSessionId,
-      data,
+      // Regresion (ronda 43 del audit, HIGH): antes se pasaba `data` tal
+      // cual — una referencia VIVA a estado interno de quien llama (p.ej.
+      // executor/index.ts pasa el `requiredPermissions` que devuelve
+      // CommandRegistry.resolve()/.get(), que NO clona a diferencia de
+      // register()). Un listener que mutara event.data podia deshabilitar
+      // permisos para el resto del proceso. Clonar aca es la unica
+      // garantia real, sin depender de que cada call site lo haga bien.
+      data: structuredClone(data),
     };
-    this.emit(type, event);
-    this.emit('*', event);
+    // Regresion (ronda 43 del audit, HIGH): this.emit(type, event) y
+    // this.emit('*', event) eran dos statements sueltos. EventEmitter no
+    // aisla listeners entre si — un throw sincronico en CUALQUIER listener
+    // de `type` (a) corta el resto de los listeners de ESE emit y (b) hace
+    // que el emit('*', ...) de abajo NUNCA se alcance, dejando ciego al
+    // listener wildcard de produccion (createAuditLoggerToStderr). La
+    // excepcion ademas escapaba sin catch hacia quien llama a audit() —
+    // ningun call site (30 en total) envuelve la llamada. safeEmit()
+    // reimplementa el despacho aislando cada listener individualmente.
+    this.safeEmit(type, event);
+    this.safeEmit('*', event);
   }
 
   /** Registra un listener para un tipo de evento o wildcard '*'. */
   onAudit(type: AuditEventType | '*', listener: AuditListener): this {
     return this.on(type, listener);
+  }
+
+  /**
+   * Invoca cada listener registrado para `type` en su propio try/catch, de
+   * forma que un listener que tira excepcion no bloquee a los demas
+   * listeners del mismo tipo, no bloquee el otro emit (type-especifico vs
+   * '*'), y no escape hacia quien llamo a audit(). AuditLogger es la propia
+   * capa de logging (no hay otra a la que delegar), asi que un listener
+   * roto se reporta a stderr en vez de desaparecer sin rastro.
+   */
+  private safeEmit(type: string, event: AuditEvent): void {
+    for (const listener of this.listeners(type)) {
+      try {
+        (listener as AuditListener)(event);
+      } catch (err) {
+        console.error(`[audit-logger] listener for '${type}' threw:`, err);
+      }
+    }
   }
 }

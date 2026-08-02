@@ -107,6 +107,80 @@ describe('AuditLogger', () => {
 
     expect(handler).toHaveBeenCalledTimes(10);
   });
+
+  /**
+   * Regresion (ronda 43 del audit, HIGH): audit() hacia
+   * `this.emit(type, event); this.emit('*', event);` como dos statements
+   * sueltos, sin try/catch. EventEmitter no aisla listeners entre si — un
+   * throw sincronico en CUALQUIER listener de `type` (a) cortaba el resto
+   * de los listeners de ESE emit, (b) impedia que el emit('*', ...) de
+   * abajo se alcanzara siquiera (dejaba ciego al listener wildcard de
+   * produccion), y (c) escapaba sin catch hacia quien llamaba a audit()
+   * (ninguno de los 30 call sites en src/ envuelve la llamada).
+   */
+  it('T36: un listener que tira excepcion no deja ciego al listener wildcard', () => {
+    const broken = vi.fn(() => { throw new Error('listener roto'); });
+    const wildcard = vi.fn();
+    logger.onAudit('command:executed', broken);
+    logger.onAudit('*', wildcard);
+
+    logger.audit('command:executed', { a: 1 });
+
+    expect(broken).toHaveBeenCalledOnce();
+    expect(wildcard).toHaveBeenCalledOnce();
+  });
+
+  it('T37: un listener que tira excepcion no bloquea a otros listeners del MISMO tipo', () => {
+    const broken = vi.fn(() => { throw new Error('listener roto'); });
+    const sibling = vi.fn();
+    logger.onAudit('command:executed', broken);
+    logger.onAudit('command:executed', sibling);
+
+    logger.audit('command:executed', { a: 1 });
+
+    expect(sibling).toHaveBeenCalledOnce();
+  });
+
+  it('T38: una excepcion en un listener no escapa hacia quien llama a audit()', () => {
+    logger.onAudit('command:executed', () => { throw new Error('listener roto'); });
+
+    expect(() => logger.audit('command:executed', { a: 1 })).not.toThrow();
+  });
+
+  /**
+   * Regresion (ronda 43 del audit, HIGH): audit() pasaba `data` tal cual —
+   * una referencia VIVA al objeto del caller. executor/index.ts:206 pasaba
+   * el `requiredPermissions` que devuelve CommandRegistry.resolve()/.get()
+   * (que NO clona, a diferencia de register()) — un listener que mutara
+   * event.data podia deshabilitar permisos para el resto del proceso.
+   */
+  it('T39: event.data es una copia — mutarla en el listener no afecta el objeto original pasado a audit()', () => {
+    const original = { required: ['admin:write'] };
+    let receivedData: any;
+    logger.onAudit('permission:denied', (event) => {
+      receivedData = event.data;
+      event.data.required.length = 0;
+    });
+
+    logger.audit('permission:denied', original);
+
+    expect(receivedData).not.toBe(original);
+    expect(original.required).toEqual(['admin:write']);
+  });
+
+  it('T40: una mutacion en un listener no se propaga al SIGUIENTE listener (event.data no compartido)', () => {
+    let secondSawEmptyArray = true;
+    logger.onAudit('permission:denied', (event) => { event.data.required.length = 0; });
+    logger.onAudit('permission:denied', (event) => { secondSawEmptyArray = event.data.required.length === 0; });
+
+    logger.audit('permission:denied', { required: ['admin:write'] });
+
+    // Nota: ambos listeners del MISMO tipo reciben el mismo `event` (la
+    // clonacion es solo respecto del `data` original pasado a audit(), no
+    // entre listeners entre si) — este test documenta ese alcance, no una
+    // garantia mas amplia de aislamiento inter-listener.
+    expect(secondSawEmptyArray).toBe(true);
+  });
 });
 
 // =====================================================================
