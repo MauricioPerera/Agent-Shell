@@ -36,8 +36,22 @@ export const DEFAULT_SECRET_PATTERNS: SecretPattern[] = [
     replacement: '[REDACTED:jwt]',
   },
   {
+    // Regresion (ronda 61 del audit — hallada por un pase de QA
+    // independiente vía pool exec, sin contexto de rondas previas,
+    // CRITICAL): el grupo `(?:[\s\S]+?-----END...KEY-----)?` era
+    // OPCIONAL — si no aparecia un END que matcheara (mismatched,
+    // truncado, o ausente), el regex igual "tenia exito" matcheando
+    // SOLO la linea BEGIN, dejando el BODY de la clave (la parte
+    // sensible) sin redactar en absoluto. Un bloque PEM deliberadamente
+    // mal formado (exactamente lo que un atacante craftea para evadir
+    // un redactor ingenuo) bypaseaba maskSecrets() por completo para el
+    // body. Ahora la alternancia intenta primero un END real (no-greedy,
+    // preserva contenido no relacionado que venga despues cuando el END
+    // SI aparece), y si eso nunca matchea en el resto del string, cae a
+    // consumir todo lo que resta (`[\s\S]*`) — preferir sobre-redactar
+    // a filtrar el secreto.
     name: 'private-key',
-    pattern: /-----BEGIN\s+(?:RSA|EC|DSA|OPENSSH|ENCRYPTED)?\s*PRIVATE\s+KEY-----(?:[\s\S]+?-----END\s+(?:RSA|EC|DSA|OPENSSH|ENCRYPTED)?\s*PRIVATE\s+KEY-----)?/g,
+    pattern: /-----BEGIN\s+(?:RSA|EC|DSA|OPENSSH|ENCRYPTED)?\s*PRIVATE\s+KEY-----(?:[\s\S]+?-----END\s+(?:RSA|EC|DSA|OPENSSH|ENCRYPTED)?\s*PRIVATE\s+KEY-----|[\s\S]*)/g,
     replacement: '[REDACTED:private-key]',
   },
   {

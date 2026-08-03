@@ -315,6 +315,55 @@ describe('Secret Masking (maskSecrets)', () => {
     expect(masked).toContain('[REDACTED:api-key]');
     expect(masked).toContain('[REDACTED:password]');
   });
+
+  /**
+   * Regresion (ronda 61 del audit, CRITICAL — hallada por un pase de QA
+   * independiente vía pool exec, sin contexto de rondas previas): el
+   * grupo que matchea el cuerpo + END de una private key era OPCIONAL —
+   * si el bloque PEM no tenia un END que matcheara (mismatched, ausente,
+   * o truncado), el regex igual "tenia exito" redactando SOLO la linea
+   * BEGIN, dejando el body real de la clave (lo sensible) filtrado en
+   * texto plano. Exactamente el tipo de input que un atacante craftea
+   * para evadir un redactor ingenuo.
+   */
+  describe('Private key redaction (defensa contra bloques PEM mal formados)', () => {
+    const KEY_BODY = 'MIIEvwIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDfakePrivateKeyBody';
+    const BEGIN = '-----BEGIN PRIVATE KEY-----';
+
+    it('T24: bloque bien formado (BEGIN + body + END matcheante) se redacta completo', () => {
+      const input = [BEGIN, KEY_BODY, '-----END PRIVATE KEY-----'].join('\n');
+      const masked = maskSecrets(input);
+      expect(masked).toBe('[REDACTED:private-key]');
+      expect(masked).not.toContain(KEY_BODY);
+    });
+
+    it('T25: END mismatched (ej. "-----END CERTIFICATE-----") no deja el body sin redactar', () => {
+      const input = [BEGIN, KEY_BODY, '-----END CERTIFICATE-----'].join('\n');
+      const masked = maskSecrets(input);
+      expect(masked).not.toContain(KEY_BODY);
+    });
+
+    it('T26: sin ningun END presente no deja el body sin redactar', () => {
+      const input = [BEGIN, KEY_BODY].join('\n');
+      const masked = maskSecrets(input);
+      expect(masked).not.toContain(KEY_BODY);
+    });
+
+    it('T27: contenido NO relacionado despues de un bloque bien formado no se sobre-redacta', () => {
+      const input = [BEGIN, KEY_BODY, '-----END PRIVATE KEY-----', 'unrelated log line after'].join('\n');
+      const masked = maskSecrets(input);
+      expect(masked).toContain('unrelated log line after');
+      expect(masked).not.toContain(KEY_BODY);
+    });
+
+    it('T28: dos bloques bien formados consecutivos se redactan ambos, sin que uno absorba al otro', () => {
+      const input = [BEGIN, KEY_BODY, '-----END PRIVATE KEY-----', BEGIN, 'OTHERBODY123', '-----END PRIVATE KEY-----'].join('\n');
+      const masked = maskSecrets(input);
+      expect(masked).not.toContain(KEY_BODY);
+      expect(masked).not.toContain('OTHERBODY123');
+      expect((masked.match(/\[REDACTED:private-key\]/g) || []).length).toBe(2);
+    });
+  });
 });
 
 // =====================================================================
