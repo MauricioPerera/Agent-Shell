@@ -19,7 +19,7 @@ import type {
   MatryoshkaStageInfo,
   SearchOptions,
 } from './types.js';
-import { cosineSimilarity } from './similarity.js';
+import { cosineSimilaritySafe } from './similarity.js';
 
 export { MatryoshkaEmbeddingAdapter, funnelSearch, truncateVector, defaultMatryoshkaConfig };
 
@@ -104,18 +104,35 @@ function funnelSearch(
     const queryTruncated = truncateVector(queryVector, dim);
     const candidatesIn = candidates.length;
 
-    // Score each candidate at this resolution. Regresion (ronda 40 del
-    // audit, finding D): cosineSimilarity() devuelve el rango crudo
-    // [-1,1] — pgvector y minimemory-HNSW clampean a [0,1] (parte del
-    // contrato documentado), pero este path no lo hacia, pudiendo
-    // devolver scores negativos para vectores opuestos. Dimension-mismatch
-    // no aplica aca: queryTruncated y candidateTruncated siempre vienen
-    // del MISMO truncateVector(dim), asi que ya tienen igual longitud por
-    // construccion — no hace falta cosineSimilaritySafe() para eso.
+    // Regresion (ronda 60 del audit, HIGH): la version anterior usaba
+    // cosineSimilarity() (la variante cruda, Math.min-truncante) con la
+    // premisa de que "queryTruncated y candidateTruncated siempre tienen
+    // igual longitud por construccion" — falso en general:
+    // truncateVector() solo trunca hacia ABAJO (linea 36: `if (dimensions
+    // >= vector.length) return vector`), asi que un candidato cuyo vector
+    // CRUDO ya es mas corto que `dim` (embedding truncado/corrupto, o
+    // reindexado con un modelo de menor dimension sin sincronizar) queda
+    // con longitud < queryTruncated.length, y cosineSimilarity() lo
+    // compara igual (Math.min silencioso) produciendo un score sin
+    // sentido en vez de excluir el candidato — exactamente el bug del
+    // finding A de la ronda 40, nunca portado a este archivo. Ademas, un
+    // componente NaN en cualquier vector (embedding degradado) se
+    // propagaba a traves de Math.max/Math.min sin limpiarse, entrando al
+    // comparator de candidates.sort() con NaN (comportamiento de sort()
+    // no especificado con NaN, puede desordenar candidatos VALIDOS antes
+    // de que el corrupto se filtre). cosineSimilaritySafe() (ya usada por
+    // VectorIndex.searchInMemory para este mismo motivo) devuelve `null`
+    // en AMBOS casos, excluyendo el candidato ANTES del sort en vez de
+    // dejarlo corromper el ranking de los demas.
+    const scored: FunnelCandidate[] = [];
     for (const c of candidates) {
       const candidateTruncated = truncateVector(c.vector, dim);
-      c.score = Math.max(0, Math.min(1, cosineSimilarity(queryTruncated, candidateTruncated)));
+      const score = cosineSimilaritySafe(queryTruncated, candidateTruncated);
+      if (score === null) continue;
+      c.score = score;
+      scored.push(c);
     }
+    candidates = scored;
 
     // Sort descending by score and keep top candidateTopK
     candidates.sort((a, b) => b.score - a.score);
@@ -133,11 +150,16 @@ function funnelSearch(
   const queryFull = truncateVector(queryVector, finalDim);
   const candidatesIn = candidates.length;
 
-  // Mismo clamp que arriba (ronda 40 del audit, finding D).
+  // Mismo motivo que en el loop de layers arriba (ronda 60 del audit, HIGH).
+  const scoredFull: FunnelCandidate[] = [];
   for (const c of candidates) {
     const candidateFull = truncateVector(c.vector, finalDim);
-    c.score = Math.max(0, Math.min(1, cosineSimilarity(queryFull, candidateFull)));
+    const score = cosineSimilaritySafe(queryFull, candidateFull);
+    if (score === null) continue;
+    c.score = score;
+    scoredFull.push(c);
   }
+  candidates = scoredFull;
 
   candidates.sort((a, b) => b.score - a.score);
 

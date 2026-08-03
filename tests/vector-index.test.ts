@@ -463,6 +463,31 @@ describe('Vector Index', () => {
       // expect(response.results).toEqual([]);
     });
 
+    /**
+     * Regresion (ronda 60 del audit, HIGH): search() antes atrapaba
+     * CUALQUIER fallo de storageAdapter.search() (outage transitorio,
+     * timeout, dimension-mismatch real) y sustituia en silencio un
+     * fallback in-memory local, sin loguear ni distinguirlo de "no hay
+     * resultados" — el agente recibia code de exito con results:[] en vez
+     * del error que contracts/vector-index.md documenta para storage
+     * no disponible. Ahora se propaga como VectorIndexError explicito,
+     * igual que un fallo de embedding (misma funcion, unas lineas arriba).
+     */
+    it('propaga un error explicito cuando storageAdapter.search() falla, en vez de degradar en silencio', async () => {
+      const brokenStorage: VectorStorageAdapter = {
+        ...createMockStorageAdapter(),
+        async search() { throw new Error('connection refused'); },
+      };
+      const brokenIndex = new VectorIndex({
+        embeddingAdapter,
+        storageAdapter: brokenStorage,
+        defaultTopK: 5,
+        defaultThreshold: 0.3,
+      });
+
+      await expect(brokenIndex.search('usuario')).rejects.toThrow(/storage unavailable/i);
+    });
+
     it('resultados estan ordenados por score descendente', async () => {
       const response = await vectorIndex.search('usuario');
 
@@ -1040,6 +1065,64 @@ describe('Vector Index', () => {
 
       const exact = truncateVector(vector, 3);
       expect(exact).toBe(vector);
+    });
+  });
+
+  // ==========================================================================
+  // funnelSearch — NaN / dimension-mismatch safety (ronda 60 del audit)
+  // ==========================================================================
+
+  describe('funnelSearch - seguridad ante NaN y dimension mismatch (ronda 60 del audit)', () => {
+    function makeMetadata(namespace: string, command: string) {
+      return { namespace, command, description: '', signature: '', parameters: [], tags: [], indexedAt: '', version: '1.0.0' };
+    }
+
+    /**
+     * Regresion (ronda 60 del audit, HIGH): funnelSearch() usaba
+     * cosineSimilarity() (la variante cruda) en vez de cosineSimilaritySafe()
+     * — un componente NaN en cualquier vector se propagaba a traves de
+     * Math.max/Math.min sin limpiarse, entrando al comparator de
+     * candidates.sort() con NaN (comportamiento no especificado, puede
+     * desordenar candidatos VALIDOS antes de que el corrupto se filtre).
+     */
+    it('M15: excluye un candidato con componente NaN en vez de propagar NaN al ranking de los demas', async () => {
+      const { funnelSearch } = await import('../src/vector-index/matryoshka.js');
+      const queryVector = Array.from({ length: 8 }, (_, i) => i * 0.1);
+      const entries: [string, { vector: number[]; metadata: any }][] = [
+        ['good:a', { vector: Array.from({ length: 8 }, (_, i) => i * 0.1), metadata: makeMetadata('good', 'a') }],
+        ['bad:nan', { vector: [NaN, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8], metadata: makeMetadata('bad', 'nan') }],
+        ['good:b', { vector: Array.from({ length: 8 }, (_, i) => (i + 1) * 0.1), metadata: makeMetadata('good', 'b') }],
+      ];
+
+      const result = funnelSearch(queryVector, entries, [{ dimensions: 4, candidateTopK: 10 }], 8, 10, 0);
+
+      expect(result.results.some(r => r.id === 'bad:nan')).toBe(false);
+      expect(result.results.every(r => Number.isFinite(r.score))).toBe(true);
+      expect(result.results.some(r => r.id === 'good:a')).toBe(true);
+      expect(result.results.some(r => r.id === 'good:b')).toBe(true);
+    });
+
+    /**
+     * Regresion (ronda 60 del audit, HIGH): truncateVector() solo trunca
+     * hacia ABAJO — un candidato cuyo vector CRUDO ya es mas corto que la
+     * dimension del layer (embedding truncado/reindexado con un modelo de
+     * menor dimension sin sincronizar) quedaba comparado igual via
+     * Math.min silencioso de cosineSimilarity(), produciendo un score sin
+     * sentido en vez de ser excluido.
+     */
+    it('M16: excluye un candidato cuyo vector crudo es mas corto que la dimension del layer', async () => {
+      const { funnelSearch } = await import('../src/vector-index/matryoshka.js');
+      const queryVector = Array.from({ length: 8 }, (_, i) => i * 0.1);
+      const entries: [string, { vector: number[]; metadata: any }][] = [
+        ['good:a', { vector: Array.from({ length: 8 }, (_, i) => i * 0.1), metadata: makeMetadata('good', 'a') }],
+        // Vector crudo de 3 dims, mas corto que la dimension del layer (4).
+        ['short:vec', { vector: [0.1, 0.2, 0.3], metadata: makeMetadata('short', 'vec') }],
+      ];
+
+      const result = funnelSearch(queryVector, entries, [{ dimensions: 4, candidateTopK: 10 }], 8, 10, 0);
+
+      expect(result.results.some(r => r.id === 'short:vec')).toBe(false);
+      expect(result.results.some(r => r.id === 'good:a')).toBe(true);
     });
   });
 });

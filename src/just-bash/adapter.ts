@@ -10,6 +10,31 @@ import type { ShellAdapter, ShellResult, ShellExecOptions, DirEntry } from './ty
 import { filterSensitiveEnv } from '../security/secret-patterns.js';
 
 /**
+ * Hard ceiling on captured stdout/stderr size, shared by both adapters.
+ * NativeShellAdapter enforces this natively via child_process's own
+ * `maxBuffer`; JustBashShellAdapter (ronda 60 del audit, HIGH) has no such
+ * option to hand to `bash.exec()` — it only gets the FULL string back once
+ * the command finishes, so this truncates what gets propagated/held
+ * afterward (the caller, audit log, response payload). It does not bound
+ * memory DURING execution inside the sandboxed interpreter itself, since
+ * that's internal to the (unvendored) just-bash package and out of reach
+ * from this wrapper.
+ */
+const MAX_EXEC_OUTPUT_BYTES = 1024 * 1024;
+
+/** Truncates `text` to at most `maxBytes` UTF-8 bytes, never mid-crash on multi-byte chars. */
+function capOutput(text: string, maxBytes: number): string {
+  if (Buffer.byteLength(text, 'utf-8') <= maxBytes) return text;
+  let cut = Math.min(text.length, maxBytes);
+  let candidate = text.slice(0, cut);
+  while (Buffer.byteLength(candidate, 'utf-8') > maxBytes && cut > 0) {
+    cut = Math.floor(cut * 0.9);
+    candidate = text.slice(0, cut);
+  }
+  return candidate + `\n[...output truncated, exceeded ${maxBytes} bytes]`;
+}
+
+/**
  * POSIX single-quote escaping: wraps `value` so a shell parses it as one
  * literal argument, regardless of embedded spaces, `;`, `&`, `|`, `$`, `` ` ``,
  * etc. Used wherever an argument is interpolated into a command string that
@@ -41,27 +66,31 @@ export class JustBashShellAdapter implements ShellAdapter {
     const execOpts: any = {};
     if (opts?.cwd) execOpts.cwd = opts.cwd;
     if (opts?.env) execOpts.env = opts.env;
-    if (opts?.timeout) {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), opts.timeout);
-      execOpts.signal = controller.signal;
-      try {
-        const result = await this.bash.exec(command, execOpts);
-        clearTimeout(timer);
-        return { stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode };
-      } catch (err: any) {
-        clearTimeout(timer);
-        if (err.name === 'AbortError') {
-          return { stdout: '', stderr: `Timeout after ${opts.timeout}ms`, exitCode: 124 };
-        }
-        return { stdout: '', stderr: err.message, exitCode: 1 };
-      }
-    }
 
+    // Regresion (ronda 60 del audit, HIGH): `if (opts?.timeout)` trataba
+    // timeout:0 (falsy en JS) como "no aplicar ningun timeout" en vez de
+    // "timeout instantaneo", saltandose el AbortController por completo —
+    // un caller pidiendo --timeout 0 corria sin limite alguno pese a
+    // MAX_EXEC_TIMEOUT_MS. clampExecTimeout() ahora garantiza un valor > 0
+    // siempre (ver su propio comentario), y el timeout se aplica de forma
+    // incondicional, no solo cuando opts.timeout es truthy.
+    const timeout = clampExecTimeout(opts?.timeout);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeout);
+    execOpts.signal = controller.signal;
     try {
       const result = await this.bash.exec(command, execOpts);
-      return { stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode };
+      clearTimeout(timer);
+      return {
+        stdout: capOutput(result.stdout, MAX_EXEC_OUTPUT_BYTES),
+        stderr: capOutput(result.stderr, MAX_EXEC_OUTPUT_BYTES),
+        exitCode: result.exitCode,
+      };
     } catch (err: any) {
+      clearTimeout(timer);
+      if (err.name === 'AbortError') {
+        return { stdout: '', stderr: `Timeout after ${timeout}ms`, exitCode: 124 };
+      }
       return { stdout: '', stderr: err.message, exitCode: 1 };
     }
   }
@@ -152,9 +181,21 @@ export class JustBashShellAdapter implements ShellAdapter {
 /** Hard ceiling on exec timeout, regardless of what the caller (an agent) requests. */
 export const MAX_EXEC_TIMEOUT_MS = 5 * 60 * 1000;
 
-/** Clamps a caller-requested timeout into [0, MAX_EXEC_TIMEOUT_MS]. Exported for direct unit testing. */
+/**
+ * Clamps a caller-requested timeout into [1, MAX_EXEC_TIMEOUT_MS]. Exported
+ * for direct unit testing.
+ *
+ * Regresion (ronda 60 del audit, HIGH): el piso era 0, no 1 — pero tanto
+ * Node's child_process.exec (`timeout: 0`) como JustBashShellAdapter.exec's
+ * previo `if (opts?.timeout)` interpretan 0 como "SIN limite", no como
+ * "timeout instantaneo". Un caller pidiendo `--timeout 0` (o cualquier
+ * valor negativo, que Math.max ya normalizaba a 0) desactivaba por
+ * completo la proteccion que esta funcion existe para garantizar. El piso
+ * en 1 asegura que el valor devuelto SIEMPRE sea > 0, sin importar el
+ * input.
+ */
 export function clampExecTimeout(requested?: number): number {
-  return Math.min(Math.max(requested ?? 30000, 0), MAX_EXEC_TIMEOUT_MS);
+  return Math.min(Math.max(requested ?? 30000, 1), MAX_EXEC_TIMEOUT_MS);
 }
 
 /**
@@ -180,7 +221,7 @@ export class NativeShellAdapter implements ShellAdapter {
       const options: any = {
         encoding: 'utf-8',
         timeout,
-        maxBuffer: 1024 * 1024,
+        maxBuffer: MAX_EXEC_OUTPUT_BYTES,
       };
       if (opts?.cwd) options.cwd = opts.cwd;
       // Never inherit process.env verbatim: shell:exec only requires the

@@ -49,7 +49,9 @@ export function cosineSimilarity(a: number[], b: number[]): number {
  *   para cada entrada vieja comparada contra una query nueva.
  * - Finding D (MEDIUM): pgvector y minimemory-HNSW clampean su score a
  *   [0,1] (documentado como parte del contrato), pero los callers de
- *   cosineSimilarity() en JS puro (VectorIndex.searchInMemory,
+ *   cosineSimilarity() en JS puro (VectorIndex.searchInMemory — removido
+ *   en la ronda 60 al pasar el fallback de storage a un error explicito
+ *   en vez de degradar en silencio, ver index.ts's search() — y
  *   createInMemoryStorage) devolvian el rango crudo [-1,1] sin clampear
  *   — dos paths similares divergiendo silenciosamente, el mismo patron
  *   de bug que este audit encuentra una y otra vez en este codebase.

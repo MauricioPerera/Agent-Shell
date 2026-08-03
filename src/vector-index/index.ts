@@ -26,7 +26,6 @@ import type {
 } from './types.js';
 import { MAX_RESULTS, VectorIndexError } from './types.js';
 import { funnelSearch } from './matryoshka.js';
-import { cosineSimilaritySafe } from './similarity.js';
 
 export { VectorIndex };
 export { PgVectorStorageAdapter } from './pgvector-storage-adapter.js';
@@ -284,27 +283,41 @@ class VectorIndex {
       candidates = funnel.results;
       matryoshkaStages = funnel.stages;
     } else {
-      // Standard path: delegate to storage adapter with in-memory fallback
+      // Standard path: delegate to storage adapter.
+      const searchQuery: import('./types.js').VectorSearchQuery = {
+        vector: queryVector,
+        topK,
+        threshold,
+        filters: {
+          namespace: options?.namespace,
+          tags: options?.tags,
+          excludeIds: options?.excludeIds,
+        },
+      };
+      // Regresion (ronda 60 del audit, HIGH): este catch antes no tenia
+      // variable de error, no logueaba nada, y sustituia en silencio
+      // this.searchInMemory() — un Map en-proceso poblado SOLO por lo que
+      // esta MISMA instancia indexo, que en una instancia recien
+      // arrancada (o una replica en un deploy escalado) puede estar vacio
+      // o muy desactualizado respecto al storage persistido/compartido
+      // real (pgvector). Cualquier fallo del storage — outage transitorio,
+      // timeout, un dimension-mismatch real — quedaba indistinguible de
+      // "no hay resultados": el agente recibia results: [] con code de
+      // exito, en vez del error "vector storage unavailable" que
+      // contracts/vector-index.md documenta para este caso exacto. Ahora
+      // se propaga como VectorIndexError, igual que el fallo de embedding
+      // unas lineas arriba (mismo patron, misma seccion de esta funcion).
+      let storageResults;
       try {
-        const searchQuery: import('./types.js').VectorSearchQuery = {
-          vector: queryVector,
-          topK,
-          threshold,
-          filters: {
-            namespace: options?.namespace,
-            tags: options?.tags,
-            excludeIds: options?.excludeIds,
-          },
-        };
-        const storageResults = await this.storageAdapter.search(searchQuery);
-        candidates = storageResults.map(r => ({
-          id: r.id,
-          score: r.score,
-          metadata: r.metadata,
-        }));
-      } catch {
-        candidates = this.searchInMemory(queryVector, topK, threshold, options);
+        storageResults = await this.storageAdapter.search(searchQuery);
+      } catch (err) {
+        throw new VectorIndexError('E004', `Vector storage unavailable: ${(err as Error).message}`);
       }
+      candidates = storageResults.map(r => ({
+        id: r.id,
+        score: r.score,
+        metadata: r.metadata,
+      }));
     }
 
     const totalIndexed = this.indexed.size;
@@ -328,39 +341,6 @@ class VectorIndex {
       model: this.embeddingAdapter.getModelId(),
       ...(matryoshkaStages ? { matryoshkaStages } : {}),
     };
-  }
-
-  /** Fallback: in-memory brute-force cosine similarity search. */
-  private searchInMemory(
-    queryVector: number[],
-    topK: number,
-    threshold: number,
-    options?: SearchOptions
-  ): { id: string; score: number; metadata: CommandMetadata }[] {
-    let candidates: { id: string; score: number; metadata: CommandMetadata }[] = [];
-
-    for (const [id, entry] of this.indexed) {
-      if (options?.namespace && entry.metadata.namespace !== options.namespace) continue;
-      if (options?.tags && options.tags.length > 0) {
-        const entryTags = entry.metadata.tags || [];
-        if (!options.tags.some(t => entryTags.includes(t))) continue;
-      }
-      if (options?.excludeIds && options.excludeIds.includes(id)) continue;
-
-      // Regresion (ronda 40 del audit, findings A+D): cosineSimilaritySafe()
-      // retorna null (candidato excluido, no comparado en absoluto) si las
-      // dimensiones no coinciden en vez de truncar en silencio al mas
-      // corto, y clampea a [0,1] — antes esta busqueda podia devolver
-      // scores negativos (vectores opuestos) o comparar vectores de
-      // distinta dimension sin ningun aviso.
-      const score = cosineSimilaritySafe(queryVector, entry.vector);
-      if (score !== null && score >= threshold) {
-        candidates.push({ id, score, metadata: entry.metadata });
-      }
-    }
-
-    candidates.sort((a, b) => b.score - a.score);
-    return candidates.slice(0, topK);
   }
 
   /**
