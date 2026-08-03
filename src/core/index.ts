@@ -902,7 +902,32 @@ class Core {
       const rawValue = handlerArgs[def.name];
       if (rawValue === undefined || rawValue === null) {
         if (def.default !== undefined) {
-          result[def.name] = def.default;
+          // Regresion (ronda 59 del audit, MEDIUM): `def.default` se
+          // aplicaba directo, SIN pasar por convertType() como cualquier
+          // valor provisto por el caller — un default mal tipado
+          // (optionalParam('limit', 'int', 'not-a-number'), o uno que
+          // viola sus propias constraints) llegaba crudo al handler cada
+          // vez que el caller omitia ese flag, derrotando en silencio la
+          // garantia de tipo que el resto del pipeline si hace cumplir.
+          // Reusar convertType aca lo trata exactamente igual que un
+          // valor supplied: coercion normal (ej. default '42' para 'int'
+          // -> 42) o error explicito si es genuinamente invalido. `null`
+          // se deja pasar sin convertir (como antes): varios skills
+          // shipeados usan `.optionalParam(name, 'json', null)` como
+          // sentinel de "sin valor" — convertType nunca ve un `null`
+          // supplied hoy (ese caso ya toma esta misma rama de "ausente"
+          // antes de llegar aca), asi que forzarlo por convertType() para
+          // tipos no-json (ej. 'int': Number(null)=0) seria un cambio de
+          // comportamiento nuevo, no una correccion de uno existente.
+          if (def.default === null) {
+            result[def.name] = null;
+          } else {
+            const convertedDefault = this.convertType(def.default, def);
+            if (convertedDefault.error) {
+              return { ok: false, error: `Invalid default for '--${def.name}': ${convertedDefault.error}` };
+            }
+            result[def.name] = convertedDefault.value;
+          }
         } else if (def.required) {
           return { ok: false, error: `Missing required parameter: ${def.name}` };
         }

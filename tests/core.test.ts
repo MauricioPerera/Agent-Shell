@@ -185,6 +185,37 @@ function createMockRegistry() {
     undoable: false,
   });
 
+  // Regresion (ronda 59 del audit, MEDIUM): default mal tipado, para
+  // verificar que Core.convertArgTypes() ahora lo pasa por convertType()
+  // en vez de aplicarlo crudo.
+  // NOTA: 'limit'/'offset' son GLOBAL FLAG NAMES que
+  // extractFlagsAndArgs() intercepta antes de que lleguen a los params del
+  // comando (van a flags.limit/flags.offset, no a args.named) — por eso
+  // estos params de test usan 'threshold', no 'limit'.
+  commands.set('test:bad-default', {
+    namespace: 'test',
+    name: 'bad-default',
+    version: '1.0.0',
+    description: 'Param con default mal tipado (para tests de convertArgTypes)',
+    params: [{ name: 'threshold', type: 'int', default: 'not-a-number' }],
+    handler: async (args: any) => {
+      return { success: true, data: args };
+    },
+    undoable: false,
+  });
+
+  commands.set('test:coerced-default', {
+    namespace: 'test',
+    name: 'coerced-default',
+    version: '1.0.0',
+    description: 'Param con default string-numerico valido (para tests de convertArgTypes)',
+    params: [{ name: 'threshold', type: 'int', default: '42' }],
+    handler: async (args: any) => {
+      return { success: true, data: args };
+    },
+    undoable: false,
+  });
+
   return {
     get(namespace: string, name: string) {
       const key = `${namespace}:${name}`;
@@ -935,6 +966,40 @@ describe('Core', () => {
       expect(rejected.code).toBe(1);
       expect(rejected.error).toContain('must be one of');
       expect(rejected.error).toContain('admin');
+    });
+  });
+
+  /**
+   * Regresion (ronda 59 del audit, MEDIUM): `def.default` se aplicaba
+   * directo en convertArgTypes(), SIN pasar por convertType() como
+   * cualquier valor provisto por el caller — un default mal tipado
+   * (optionalParam('limit', 'int', 'not-a-number')) llegaba crudo al
+   * handler cada vez que el caller omitia ese flag, derrotando en
+   * silencio la garantia de tipo que el resto del pipeline si hace
+   * cumplir para valores supplied.
+   */
+  describe('Validacion de def.default via convertType (ronda 59)', () => {
+    it('rechaza con code=1 un comando cuyo default declarado no matchea su propio type', async () => {
+      const response = await core.exec('test:bad-default');
+
+      expect(response.code).toBe(1);
+      expect(response.error).toContain('Invalid default');
+      expect(response.error).toContain('threshold');
+    });
+
+    it('un default string-numerico valido se coerciona al tipo declarado, igual que un valor supplied', async () => {
+      const response = await core.exec('test:coerced-default');
+
+      expect(response.code).toBe(0);
+      expect(response.data.threshold).toBe(42);
+      expect(typeof response.data.threshold).toBe('number');
+    });
+
+    it('un valor explicitamente provisto sigue teniendo prioridad sobre un default invalido (no se llega a convertir el default)', async () => {
+      const response = await core.exec('test:bad-default --threshold 7');
+
+      expect(response.code).toBe(0);
+      expect(response.data.threshold).toBe(7);
     });
   });
 

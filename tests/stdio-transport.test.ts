@@ -96,6 +96,41 @@ describe('StdioTransport', () => {
     expect(sentMessages()[0].error.code).toBe(-32600);
   });
 
+  /**
+   * Regresion (ronda 59 del audit, HIGH): `JSON.parse('null')` no lanza
+   * (null es JSON valido) — antes el `if (request.jsonrpc !== ...)` de
+   * abajo hacia property-access sobre `null` y tiraba un TypeError
+   * sincrono dentro de `onData -> processLine`, que nadie awaitea/catchea
+   * (llamado fire-and-forget desde el listener 'data' de stdin). Sin
+   * `process.on('unhandledRejection')` en el repo, esa excepcion tumbaba
+   * el proceso MCP entero — una sola linea "null" por stdin lo mataba.
+   * Mismo bug ya arreglado en http-transport.ts (ronda 101), ahora
+   * replicado aca.
+   */
+  it('T04b: una linea "null" (JSON valido) no revienta el transporte, responde -32600', async () => {
+    const handler = vi.fn();
+    transport.onMessage(handler);
+    transport.start();
+
+    await expect(dataListener('null\n')).resolves.toBeUndefined();
+
+    expect(handler).not.toHaveBeenCalled();
+    const [msg] = sentMessages();
+    expect(msg.error.code).toBe(-32600);
+    expect(msg.id).toBeNull();
+  });
+
+  it('T04c: una linea con un JSON primitivo no-objeto (numero) tampoco revienta el transporte', async () => {
+    const handler = vi.fn();
+    transport.onMessage(handler);
+    transport.start();
+
+    await expect(dataListener('42\n')).resolves.toBeUndefined();
+
+    expect(handler).not.toHaveBeenCalled();
+    expect(sentMessages()[0].error.code).toBe(-32600);
+  });
+
   it('T05: mensaje partido entre 2 chunks de stdin se reensambla correctamente', async () => {
     const handler = vi.fn(async (req: JsonRpcRequest): Promise<JsonRpcResponse> => ({ jsonrpc: '2.0', id: req.id!, result: 'ok' }));
     transport.onMessage(handler);

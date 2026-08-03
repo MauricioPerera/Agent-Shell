@@ -451,6 +451,58 @@ describe('Executor', () => {
     });
 
     /**
+     * @test T29b - Default mal tipado
+     * @priority Alta
+     * Regresion (ronda 59 del audit, MEDIUM): igual que en Core, el
+     * default se aplicaba directo en validateArgs() sin pasar por
+     * convertType() — un default que no matchea su propio type declarado
+     * derrotaba en silencio la garantia de tipo. Mismo fix, mismo test,
+     * aplicado a Executor.
+     */
+    it('T29b: retorna code=1 cuando el default declarado no matchea su propio type', async () => {
+      registry = createMockRegistry({
+        'test:bad-default': {
+          definition: {
+            namespace: 'test', command: 'bad-default',
+            args: [{ name: 'threshold', type: 'int', required: false, default: 'not-a-number' }],
+            description: 'Test', effect: 'Test',
+            reversible: false, requiredPermissions: [],
+          },
+          handler: async (args: any) => args,
+        },
+      });
+      executor = new Executor(registry, context);
+
+      const parsed = createSingleParseResult('test', 'bad-default', {});
+      const result = await executor.execute(parsed) as ExecutionResult;
+
+      expect(result.code).toBe(1);
+      expect(result.error!.type).toBe('E_INVALID_ARGS');
+    });
+
+    it('T29c: un default string-numerico valido se coerciona al tipo declarado', async () => {
+      registry = createMockRegistry({
+        'test:coerced-default': {
+          definition: {
+            namespace: 'test', command: 'coerced-default',
+            args: [{ name: 'threshold', type: 'int', required: false, default: '42' }],
+            description: 'Test', effect: 'Test',
+            reversible: false, requiredPermissions: [],
+          },
+          handler: async (args: any) => args,
+        },
+      });
+      executor = new Executor(registry, context);
+
+      const parsed = createSingleParseResult('test', 'coerced-default', {});
+      const result = await executor.execute(parsed) as ExecutionResult;
+
+      expect(result.code).toBe(0);
+      expect(result.data.threshold).toBe(42);
+      expect(typeof result.data.threshold).toBe('number');
+    });
+
+    /**
      * @test T30 - Constraint violado
      * @priority Media
      */

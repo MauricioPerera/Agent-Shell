@@ -204,6 +204,44 @@ describe('Command Registry', () => {
     });
 
     /**
+     * @test T06b - Validacion de param name invalido
+     * @error INVALID_DEFINITION
+     * @priority Alta
+     * Regresion (ronda 59 del audit, MEDIUM): param.name nunca se validaba
+     * en NINGUN punto del pipeline (command-builder, scaffold.ts,
+     * wizard.ts, ni aca) a diferencia de namespace/name del comando. Un
+     * param llamado "__proto__" con type 'json'/'array<>' reasigna el
+     * prototipo del objeto de args resuelto en Core/Executor en vez de
+     * setear un campo de datos (`result[def.name] = valor` sobre un
+     * objeto plano).
+     */
+    it('T06b: rechaza definicion con nombre de parametro "__proto__"', () => {
+      const def = createValidDefinition({
+        params: [{ name: '__proto__', type: 'json', required: false }],
+      });
+      const result = registry.register(def, createMockHandler());
+
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.error.code).toBe('INVALID_DEFINITION');
+      expect(result.error.message).toContain('__proto__');
+    });
+
+    it('T06c: rechaza definicion con nombre de parametro vacio o con mayusculas', () => {
+      const emptyName = registry.register(
+        createValidDefinition({ params: [{ name: '', type: 'string', required: false }] }),
+        createMockHandler()
+      );
+      expect(emptyName.ok).toBe(false);
+
+      const upperName = registry.register(
+        createValidDefinition({ params: [{ name: 'Foo', type: 'string', required: false }] }),
+        createMockHandler()
+      );
+      expect(upperName.ok).toBe(false);
+    });
+
+    /**
      * @test T21 - Handler no es modificado
      * @mustnot Modificar el handler recibido
      * @priority Alta

@@ -340,6 +340,27 @@ export class CommandRegistry {
     // Validate params
     if (def.params && Array.isArray(def.params)) {
       for (const param of def.params) {
+        // Regresion (ronda 59 del audit, MEDIUM): `param.name` nunca se
+        // validaba en NINGUN punto del pipeline (ni aca, ni en
+        // command-builder, ni en scaffold.ts/wizard.ts) a diferencia de
+        // namespace/name del comando, que ya pasan por NAME_PATTERN.
+        // Core.convertArgTypes/Executor.validateArgs arman el objeto de
+        // args resuelto con `result[def.name] = valor` sobre un objeto
+        // plano — un param llamado "__proto__" con type 'json'/'array<>'
+        // reasigna el PROTOTIPO de ese objeto en vez de setear un campo de
+        // datos (asignacion especial que el motor de JS le da a esa key
+        // exacta), corrompiendo el args object que recibe el handler.
+        // Reachable hoy via wizard:create-command / scaffold:add-command,
+        // que solo validaban param.type. NAME_PATTERN excluye "__proto__"
+        // (no arranca con letra minuscula), cerrando el hueco en el UNICO
+        // punto por el que pasa CUALQUIER definicion antes de registrarse
+        // (via builder, scaffold, wizard, o construida a mano).
+        if (!param.name || typeof param.name !== 'string' || !NAME_PATTERN.test(param.name)) {
+          return {
+            code: 'INVALID_DEFINITION',
+            message: `Invalid param name '${param.name}': must match ^[a-z][a-z0-9-]{0,49}$`,
+          };
+        }
         if (!isValidParamType(param.type)) {
           return {
             code: 'INVALID_DEFINITION',

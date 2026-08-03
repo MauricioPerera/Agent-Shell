@@ -450,16 +450,25 @@ export class Executor {
       const rawValue = named[def.name];
 
       if (rawValue === undefined || rawValue === null) {
-        if (def.required) {
-          if (def.default !== undefined) {
-            result[def.name] = def.default;
+        if (def.default !== undefined) {
+          // Regresion (ronda 59 del audit, MEDIUM): mismo fix que
+          // Core.convertArgTypes — `def.default` se aplicaba directo sin
+          // pasar por convertType(), dejando que un default mal tipado
+          // (ej. optionalParam('limit', 'int', 'not-a-number')) derrote en
+          // silencio la garantia de tipo. `null` se deja pasar sin
+          // convertir (mismo motivo que en Core: sentinel de "sin valor"
+          // usado por varios skills shipeados con type 'json').
+          if (def.default === null) {
+            result[def.name] = null;
           } else {
-            return { ok: false, message: `Missing required argument '--${def.name}'` };
+            const convertedDefault = this.convertType(def.default, def);
+            if (convertedDefault.error) {
+              return { ok: false, message: `Invalid default for '--${def.name}': ${convertedDefault.error}` };
+            }
+            result[def.name] = convertedDefault.value;
           }
-        } else {
-          if (def.default !== undefined) {
-            result[def.name] = def.default;
-          }
+        } else if (def.required) {
+          return { ok: false, message: `Missing required argument '--${def.name}'` };
         }
         continue;
       }

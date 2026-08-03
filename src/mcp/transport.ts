@@ -87,10 +87,20 @@ export class StdioTransport {
       return;
     }
 
-    if (request.jsonrpc !== '2.0' || !request.method) {
+    // Regresion (ronda 59 del audit, HIGH): `null` es JSON valido
+    // (JSON.parse('null') no lanza), asi que `request` puede legitimamente
+    // ser null aca — el acceso a propiedades de abajo tiraria un TypeError
+    // sincrono dentro de este `async onData -> processLine`. Nadie hace
+    // await/catch de esa promesa (se llama fire-and-forget desde el
+    // listener 'data' de stdin) y no hay ningun process.on('unhandledRejection')
+    // en el repo, asi que una excepcion sin capturar aca tumbaba el proceso
+    // entero: una sola linea "null" por stdin mataba el servidor MCP
+    // completo. Mismo bug ya arreglado en http-transport.ts (ronda 101)
+    // pero nunca replicado aca.
+    if (request === null || typeof request !== 'object' || request.jsonrpc !== '2.0' || !request.method) {
       this.send({
         jsonrpc: '2.0',
-        id: request.id ?? null,
+        id: (request as any)?.id ?? null,
         error: { code: -32600, message: 'Invalid Request: missing jsonrpc or method' },
       });
       return;
