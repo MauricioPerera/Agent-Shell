@@ -32,6 +32,7 @@ import {
   validatePortShape,
   validateCommonConfigFields,
   createAuditLoggerToStderr,
+  type JustBashConfigShape,
 } from '../shared/config-validation.js';
 import type { AgentProfile } from '../core/agent-profiles.js';
 import { readFileSync, existsSync } from 'node:fs';
@@ -52,6 +53,8 @@ interface ServerConfig {
   shellAdapter: 'native' | 'just-bash' | 'auto';
   jailRoot: string | null;
   rbac: RBACConfig | null;
+  /** Config-file only (no env-var override), same as rbac — see validateJustBashConfigShape. */
+  justBash: JustBashConfigShape | null;
 }
 
 /**
@@ -123,6 +126,7 @@ function loadConfig(): ServerConfig {
     shellAdapter: 'auto',
     jailRoot: null,
     rbac: null,
+    justBash: null,
   };
 
   // Try config file
@@ -150,6 +154,7 @@ function loadConfig(): ServerConfig {
       if (fileConfig.shellAdapter) config.shellAdapter = fileConfig.shellAdapter;
       if (fileConfig.jailRoot) config.jailRoot = fileConfig.jailRoot;
       if (fileConfig.rbac) config.rbac = fileConfig.rbac;
+      if (fileConfig.justBash) config.justBash = fileConfig.justBash;
     }
   }
 
@@ -207,6 +212,7 @@ async function main() {
   console.log(`  Shell adapter: ${config.shellAdapter}`);
   console.log(`  Jail root: ${config.jailRoot || 'none (unrestricted filesystem access)'}`);
   console.log(`  RBAC: ${config.rbac ? `${config.rbac.roles.length} role(s) defined` : 'none (permissions, if set, are used as-is)'}`);
+  console.log(`  just-bash restrictions: ${config.justBash ? 'configured (see agent-shell.config.json)' : 'none (sandbox package defaults apply, if just-bash is the active backend)'}`);
 
   if (!config.auth) {
     console.warn('\n  WARNING: No authentication configured. Server is open to anyone.');
@@ -252,7 +258,14 @@ async function main() {
   }
   if (config.skills.shell) {
     const before = registry.listAll().length;
-    const adapter = createShellAdapter({ prefer: config.shellAdapter });
+    // Regresion (ronda 60 del audit, MEDIUM): network/executionLimits
+    // nunca se pasaban aca — ver el comentario de
+    // validateJustBashConfigShape en shared/config-validation.ts.
+    const adapter = createShellAdapter({
+      prefer: config.shellAdapter,
+      network: config.justBash?.network,
+      executionLimits: config.justBash?.executionLimits,
+    });
     // Bound to the SAME adapter cron:schedule's handlers use, matching
     // what createCronCommands() used to construct internally.
     cronScheduler = new CronScheduler(adapter);

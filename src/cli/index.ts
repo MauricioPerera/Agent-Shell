@@ -24,6 +24,7 @@ import {
   validateCommonConfigFields,
   createAuditLoggerToStderr,
   type ShellAdapterPreference,
+  type JustBashConfigShape,
 } from '../shared/config-validation.js';
 import { AGENT_PROFILES, resolveAgentPermissions } from '../core/agent-profiles.js';
 import type { AgentProfile } from '../core/agent-profiles.js';
@@ -175,7 +176,7 @@ function loadConfigFile(): Record<string, any> {
   }
 }
 
-function buildRegistry(args: string[], agentPermissions?: string[] | null, jailRoot?: string, shellAdapterPreference?: ShellAdapterPreference): { registry: CommandRegistry; processManager: ProcessManager; cronScheduler: CronScheduler } {
+function buildRegistry(args: string[], agentPermissions?: string[] | null, jailRoot?: string, shellAdapterPreference?: ShellAdapterPreference, justBashConfig?: JustBashConfigShape): { registry: CommandRegistry; processManager: ProcessManager; cronScheduler: CronScheduler } {
   const registry = new CommandRegistry();
   // Constructed unconditionally (even if --no-shell-skills means it never
   // actually gets any spawned processes/scheduled tasks) so callers always
@@ -194,7 +195,15 @@ function buildRegistry(args: string[], agentPermissions?: string[] | null, jailR
   }
 
   if (!hasFlag(args, '--no-shell-skills')) {
-    const adapter = createShellAdapter({ prefer: shellAdapterPreference });
+    // Regresion (ronda 60 del audit, MEDIUM): network/executionLimits nunca
+    // se pasaban aca, asi que un `--shell-adapter just-bash` real corria
+    // sin ninguna restriccion propia — ver el comentario de
+    // validateJustBashConfigShape en shared/config-validation.ts.
+    const adapter = createShellAdapter({
+      prefer: shellAdapterPreference,
+      network: justBashConfig?.network,
+      executionLimits: justBashConfig?.executionLimits,
+    });
     cronScheduler = new CronScheduler(adapter);
     registerShellSkills(registry, adapter, jailRoot, processManager, cronScheduler);
   }
@@ -217,7 +226,7 @@ function serveStdio(args: string[]): void {
   // registry:list/describe/export can filter what they reveal by the
   // caller's own permissions — see registryAdminCommands.
   const agentPermissions = resolveAgentPermissions({ agentProfile: profile, permissions: fileConfig.permissions, rbac });
-  const { registry, processManager, cronScheduler } = buildRegistry(args, agentPermissions, jailRoot, shellAdapterPreference);
+  const { registry, processManager, cronScheduler } = buildRegistry(args, agentPermissions, jailRoot, shellAdapterPreference, fileConfig.justBash);
   const coreConfig: any = { registry };
   if (profile) coreConfig.agentProfile = profile;
   if (fileConfig.permissions) coreConfig.permissions = fileConfig.permissions;
@@ -265,7 +274,7 @@ async function serveHttp(args: string[]): Promise<void> {
   const rbac: RBAC | undefined = fileConfig.rbac ? new RBAC(fileConfig.rbac) : undefined;
 
   const agentPermissions = resolveAgentPermissions({ agentProfile: profile, permissions: fileConfig.permissions, rbac });
-  const { registry, processManager, cronScheduler } = buildRegistry(args, agentPermissions, jailRoot, shellAdapterPreference);
+  const { registry, processManager, cronScheduler } = buildRegistry(args, agentPermissions, jailRoot, shellAdapterPreference, fileConfig.justBash);
   const totalCommands = registry.listAll().length;
 
   const coreConfig: any = { registry };
@@ -307,6 +316,7 @@ async function serveHttp(args: string[]): Promise<void> {
   console.log(`  Jail root: ${jailRoot || 'none (unrestricted filesystem access)'}`);
   console.log(`  RBAC: ${rbac ? `${fileConfig.rbac.roles.length} role(s) defined` : 'none (permissions, if set, are used as-is)'}`);
   console.log(`  Shell adapter: ${shellAdapterPreference || 'auto'}`);
+  console.log(`  just-bash restrictions: ${fileConfig.justBash ? 'configured (see agent-shell.config.json)' : 'none (sandbox package defaults apply, if just-bash is the active backend)'}`);
   console.log(`  Listening: http://${host}:${port}`);
 
   if (!token) {

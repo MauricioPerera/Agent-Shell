@@ -717,6 +717,42 @@ describe('Context Store', () => {
       expect(result.error!.code).toBe('INVALID_KEY');
     });
 
+    /**
+     * Regresion (ronda 60 del audit, MEDIUM): MAX_KEYS (1000) x
+     * MAX_VALUE_SIZE (64KB) permite hasta ~64MB por sesion, muy por
+     * encima del presupuesto documentado (1MB, contracts/context-store.md
+     * §6.1) — y sqlite-storage-adapter.ts reescribe la sesion COMPLETA en
+     * cada set()/delete(). Sin este cap agregado, cada operacion de una
+     * sola clave podia terminar reescribiendo decenas de MB.
+     */
+    it('rechaza sumar valores que excedan el cap agregado de contexto por sesion (1MB total)', async () => {
+      const bigValue = 'x'.repeat(60000); // ~60KB serializado, bajo MAX_VALUE_SIZE (64KB)
+      let lastResult;
+      let successCount = 0;
+      for (let i = 0; i < 20; i++) {
+        lastResult = await store.set(`big_${i}`, bigValue);
+        if (lastResult.status !== 0) break;
+        successCount++;
+      }
+
+      expect(lastResult!.status).toBe(1);
+      expect(lastResult!.error!.code).toBe('MAX_CONTEXT_SIZE_EXCEEDED');
+      // Se corto por tamano agregado, no por MAX_KEYS (1000) — deberia
+      // fallar bastante antes de esa cantidad.
+      expect(successCount).toBeLessThan(20);
+    });
+
+    it('permite reemplazar el valor de una clave existente sin contarla dos veces contra el cap agregado', async () => {
+      const bigValue = 'x'.repeat(60000);
+      const first = await store.set('only_key', bigValue);
+      expect(first.status).toBe(0);
+
+      // Reemplazar la MISMA clave con un valor de tamano similar no debe
+      // fallar por "sumarse" contra su propio tamano anterior.
+      const second = await store.set('only_key', bigValue);
+      expect(second.status).toBe(0);
+    });
+
     it('historial aplica FIFO cuando excede 10000 entradas', async () => {
       // Esto es un test de diseño - en la practica se verificaria
       // que al exceder el limite, las entradas mas antiguas se descartan

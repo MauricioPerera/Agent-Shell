@@ -252,7 +252,17 @@ class VectorIndex {
 
     const startTime = Date.now();
 
-    const topK = Math.min(options?.topK ?? this.defaultTopK, MAX_RESULTS);
+    // Regresion (ronda 60 del audit, MEDIUM): sin el Math.max(0, ...), un
+    // caller pasando topK negativo llegaba intacto a Array.prototype.slice
+    // (searchInMemory/funnelSearch) y a `LIMIT $n` en pgvector.
+    // slice(0, N) con N negativo en JS significa "todo menos los ultimos
+    // |N| elementos", no "top-K" — con topK:-1 y 500 comandos indexados,
+    // devolvia 499 resultados en vez de respetar el cap MAX_RESULTS. En
+    // pgvector, un LIMIT negativo directamente tira un error de Postgres.
+    // Math.max(0, ...) garantiza que topK nunca sea negativo sin importar
+    // el input, en el UNICO punto por el que pasa antes de repartirse a
+    // storageAdapter.search()/funnelSearch().
+    const topK = Math.max(0, Math.min(options?.topK ?? this.defaultTopK, MAX_RESULTS));
     const threshold = options?.threshold ?? this.defaultThreshold;
 
     this.checkCircuit();

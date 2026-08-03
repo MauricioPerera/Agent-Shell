@@ -67,6 +67,79 @@ export function validateRbacConfigShape(raw: any, configPath: string, fail: (msg
   return raw.defaultRole ? { roles, defaultRole: raw.defaultRole } : { roles };
 }
 
+/** Shape of the optional `justBash` config-file field (see validateJustBashConfigShape). */
+export interface JustBashConfigShape {
+  network?: { allowedUrlPrefixes?: string[]; allowedMethods?: string[] };
+  executionLimits?: { maxCommandCount?: number; maxLoopIterations?: number; maxCallDepth?: number };
+}
+
+/**
+ * Regresion (ronda 60 del audit, MEDIUM): `ShellAdapterConfig.network`/
+ * `.executionLimits` (just-bash's own network-allowlist and loop/call/
+ * command-count caps) existed in just-bash/types.ts and were already
+ * forwarded by createShellAdapter() -> createBashInstance() if present —
+ * but NEITHER cli/index.ts NOR server/index.ts ever populated them from
+ * anywhere, so every real `--shell-adapter just-bash` deployment ran on
+ * whatever the (unvendored) just-bash package defaults to for outbound
+ * network access and loop/call bounds, with no way for an operator to
+ * actually restrict it. Exposed via the config file (not CLI flags/env
+ * vars) because these are nested arrays/objects, matching how `rbac` is
+ * already config-file-only for the same shape reason.
+ *
+ * Treated as `fail`-closed like the other access-control fields
+ * (agentProfile/jailRoot/permissions/rbac): a malformed restriction
+ * config silently becoming "no restriction" is exactly the failure mode
+ * those fields already guard against — `warn`-and-drop here would mean a
+ * typo'd network allowlist quietly falls back to the sandbox's own
+ * (likely permissive) defaults instead of aborting startup.
+ */
+export function validateJustBashConfigShape(raw: any, configPath: string, fail: (msg: string) => never): JustBashConfigShape {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    fail(`${configPath} field 'justBash' must be an object, refusing to start with an ambiguous sandbox-restriction config.`);
+  }
+  const result: JustBashConfigShape = {};
+
+  if (raw.network !== undefined) {
+    const net = raw.network;
+    if (typeof net !== 'object' || net === null || Array.isArray(net)) {
+      fail(`${configPath} field 'justBash.network' must be an object, refusing to start with an ambiguous sandbox-restriction config.`);
+    }
+    const network: NonNullable<JustBashConfigShape['network']> = {};
+    if (net.allowedUrlPrefixes !== undefined) {
+      if (!Array.isArray(net.allowedUrlPrefixes) || !net.allowedUrlPrefixes.every((p: any) => typeof p === 'string')) {
+        fail(`${configPath} field 'justBash.network.allowedUrlPrefixes' must be an array of strings, refusing to start with an ambiguous sandbox-restriction config.`);
+      }
+      network.allowedUrlPrefixes = net.allowedUrlPrefixes;
+    }
+    if (net.allowedMethods !== undefined) {
+      if (!Array.isArray(net.allowedMethods) || !net.allowedMethods.every((m: any) => typeof m === 'string')) {
+        fail(`${configPath} field 'justBash.network.allowedMethods' must be an array of strings, refusing to start with an ambiguous sandbox-restriction config.`);
+      }
+      network.allowedMethods = net.allowedMethods;
+    }
+    result.network = network;
+  }
+
+  if (raw.executionLimits !== undefined) {
+    const lim = raw.executionLimits;
+    if (typeof lim !== 'object' || lim === null || Array.isArray(lim)) {
+      fail(`${configPath} field 'justBash.executionLimits' must be an object, refusing to start with an ambiguous sandbox-restriction config.`);
+    }
+    const executionLimits: NonNullable<JustBashConfigShape['executionLimits']> = {};
+    for (const key of ['maxCommandCount', 'maxLoopIterations', 'maxCallDepth'] as const) {
+      if (lim[key] !== undefined) {
+        if (typeof lim[key] !== 'number' || !Number.isInteger(lim[key]) || lim[key] <= 0) {
+          fail(`${configPath} field 'justBash.executionLimits.${key}' must be a positive integer, refusing to start with an ambiguous sandbox-restriction config.`);
+        }
+        executionLimits[key] = lim[key];
+      }
+    }
+    result.executionLimits = executionLimits;
+  }
+
+  return result;
+}
+
 /**
  * Validates a raw --port/AGENT_SHELL_PORT/config value via the injected
  * `fail` callback. An unparseable value (e.g. a typo) previously reached
@@ -139,6 +212,9 @@ export function validateCommonConfigFields(raw: Record<string, any>, configPath:
   if (raw.shellAdapter !== undefined) {
     if (typeof raw.shellAdapter === 'string') config.shellAdapter = raw.shellAdapter;
     else warn('shellAdapter', 'a string');
+  }
+  if (raw.justBash !== undefined) {
+    config.justBash = validateJustBashConfigShape(raw.justBash, configPath, fail);
   }
   return config;
 }

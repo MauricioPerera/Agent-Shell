@@ -17,6 +17,7 @@ import {
   validateRbacConfigShape,
   validatePortShape,
   validateCommonConfigFields,
+  validateJustBashConfigShape,
 } from '../src/shared/config-validation.js';
 
 function throwingFail(message: string): never {
@@ -68,5 +69,61 @@ describe('shared/config-validation', () => {
   it('SCV07: validateCommonConfigFields no incluye skills (campo server-only)', () => {
     const result = validateCommonConfigFields({ skills: { cli: false } }, 'x.json', { fail: throwingFail, warn: () => {} });
     expect(result.skills).toBeUndefined();
+  });
+
+  /**
+   * Regresion (ronda 60 del audit, MEDIUM): `justBash.network`/
+   * `.executionLimits` existian en just-bash/types.ts y ya se reenviaban
+   * si estaban presentes, pero ningun entry point los poblaba desde
+   * ningun lado — este bloque cubre el validador que ahora los expone
+   * via agent-shell.config.json.
+   */
+  describe('validateJustBashConfigShape', () => {
+    it('SCV08: acepta network + executionLimits bien formados', () => {
+      const raw = {
+        network: { allowedUrlPrefixes: ['https://api.example.com/'], allowedMethods: ['GET', 'POST'] },
+        executionLimits: { maxCommandCount: 100, maxLoopIterations: 1000, maxCallDepth: 10 },
+      };
+      expect(validateJustBashConfigShape(raw, 'x.json', throwingFail)).toEqual(raw);
+    });
+
+    it('SCV09: acepta un objeto vacio (ambos campos opcionales)', () => {
+      expect(validateJustBashConfigShape({}, 'x.json', throwingFail)).toEqual({});
+    });
+
+    it('SCV10: rechaza justBash que no sea un objeto', () => {
+      expect(() => validateJustBashConfigShape('nope', 'x.json', throwingFail))
+        .toThrow("field 'justBash' must be an object");
+      expect(() => validateJustBashConfigShape(['nope'], 'x.json', throwingFail))
+        .toThrow("field 'justBash' must be an object");
+    });
+
+    it('SCV11: rechaza network.allowedUrlPrefixes que no sea array de strings', () => {
+      expect(() => validateJustBashConfigShape({ network: { allowedUrlPrefixes: 'not-an-array' } }, 'x.json', throwingFail))
+        .toThrow("field 'justBash.network.allowedUrlPrefixes' must be an array of strings");
+      expect(() => validateJustBashConfigShape({ network: { allowedUrlPrefixes: [123] } }, 'x.json', throwingFail))
+        .toThrow("field 'justBash.network.allowedUrlPrefixes' must be an array of strings");
+    });
+
+    it('SCV12: rechaza executionLimits con un valor no-entero-positivo', () => {
+      expect(() => validateJustBashConfigShape({ executionLimits: { maxLoopIterations: -5 } }, 'x.json', throwingFail))
+        .toThrow("field 'justBash.executionLimits.maxLoopIterations' must be a positive integer");
+      expect(() => validateJustBashConfigShape({ executionLimits: { maxCallDepth: 1.5 } }, 'x.json', throwingFail))
+        .toThrow("field 'justBash.executionLimits.maxCallDepth' must be a positive integer");
+      expect(() => validateJustBashConfigShape({ executionLimits: { maxCommandCount: 'ten' } }, 'x.json', throwingFail))
+        .toThrow("field 'justBash.executionLimits.maxCommandCount' must be a positive integer");
+    });
+
+    it('SCV13: validateCommonConfigFields expone justBash falleando cerrado (no warn-and-drop)', () => {
+      expect(() => validateCommonConfigFields({ justBash: { executionLimits: { maxCallDepth: -1 } } }, 'x.json', { fail: throwingFail, warn: () => {} }))
+        .toThrow("field 'justBash.executionLimits.maxCallDepth' must be a positive integer");
+
+      const ok = validateCommonConfigFields(
+        { justBash: { network: { allowedMethods: ['GET'] } } },
+        'x.json',
+        { fail: throwingFail, warn: () => {} }
+      );
+      expect(ok.justBash).toEqual({ network: { allowedMethods: ['GET'] } });
+    });
   });
 });

@@ -426,6 +426,25 @@ describe('Vector Index', () => {
     });
 
     /**
+     * Regresion (ronda 60 del audit, MEDIUM): sin Math.max(0, ...), un
+     * topK negativo llegaba intacto a Array.prototype.slice(0, topK) —
+     * slice con un indice negativo significa "todo menos los ultimos |N|
+     * elementos" en JS, no "top-K". Con 7 comandos indexados y topK:-1,
+     * devolvia 6 resultados en vez de 0, evadiendo por completo el cap.
+     */
+    it('T05b: topK negativo no evade el cap — se trata como 0 resultados, no como slice negativo', async () => {
+      const response = await vectorIndex.search('listar', { topK: -1 });
+
+      expect(response.results).toHaveLength(0);
+    });
+
+    it('T05c: topK=0 retorna 0 resultados', async () => {
+      const response = await vectorIndex.search('listar', { topK: 0 });
+
+      expect(response.results).toHaveLength(0);
+    });
+
+    /**
      * @test T06 - Search con threshold=0.9
      * @acceptance Solo resultados con score >= 0.9
      * @priority Media

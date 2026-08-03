@@ -80,4 +80,20 @@ describe('server validateConfigFile', () => {
     const result = validateConfigFile({ skills: 'nope' }, 'x.json');
     expect(result.skills).toBeUndefined();
   });
+
+  /**
+   * Regresion (ronda 60 del audit, MEDIUM): mismo hueco que cli/index.ts —
+   * ShellAdapterConfig.network/.executionLimits ya existian y
+   * createShellAdapter() ya los reenviaba, pero server/index.ts tampoco
+   * los poblaba desde ningun lado.
+   */
+  it('SRV12: accepts justBash.network/executionLimits well-typed as-is', () => {
+    const raw = { justBash: { network: { allowedMethods: ['GET'] }, executionLimits: { maxCommandCount: 50 } } };
+    expect(validateConfigFile(raw, 'x.json')).toEqual(raw);
+  });
+
+  it('SRV13: a mistyped justBash fails closed (throws), not silently "no restriction"', () => {
+    expect(() => validateConfigFile({ justBash: { network: { allowedUrlPrefixes: 'not-an-array' } } }, 'x.json'))
+      .toThrow("field 'justBash.network.allowedUrlPrefixes' must be an array of strings");
+  });
 });

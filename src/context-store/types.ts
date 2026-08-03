@@ -109,6 +109,21 @@ export const MAX_VALUE_SIZE = 64 * 1024;
 /** Cantidad maxima de claves por sesion. */
 export const MAX_KEYS = 1000;
 
+/**
+ * Tamano total maximo del contexto de una sesion, sumando todos los
+ * valores serializados (1MB, documentado en contracts/context-store.md
+ * §6.1). Regresion (ronda 60 del audit, MEDIUM): MAX_VALUE_SIZE (64KB) x
+ * MAX_KEYS (1000) permite hasta ~64MB por sesion — muy por encima del
+ * presupuesto documentado — y sqlite-storage-adapter.ts reescribe la
+ * sesion COMPLETA (DELETE + re-INSERT de todas las entries) en cada
+ * set()/delete(), no de forma incremental. Sin este cap agregado, un
+ * caller podia inflar la sesion hasta ese techo via context:set normal
+ * y convertir cada operacion posterior de una sola clave en una
+ * reescritura de decenas de MB — un DoS de amplificacion auto-infligido,
+ * alcanzable con el builtin ya cableado.
+ */
+export const MAX_TOTAL_CONTEXT_SIZE = 1024 * 1024;
+
 /** Cantidad maxima de entradas en historial (FIFO). */
 export const MAX_HISTORY = 10000;
 

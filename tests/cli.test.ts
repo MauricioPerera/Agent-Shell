@@ -190,6 +190,36 @@ describe('CLI config file validation', () => {
   });
 
   /**
+   * Regresion (ronda 60 del audit, MEDIUM): `ShellAdapterConfig.network`/
+   * `.executionLimits` (network allowlist y caps de loop/call/comando del
+   * sandbox just-bash) ya existian y createShellAdapter() ya los
+   * reenviaba si estaban presentes, pero NINGUN entry point real los
+   * poblaba desde ningun lado — cero forma de configurarlos en un deploy
+   * real via cli/index.ts.
+   */
+  it('CLI15b: acepta justBash.network/executionLimits bien formados', () => {
+    const raw = {
+      justBash: {
+        network: { allowedUrlPrefixes: ['https://api.example.com/'] },
+        executionLimits: { maxLoopIterations: 500 },
+      },
+    };
+    expect(validateConfigFile(raw, 'x.json')).toEqual(raw);
+  });
+
+  it('CLI15c: justBash mal tipado aborta el proceso (exit 1), no cae a "sin restriccion"', () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+      throw new Error(`__process_exit_${code}__`);
+    }) as any);
+
+    expect(() => validateConfigFile({ justBash: { executionLimits: { maxCallDepth: -1 } } }, 'x.json'))
+      .toThrow('__process_exit_1__');
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("field 'justBash.executionLimits.maxCallDepth' must be a positive integer"));
+  });
+
+  /**
    * Regresion: cli/index.ts no tenia NINGUN soporte de permissions/rbac —
    * RBAC estaba totalmente implementado (src/security/rbac.ts) pero sin
    * superficie de config en ningun entry point real, era inalcanzable.

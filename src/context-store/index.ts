@@ -8,7 +8,7 @@
  */
 
 import type { StorageAdapter, SessionStore, HistoryEntry, UndoSnapshot, OperationResult, ContextStoreConfig, RetentionPolicy } from './types.js';
-import { MAX_KEY_LENGTH, MAX_VALUE_SIZE, MAX_KEYS, MAX_HISTORY, DEFAULT_HISTORY_LIMIT, KEY_PATTERN } from './types.js';
+import { MAX_KEY_LENGTH, MAX_VALUE_SIZE, MAX_KEYS, MAX_TOTAL_CONTEXT_SIZE, MAX_HISTORY, DEFAULT_HISTORY_LIMIT, KEY_PATTERN } from './types.js';
 import { maskSecrets, containsSecret } from '../security/secret-patterns.js';
 
 export { type StorageAdapter, type OperationResult, type HistoryEntry, type UndoSnapshot, type SessionStore, type ContextStoreConfig } from './types.js';
@@ -118,6 +118,26 @@ export class ContextStore {
         return this.errorResult(1, 'MAX_KEYS_EXCEEDED', `Cannot add key '${key}': session has reached maximum of ${MAX_KEYS} keys`);
       }
     }
+
+    // Regresion (ronda 60 del audit, MEDIUM): MAX_KEYS x MAX_VALUE_SIZE
+    // por si solos permiten ~64MB por sesion, muy por encima del
+    // presupuesto documentado (1MB). Suma el tamano serializado de todas
+    // las demas entries (excluyendo la que se esta reemplazando, si
+    // existe) para topear el total agregado antes de persistir.
+    let currentTotalSize = 0;
+    for (const [k, entry] of Object.entries(store.context.entries)) {
+      if (k === key) continue;
+      currentTotalSize += JSON.stringify(entry.value).length;
+    }
+    const projectedTotalSize = currentTotalSize + serialized.length;
+    if (projectedTotalSize > MAX_TOTAL_CONTEXT_SIZE) {
+      return this.errorResult(
+        1,
+        'MAX_CONTEXT_SIZE_EXCEEDED',
+        `Cannot set key '${key}': total session context size would reach ${projectedTotalSize} bytes, exceeding the maximum of ${MAX_TOTAL_CONTEXT_SIZE} bytes`
+      );
+    }
+
     const previous = existing ? existing.value : undefined;
 
     store.context.entries[key] = {
