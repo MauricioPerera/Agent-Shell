@@ -67,6 +67,19 @@ export const DEFAULT_SECRET_PATTERNS: SecretPattern[] = [
     replacement: '[REDACTED:private-key]',
   },
   {
+    // Regresion (ronda 76 del audit, MEDIUM): la lista de patrones cubria
+    // claves PEM (RSA/EC/DSA/OPENSSH/ENCRYPTED PRIVATE KEY) pero no bloques
+    // ASCII-armored de PGP/GPG (`gpg --export-secret-keys --armor`), un
+    // formato de exportacion de clave privada igual de comun (ej. pegado en
+    // un log, stdout de un comando gpg capturado por shell:exec). Mismo
+    // diseno defensivo que private-key arriba (ronda 61): el END real
+    // preferido no-greedy, y si nunca matchea, consumir el resto del string
+    // — sobre-redactar es preferible a filtrar el body real de la clave.
+    name: 'pgp-private-key',
+    pattern: /-----BEGIN PGP PRIVATE KEY BLOCK-----(?:[\s\S]+?-----END PGP PRIVATE KEY BLOCK-----|[\s\S]*)/g,
+    replacement: '[REDACTED:pgp-private-key]',
+  },
+  {
     // Regresion (ronda 73 del audit, HIGH): mismo motivo que api-key-generic arriba.
     name: 'hex-secret-32plus',
     pattern: /(?:secret|token)['"]?\s*[:=]\s*['"]?([0-9a-f]{32,})['"]?/gi,

@@ -29,6 +29,14 @@ export type MessageHandler = (message: JsonRpcRequest, sessionId?: string, hasEx
  * Lee lineas de stdin, parsea como JSON-RPC, delega al handler,
  * y escribe respuestas a stdout.
  */
+// Regresion (ronda 76 del audit, MEDIUM): mismo limite que
+// shell-http.ts's MAX_RESPONSE_BODY_SIZE / jq-filter's MAX_INPUT_SIZE_BYTES
+// / process-mgr.ts's MAX_OUTPUT_BYTES (todos 10MB) — sin este cap, un
+// caller stdio que nunca manda un '\n' (linea JSON-RPC pathologicamente
+// larga, o simplemente ruido) hacia crecer `buffer` sin limite en cada
+// chunk, un memory-DoS local.
+const MAX_BUFFER_SIZE = 10 * 1024 * 1024;
+
 export class StdioTransport {
   private handler: MessageHandler | null = null;
   private buffer = '';
@@ -72,6 +80,15 @@ export class StdioTransport {
     this.buffer += chunk;
     const lines = this.buffer.split('\n');
     this.buffer = lines.pop() || '';
+
+    if (this.buffer.length > MAX_BUFFER_SIZE) {
+      this.send({
+        jsonrpc: '2.0',
+        id: null,
+        error: { code: -32600, message: `Invalid Request: line exceeds maximum size of ${MAX_BUFFER_SIZE} bytes` },
+      });
+      this.buffer = '';
+    }
 
     for (const line of lines) {
       const trimmed = line.trim();

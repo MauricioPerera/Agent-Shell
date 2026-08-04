@@ -131,6 +131,33 @@ describe('StdioTransport', () => {
     expect(sentMessages()[0].error.code).toBe(-32600);
   });
 
+  /**
+   * Regresion (ronda 76 del audit, MEDIUM): `buffer` crecia sin limite
+   * mientras no llegara un '\n' — un caller que nunca termina una linea
+   * (o simplemente ruido) hacia crecer memoria del proceso sin cota.
+   */
+  it('T04d: una linea sin newline que supera 10MB se descarta con -32600 en vez de crecer sin limite', async () => {
+    const handler = vi.fn();
+    transport.onMessage(handler);
+    transport.start();
+
+    const oversized = 'x'.repeat(10 * 1024 * 1024 + 1);
+    await dataListener(oversized);
+
+    expect(handler).not.toHaveBeenCalled();
+    const [msg] = sentMessages();
+    expect(msg.error.code).toBe(-32600);
+    expect(msg.error.message).toContain('exceeds maximum size');
+
+    // Buffer was reset — a subsequent, well-formed, SMALL message after the
+    // oversized fragment is parsed normally (not treated as a continuation
+    // of the discarded fragment).
+    const handler2 = vi.fn(async (req: JsonRpcRequest): Promise<JsonRpcResponse> => ({ jsonrpc: '2.0', id: req.id!, result: 'ok' }));
+    transport.onMessage(handler2);
+    await dataListener('{"jsonrpc":"2.0","id":1,"method":"test"}\n');
+    expect(handler2).toHaveBeenCalledTimes(1);
+  });
+
   it('T05: mensaje partido entre 2 chunks de stdin se reensambla correctamente', async () => {
     const handler = vi.fn(async (req: JsonRpcRequest): Promise<JsonRpcResponse> => ({ jsonrpc: '2.0', id: req.id!, result: 'ok' }));
     transport.onMessage(handler);

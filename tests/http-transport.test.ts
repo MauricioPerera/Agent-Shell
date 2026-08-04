@@ -89,7 +89,7 @@ function httpGet(port: number, path: string, headers?: Record<string, string>): 
   });
 }
 
-function connectSse(port: number): Promise<{ events: Array<{ event: string; data: string }>; close: () => void; response: any }> {
+function connectSse(port: number, extraHeaders?: Record<string, string>): Promise<{ events: Array<{ event: string; data: string }>; close: () => void; response: any }> {
   return new Promise((resolve, reject) => {
     const events: Array<{ event: string; data: string }> = [];
 
@@ -99,7 +99,7 @@ function connectSse(port: number): Promise<{ events: Array<{ event: string; data
         port,
         path: '/sse',
         method: 'GET',
-        headers: { Accept: 'text/event-stream' },
+        headers: { Accept: 'text/event-stream', ...extraHeaders },
       },
       (res) => {
         let buffer = '';
@@ -543,6 +543,39 @@ describe('HttpSseTransport', () => {
       c1.close();
       c2.close();
       c3.close();
+    });
+
+    /**
+     * Regresion (ronda 76 del audit, MEDIUM): maxSseClients es un cap
+     * GLOBAL — un solo caller que comparte el bearer token del deployment
+     * podia abrir hasta ese cupo el solo y dejar sin conexiones a
+     * cualquier otra sesion legitima. maxSseClientsPerSession limita
+     * cuantas conexiones puede tener UNA sesion (X-Session-Id explicito),
+     * sin afectar el cupo global de otras sesiones.
+     */
+    it('T17c: rechaza con 503 al superar maxSseClientsPerSession, sin afectar a OTRA sesion', async () => {
+      await transport.stop();
+      transport = new HttpSseTransport({ port: 0, maxSseClients: 10, maxSseClientsPerSession: 2 });
+      transport.onMessage(createMockHandler());
+      await transport.start();
+
+      const a1 = await connectSse(transport.port, { 'X-Session-Id': 'session-A' });
+      const a2 = await connectSse(transport.port, { 'X-Session-Id': 'session-A' });
+      expect(transport.connectedClients).toBe(2);
+
+      const a3 = await connectSse(transport.port, { 'X-Session-Id': 'session-A' });
+      expect(a3.response.statusCode).toBe(503);
+      expect(transport.connectedClients).toBe(2);
+
+      // A different session is unaffected by session-A's cap.
+      const b1 = await connectSse(transport.port, { 'X-Session-Id': 'session-B' });
+      expect(b1.response.statusCode).toBe(200);
+      expect(transport.connectedClients).toBe(3);
+
+      a1.close();
+      a2.close();
+      a3.close();
+      b1.close();
     });
 
     it('T17: multiples clientes SSE simultaneos', async () => {

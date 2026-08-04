@@ -129,6 +129,16 @@ export interface HttpTransportConfig {
   /** Clientes SSE concurrentes maximos. Default: 100. Conexiones adicionales reciben 503. */
   maxSseClients?: number;
   /**
+   * Clientes SSE concurrentes maximos POR sesion (X-Session-Id explicito).
+   * Default: 20. Sin este limite, un solo caller que comparte el bearer
+   * token del deployment podia abrir hasta maxSseClients conexiones el
+   * solo y dejar sin cupo a cualquier otra sesion legitima — el cap
+   * anterior era global, no por-caller. Conexiones sin X-Session-Id (cada
+   * una es su propia sesion aislada, ver el comentario de sessionId en
+   * handleRequest) solo cuentan contra el cap global.
+   */
+  maxSseClientsPerSession?: number;
+  /**
    * Logger de auditoria opcional. Cuando esta presente, cada rechazo de
    * autenticacion (401: header ausente o token invalido) emite un evento
    * auth:failed — antes esta era la unica superficie de red del proyecto
@@ -143,6 +153,8 @@ export interface SseClient {
   id: string;
   response: import('node:http').ServerResponse;
   connectedAt: number;
+  /** X-Session-Id explicito del caller, si lo mando. undefined si no. */
+  sessionId?: string;
 }
 
 export interface HealthResponse {

@@ -478,6 +478,39 @@ describe('Secret Masking (maskSecrets)', () => {
       expect((masked.match(/\[REDACTED:private-key\]/g) || []).length).toBe(2);
     });
   });
+
+  /**
+   * Regresion (ronda 76 del audit, MEDIUM): la lista de patrones cubria
+   * claves PEM pero no bloques ASCII-armored de PGP/GPG
+   * (`gpg --export-secret-keys --armor`), un formato de exportacion de
+   * clave privada igual de comun. Mismo diseno defensivo que private-key
+   * (ronda 61): END real preferido no-greedy, fallback a consumir el
+   * resto del string si nunca matchea.
+   */
+  describe('PGP private key redaction', () => {
+    const KEY_BODY = 'lQVYBGZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZm';
+    const BEGIN = '-----BEGIN PGP PRIVATE KEY BLOCK-----';
+
+    it('T29: bloque bien formado (BEGIN + body + END matcheante) se redacta completo', () => {
+      const input = [BEGIN, KEY_BODY, '-----END PGP PRIVATE KEY BLOCK-----'].join('\n');
+      const masked = maskSecrets(input);
+      expect(masked).toBe('[REDACTED:pgp-private-key]');
+      expect(masked).not.toContain(KEY_BODY);
+    });
+
+    it('T30: sin ningun END presente no deja el body sin redactar', () => {
+      const input = [BEGIN, KEY_BODY].join('\n');
+      const masked = maskSecrets(input);
+      expect(masked).not.toContain(KEY_BODY);
+    });
+
+    it('T31: contenido NO relacionado despues de un bloque bien formado no se sobre-redacta', () => {
+      const input = [BEGIN, KEY_BODY, '-----END PGP PRIVATE KEY BLOCK-----', 'unrelated log line after'].join('\n');
+      const masked = maskSecrets(input);
+      expect(masked).toContain('unrelated log line after');
+      expect(masked).not.toContain(KEY_BODY);
+    });
+  });
 });
 
 // =====================================================================

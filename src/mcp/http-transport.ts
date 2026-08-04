@@ -60,6 +60,7 @@ export class HttpSseTransport {
   private readonly requestTimeout: number;
   private readonly maxBodySize: number;
   private readonly maxSseClients: number;
+  private readonly maxSseClientsPerSession: number;
   private readonly authToken: string | null;
   private readonly authExcludePaths: Set<string>;
   private readonly insecureAllowNoAuth: boolean;
@@ -73,6 +74,7 @@ export class HttpSseTransport {
     this.requestTimeout = config?.requestTimeout ?? 30_000;
     this.maxBodySize = config?.maxBodySize ?? 65_536;
     this.maxSseClients = config?.maxSseClients ?? 100;
+    this.maxSseClientsPerSession = config?.maxSseClientsPerSession ?? 20;
     this.authToken = config?.auth?.bearerToken ?? null;
     this.authExcludePaths = new Set(config?.auth?.excludePaths ?? ['/health']);
     this.insecureAllowNoAuth = config?.insecureAllowNoAuth ?? false;
@@ -402,6 +404,26 @@ export class HttpSseTransport {
       return;
     }
 
+    // Regresion (ronda 76 del audit, MEDIUM): el cap de arriba es GLOBAL —
+    // un solo caller que comparte el bearer token del deployment podia
+    // abrir hasta maxSseClients conexiones el solo (p.ej. reintentando sin
+    // backoff) y dejar sin cupo a cualquier otra sesion legitima. Solo se
+    // puede atribuir a un caller concreto cuando manda X-Session-Id
+    // explicito (misma logica que el gate de initialize per-sesion de
+    // McpServer, ver mcp/server.ts) — sin ese header cada conexion ya es su
+    // propia sesion aislada y solo cuenta contra el cap global de arriba.
+    const explicitSessionId = req.headers['x-session-id'] as string | undefined;
+    if (explicitSessionId) {
+      let sessionCount = 0;
+      for (const c of this.clients) {
+        if (c.sessionId === explicitSessionId) sessionCount++;
+      }
+      if (sessionCount >= this.maxSseClientsPerSession) {
+        this.sendJson(res, 503, { error: 'Too many concurrent SSE connections for this session' });
+        return;
+      }
+    }
+
     const clientId = randomUUID();
 
     res.writeHead(200, {
@@ -414,6 +436,7 @@ export class HttpSseTransport {
       id: clientId,
       response: res,
       connectedAt: Date.now(),
+      sessionId: explicitSessionId,
     };
 
     this.clients.add(client);
