@@ -18,7 +18,26 @@ import { MAX_ITERATION_ELEMENTS } from './types.js';
  * @param originalExpression - Expresion original (para mensajes de error)
  * @returns FilterResult (exito con el valor, o error)
  */
-export function resolve(data: any, parsed: ParsedExpression, originalExpression: string): FilterResult {
+export function resolve(
+  data: any,
+  parsed: ParsedExpression,
+  originalExpression: string,
+  // Regresion (ronda 64 del audit, CRITICAL): antes cada sub-expresion de un
+  // multi_select (ej. "[.a.[],.a.[],...]") reentraba resolve() y recibia su
+  // PROPIO counter fresco ({ count: 0 } por defecto), asi que el cap
+  // acumulativo de MAX_ITERATION_ELEMENTS (agregado en ronda 57 justamente
+  // para sumar iteraciones a traves de niveles anidados de UN SOLO path) se
+  // reseteaba en cada sub-expresion en vez de acumular entre TODAS. Un
+  // filtro con 20 repeticiones de ".a.[]" (dentro de los limites
+  // MAX_MULTI_SELECT_FIELDS/MAX_EXPRESSION_LENGTH) sobre un array de ~9999
+  // elementos producia ~200k elementos de salida sin disparar nunca
+  // iterationLimitError, ya que cada sub-expresion individualmente se
+  // quedaba bajo el cap. Ahora `counter` se comparte via parametro entre
+  // resolve() y resolveMultiSelect(), asi que TODAS las sub-expresiones de
+  // un mismo multi_select (y cualquier multi_select anidado dentro de
+  // ellas) acumulan sobre el mismo total.
+  counter: { count: number } = { count: 0 }
+): FilterResult {
   const inputType = getInputType(data);
 
   if (parsed.type === 'identity') {
@@ -26,26 +45,27 @@ export function resolve(data: any, parsed: ParsedExpression, originalExpression:
   }
 
   if (parsed.type === 'multi_select') {
-    return resolveMultiSelect(data, parsed, originalExpression, inputType);
+    return resolveMultiSelect(data, parsed, originalExpression, inputType, counter);
   }
 
   // Path resolution
-  const result = resolvePath(data, parsed.segments, originalExpression, { count: 0 });
+  const result = resolvePath(data, parsed.segments, originalExpression, counter);
   if (!result.success) return result;
   return success(result.result, originalExpression, inputType);
 }
 
-/** Resuelve un multi-select evaluando cada sub-expresion. */
+/** Resuelve un multi-select evaluando cada sub-expresion, compartiendo el counter acumulativo entre todas (ver comentario de resolve() arriba). */
 function resolveMultiSelect(
   data: any,
   parsed: ParsedExpression,
   originalExpression: string,
-  inputType: string
+  inputType: string,
+  counter: { count: number }
 ): FilterResult {
   const results: any[] = [];
 
   for (const subExpr of parsed.subExpressions) {
-    const result = resolve(data, subExpr, originalExpression);
+    const result = resolve(data, subExpr, originalExpression, counter);
     if (!result.success) return result;
     results.push((result as FilterSuccess).result);
   }

@@ -631,6 +631,35 @@ describe('JQ Filter', () => {
 
       expect(isSuccess(result)).toBe(true);
     });
+
+    /**
+     * Regresion (ronda 64 del audit, CRITICAL): el fix de ronda 57 (arriba)
+     * solo acumulaba el counter DENTRO de un unico path anidado — cada
+     * sub-expresion de un multi_select (ej. "[.a.[],.a.[],...]") reentraba
+     * resolve() con su PROPIO counter fresco, asi que el cap acumulativo se
+     * reseteaba en cada sub-expresion. Un multi-select de 20 sub-expresiones
+     * (el maximo permitido por MAX_MULTI_SELECT_FIELDS), cada una iterando
+     * un array de 600 elementos (bajo el cap individualmente: 600 < 10000),
+     * producia un total de 20*600 = 12000 elementos — por encima del cap —
+     * sin disparar nunca E005.
+     */
+    it('rechaza multi-select cuyo total combinado entre sub-expresiones excede MAX_ITERATION_ELEMENTS aunque cada sub-expresion individual este bajo el cap', () => {
+      const data = { a: Array.from({ length: 600 }, (_, i) => i) };
+      const fields = Array.from({ length: 20 }, () => '.a.[]').join(',');
+      const result = applyFilter(data, `[${fields}]`);
+
+      expect(isError(result)).toBe(true);
+      if (!isError(result)) return;
+      expect(result.error.code).toBe('E005');
+    });
+
+    it('acepta multi-select cuyo total combinado entre sub-expresiones esta bajo MAX_ITERATION_ELEMENTS', () => {
+      const data = { a: [1, 2, 3] };
+      const fields = Array.from({ length: 20 }, () => '.a.[]').join(',');
+      const result = applyFilter(data, `[${fields}]`);
+
+      expect(isSuccess(result)).toBe(true);
+    });
   });
 
   // ----------------------------------------------------------
