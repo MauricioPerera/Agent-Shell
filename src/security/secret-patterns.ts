@@ -11,8 +11,19 @@ import type { SecretPattern } from './types.js';
 /** Patrones por defecto para deteccion de secretos. */
 export const DEFAULT_SECRET_PATTERNS: SecretPattern[] = [
   {
+    // Regresion (ronda 73 del audit, HIGH): el separador `\s*[:=]\s*`
+    // exige que el `:`/`=` venga INMEDIATAMENTE despues del label (salvo
+    // espacios) — un secreto serializado como JSON (`{"api_key":"..."}`)
+    // tiene la comilla de cierre de la key JUSTO entre el label y el
+    // `:`, rompiendo el match. Un valor identico bajo `api_key=...`
+    // (estilo shell-arg) SI se detectaba; el MISMO secreto en texto JSON
+    // (ej. el body de una respuesta HTTP capturado como string antes de
+    // JSON.parse, o stdout de un `curl` que devuelve JSON) pasaba sin
+    // enmascarar. `['"]?` opcional entre el label y el separador cubre
+    // ambas formas sin afectar la ya soportada (label seguido directo de
+    // `:`/`=`, sin comilla de por medio, sigue matcheando igual).
     name: 'api-key-generic',
-    pattern: /(?:api[_-]?key|apikey)\s*[:=]\s*['"]?([a-zA-Z0-9_\-+/=]{20,})['"]?/gi,
+    pattern: /(?:api[_-]?key|apikey)['"]?\s*[:=]\s*['"]?([a-zA-Z0-9_\-+/=]{20,})['"]?/gi,
     replacement: '[REDACTED:api-key]',
   },
   {
@@ -21,8 +32,9 @@ export const DEFAULT_SECRET_PATTERNS: SecretPattern[] = [
     replacement: 'Bearer [REDACTED]',
   },
   {
+    // Regresion (ronda 73 del audit, HIGH): mismo motivo que api-key-generic arriba.
     name: 'password-field',
-    pattern: /(?:password|passwd|pwd)\s*[:=]\s*['"]?([^\s'"]{4,})['"]?/gi,
+    pattern: /(?:password|passwd|pwd)['"]?\s*[:=]\s*['"]?([^\s'"]{4,})['"]?/gi,
     replacement: '[REDACTED:password]',
   },
   {
@@ -55,8 +67,9 @@ export const DEFAULT_SECRET_PATTERNS: SecretPattern[] = [
     replacement: '[REDACTED:private-key]',
   },
   {
+    // Regresion (ronda 73 del audit, HIGH): mismo motivo que api-key-generic arriba.
     name: 'hex-secret-32plus',
-    pattern: /(?:secret|token)\s*[:=]\s*['"]?([0-9a-f]{32,})['"]?/gi,
+    pattern: /(?:secret|token)['"]?\s*[:=]\s*['"]?([0-9a-f]{32,})['"]?/gi,
     replacement: '[REDACTED:secret]',
   },
   {
@@ -90,6 +103,22 @@ export const DEFAULT_SECRET_PATTERNS: SecretPattern[] = [
 ];
 
 /**
+ * Patrones de nombre considerados sensibles — originalmente pensados para
+ * nombres de variable de entorno (ver isSensitiveEnvKey/filterSensitiveEnv
+ * mas abajo), reutilizados tambien por maskSecrets() para el masking
+ * key-aware en modo objeto (ver el comentario ahi, ronda 73 del audit).
+ */
+export const SENSITIVE_ENV_KEY_PATTERNS: RegExp[] = [
+  /password/i, /secret/i, /token/i, /key/i, /auth/i,
+  /credential/i, /private/i, /api_key/i, /apikey/i,
+];
+
+/** True si un nombre (de env var, o de campo de un objeto) matchea algun patron sensible. */
+export function isSensitiveEnvKey(key: string): boolean {
+  return SENSITIVE_ENV_KEY_PATTERNS.some(p => p.test(key));
+}
+
+/**
  * Reemplaza secretos detectados con placeholders [REDACTED:tipo].
  * Recorre recursivamente objetos y arrays.
  */
@@ -112,7 +141,36 @@ export function maskSecrets(value: any, patterns?: SecretPattern[]): any {
   if (value !== null && typeof value === 'object') {
     const result: Record<string, any> = {};
     for (const [k, v] of Object.entries(value)) {
-      result[k] = maskSecrets(v, activePatterns);
+      // Regresion (ronda 73 del audit, HIGH): el modo objeto solo aplicaba
+      // los patrones label+valor (api-key-generic/password-field/
+      // hex-secret-32plus) al VALOR en aislamiento — esos 3 patrones son
+      // estructuralmente "label embebido en el mismo string que el
+      // valor" (ej. "password=x"), asi que nunca podian dispararse cuando
+      // el label vive aparte, en la KEY del objeto, y el valor es un
+      // string suelto: `{password: "hunter2secret"}` pasaba intacto. Los
+      // parches de ronda 63 (redactSecretSetValue/redactSecretValueField)
+      // fueron un workaround puntual para secret:set/get especificamente
+      // — este fix es la solucion general: si la KEY matchea un nombre
+      // sensible (reusando SENSITIVE_ENV_KEY_PATTERNS, ya usado para el
+      // mismo proposito en filterSensitiveEnv), forzar el redactado del
+      // VALOR sin importar su forma. Solo aplica cuando el valor es un
+      // string no vacio — un objeto/array anidado bajo una key sensible
+      // sigue recorriendose normalmente en vez de redactarse entero, para
+      // no perder datos no-secretos que puedan colgar del mismo campo.
+      //
+      // El fallback SOLO entra en juego cuando los patrones de forma
+      // (bearer-token, api-key-generic, etc.) no encontraron nada que
+      // redactar en el valor — si alguno SI matcheo, se preserva su
+      // placeholder especifico (ej. "Bearer [REDACTED]",
+      // "[REDACTED:api-key]") en vez de pisarlo con el generico
+      // "[REDACTED]", manteniendo el comportamiento ya establecido para
+      // los casos que los patrones de forma ya cubrian.
+      if (typeof v === 'string' && v.length > 0 && isSensitiveEnvKey(k)) {
+        const maskedValue = maskSecrets(v, activePatterns);
+        result[k] = maskedValue === v ? '[REDACTED]' : maskedValue;
+      } else {
+        result[k] = maskSecrets(v, activePatterns);
+      }
     }
     return result;
   }
@@ -132,17 +190,6 @@ export function containsSecret(value: any, patterns?: SecretPattern[]): boolean 
     if (pattern.test(serialized)) return true;
   }
   return false;
-}
-
-/** Patrones de nombre de variable de entorno que se consideran sensibles. */
-export const SENSITIVE_ENV_KEY_PATTERNS: RegExp[] = [
-  /password/i, /secret/i, /token/i, /key/i, /auth/i,
-  /credential/i, /private/i, /api_key/i, /apikey/i,
-];
-
-/** True si el nombre de una env var matchea algun patron sensible. */
-export function isSensitiveEnvKey(key: string): boolean {
-  return SENSITIVE_ENV_KEY_PATTERNS.some(p => p.test(key));
 }
 
 /**

@@ -360,6 +360,76 @@ describe('Secret Masking (maskSecrets)', () => {
     });
   });
 
+  describe('JSON-string secrets y masking key-aware (ronda 73 del audit)', () => {
+    /**
+     * Regresion (ronda 73 del audit, HIGH): el separador `\s*[:=]\s*` de
+     * api-key-generic/password-field/hex-secret-32plus exigia el `:`/`=`
+     * INMEDIATAMENTE despues del label — un secreto serializado como JSON
+     * (`{"password":"x"}`) tiene la comilla de cierre de la key JUSTO
+     * entre el label y el `:`, rompiendo el match. El mismo secreto en
+     * forma shell-arg (`password=x`) SI se detectaba.
+     */
+    it('T25: enmascara un password serializado como JSON string (comilla entre label y separador)', () => {
+      const input = '{"password":"hunter2secret"}';
+      const masked = maskSecrets(input);
+      expect(masked).not.toContain('hunter2secret');
+      expect(masked).toContain('[REDACTED:password]');
+    });
+
+    it('T26: enmascara un api_key serializado como JSON string', () => {
+      const input = '{"api_key": "abc123def456ghi789jkl012mno345"}';
+      const masked = maskSecrets(input);
+      expect(masked).not.toContain('abc123def456ghi789jkl012mno345');
+      expect(masked).toContain('[REDACTED:api-key]');
+    });
+
+    it('T27: sigue detectando la forma shell-arg (sin comillas) sin regresion', () => {
+      const input = 'password=mySecretPass123';
+      const masked = maskSecrets(input);
+      expect(masked).toContain('[REDACTED:password]');
+      expect(masked).not.toContain('mySecretPass');
+    });
+
+    /**
+     * Regresion (ronda 73 del audit, HIGH): maskSecrets() en modo objeto
+     * solo aplicaba los patrones label+valor al VALOR aislado — como esos
+     * patrones son "label embebido en el mismo string que el valor", un
+     * secreto CUYO LABEL vive en la KEY del objeto (no en el string del
+     * valor) pasaba intacto: `{password: "hunter2secret"}` no matcheaba
+     * ningun patron de forma. Ahora, si la KEY matchea un nombre sensible
+     * (mismo SENSITIVE_ENV_KEY_PATTERNS que filterSensitiveEnv), el VALOR
+     * se fuerza a [REDACTED] cuando ningun patron de forma lo cubrio.
+     */
+    it('T28: enmascara un valor bajo una key sensible sin forma reconocida (opaco)', () => {
+      const input = { name: 'db-pass', password: 'hunter2', user: 'admin' };
+      const masked = maskSecrets(input);
+      expect(masked.name).toBe('db-pass');
+      expect(masked.user).toBe('admin');
+      expect(masked.password).toBe('[REDACTED]');
+    });
+
+    it('T29: preserva el placeholder ESPECIFICO de un patron de forma en vez de pisarlo con el generico', () => {
+      const input = { auth: 'Bearer eyJhbGciOiJIUzI1NiJ9abcde' };
+      const masked = maskSecrets(input);
+      expect(masked.auth).toBe('Bearer [REDACTED]');
+    });
+
+    it('T30: no enmascara un valor vacio ni un valor no-string bajo una key sensible', () => {
+      const input = { password: '', token: 12345, secret: null };
+      const masked = maskSecrets(input);
+      expect(masked.password).toBe('');
+      expect(masked.token).toBe(12345);
+      expect(masked.secret).toBe(null);
+    });
+
+    it('T31: sigue recorriendo (no redactando entero) un objeto/array anidado bajo una key sensible', () => {
+      const input = { credentials: { user: 'admin', note: 'no secret here' } };
+      const masked = maskSecrets(input);
+      expect(masked.credentials.user).toBe('admin');
+      expect(masked.credentials.note).toBe('no secret here');
+    });
+  });
+
   /**
    * Regresion (ronda 61 del audit, CRITICAL — hallada por un pase de QA
    * independiente vía pool exec, sin contexto de rondas previas): el
