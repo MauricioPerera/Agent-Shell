@@ -24,18 +24,18 @@ function createMockCore(overrides: Partial<{ help: Function; exec: Function }> =
 
 // Helper: simulates sending a JSON-RPC message and getting the response
 // by calling the internal handler directly (bypasses stdio transport)
-async function sendMessage(server: any, request: JsonRpcRequest, sessionId?: string): Promise<JsonRpcResponse | null> {
-  return server.handleMessage(request, sessionId);
+async function sendMessage(server: any, request: JsonRpcRequest, sessionId?: string, hasExplicitSessionId?: boolean): Promise<JsonRpcResponse | null> {
+  return server.handleMessage(request, sessionId, hasExplicitSessionId);
 }
 
 /** Sends an initialize request to put the server into initialized state. */
-async function initializeServer(server: any): Promise<void> {
+async function initializeServer(server: any, sessionId?: string): Promise<void> {
   await sendMessage(server, {
     jsonrpc: '2.0',
     id: 'init',
     method: 'initialize',
     params: { protocolVersion: '2024-11-05', capabilities: {} },
-  });
+  }, sessionId);
 }
 
 describe('McpServer', () => {
@@ -64,6 +64,64 @@ describe('McpServer', () => {
       expect(response!.result.capabilities).toEqual({ tools: {} });
       expect(response!.result.serverInfo.name).toBe('test-shell');
       expect(response!.result.serverInfo.version).toBe('0.0.1');
+    });
+  });
+
+  /**
+   * Regresion (ronda 75 del audit, MEDIUM): `initialized` era un solo
+   * boolean compartido por TODAS las sesiones — en modo HTTP, apenas una
+   * sesion llamaba `initialize`, el gate quedaba satisfecho para cualquier
+   * OTRA sesion concurrente/futura, sin importar si esa sesion en
+   * particular hizo el handshake.
+   */
+  describe('initialize gate por sesion explicita', () => {
+    it('T01b: una sesion explicita distinta que nunca inicializo es rechazada, aunque OTRA sesion explicita si lo haya hecho', async () => {
+      const freshServer = new McpServer({ core, name: 'test-shell', version: '0.0.1' });
+      await sendMessage(freshServer, {
+        jsonrpc: '2.0', id: 'init-a', method: 'initialize', params: {},
+      }, 'session-A', true);
+
+      const response = await sendMessage(freshServer, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'tools/call',
+        params: { name: 'cli_exec', arguments: { command: 'search foo' } },
+      }, 'session-B', true);
+
+      expect(response!.error).toBeDefined();
+      expect(response!.error!.message).toContain('not initialized');
+    });
+
+    it('T01c: la MISMA sesion explicita que ya inicializo puede llamar tools/call', async () => {
+      const freshServer = new McpServer({ core, name: 'test-shell', version: '0.0.1' });
+      await sendMessage(freshServer, {
+        jsonrpc: '2.0', id: 'init-a', method: 'initialize', params: {},
+      }, 'session-A', true);
+
+      const response = await sendMessage(freshServer, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'tools/call',
+        params: { name: 'cli_exec', arguments: { command: 'search foo' } },
+      }, 'session-A', true);
+
+      expect(response!.error).toBeUndefined();
+    });
+
+    it('T01d: un caller sin sessionId explicito (stdio, o HTTP sin X-Session-Id) no requiere re-inicializar por request', async () => {
+      const freshServer = new McpServer({ core, name: 'test-shell', version: '0.0.1' });
+      await sendMessage(freshServer, {
+        jsonrpc: '2.0', id: 'init', method: 'initialize', params: {},
+      });
+
+      const response = await sendMessage(freshServer, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'tools/call',
+        params: { name: 'cli_exec', arguments: { command: 'search foo' } },
+      });
+
+      expect(response!.error).toBeUndefined();
     });
   });
 
@@ -180,7 +238,7 @@ describe('McpServer', () => {
       const execSpy = vi.fn(async () => ({ code: 0, data: null, error: null, meta: {} }));
       const spyCore = createMockCore({ exec: execSpy });
       const spyServer = new McpServer({ core: spyCore });
-      await initializeServer(spyServer);
+      await initializeServer(spyServer, 'session-abc-123');
 
       await sendMessage(spyServer, {
         jsonrpc: '2.0',

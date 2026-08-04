@@ -194,9 +194,16 @@ export function validateCommonConfigFields(raw: Record<string, any>, configPath:
     if (typeof raw.agentProfile === 'string') config.agentProfile = raw.agentProfile;
     else fail(`${configPath} field 'agentProfile' should be a string, refusing to start with an ambiguous access-control config.`);
   }
+  // Regresion (ronda 75 del audit, MEDIUM): a diferencia de sus hermanos de
+  // control de acceso (agentProfile/jailRoot/permissions/rbac, todos arriba
+  // y abajo), este campo usaba warn-and-drop. Un auth.bearerToken malformado
+  // (ej. un bug de templating de config que lo deja como numero/objeto) se
+  // descartaba con solo un warning, y el server arrancaba SIN autenticacion
+  // y sin fallo de arranque — exactamente el modo de falla que fail() en los
+  // demas campos de acceso ya existe para evitar. Fail closed, igual que los otros.
   if (raw.auth?.bearerToken !== undefined) {
     if (typeof raw.auth.bearerToken === 'string') config.auth = { bearerToken: raw.auth.bearerToken };
-    else warn('auth.bearerToken', 'a string');
+    else fail(`${configPath} field 'auth.bearerToken' should be a string, refusing to start with an ambiguous access-control config.`);
   }
   if (raw.jailRoot !== undefined) {
     if (typeof raw.jailRoot === 'string') config.jailRoot = raw.jailRoot;

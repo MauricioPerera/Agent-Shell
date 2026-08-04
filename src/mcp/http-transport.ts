@@ -353,10 +353,11 @@ export class HttpSseTransport {
       // writeup. A real fix needs either per-principal tokens or a
       // server-issued, client-unspoofable session id; neither is
       // implemented.
-      const sessionId = (req.headers['x-session-id'] as string | undefined) || randomUUID();
+      const explicitSessionId = req.headers['x-session-id'] as string | undefined;
+      const sessionId = explicitSessionId || randomUUID();
 
       try {
-        const response = await this.handler(request, sessionId);
+        const response = await this.handler(request, sessionId, !!explicitSessionId);
         if (aborted) return; // timeout already fired
         clearTimeout(timeout);
         if (response) {

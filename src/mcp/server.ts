@@ -70,12 +70,38 @@ const TOOLS: McpToolDefinition[] = [
  * Implementa el protocolo MCP sobre stdio, exponiendo cli_help y cli_exec
  * como las unicas 2 tools disponibles para el agente.
  */
+// Regresion (ronda 75 del audit, MEDIUM): mismo cap FIFO que
+// WorkspaceSessionStore (skills/workspace.ts) — sin tope, un caller HTTP que
+// no manda X-Session-Id agrega una entrada nueva a initializedSessions en
+// CADA `initialize` (cada request sin ese header recibe un sessionId
+// aleatorio nuevo, ver http-transport.ts), creciendo sin limite.
+const MAX_INITIALIZED_SESSIONS = 200;
+
 export class McpServer {
   private readonly transport: StdioTransport;
   private readonly core: McpCore;
   private readonly name: string;
   private readonly version: string;
-  private initialized = false;
+  // Regresion (ronda 75 del audit, MEDIUM): era un solo boolean compartido
+  // por TODAS las sesiones — en modo HTTP, apenas UNA sesion llamaba
+  // `initialize`, el gate "rechazar antes de initialize" quedaba
+  // permanentemente satisfecho para cualquier otra sesion concurrente o
+  // futura que comparta el bearer token del deployment, sin importar si esa
+  // sesion en particular hizo el handshake.
+  //
+  // Fix: el gate se trackea por sessionId SOLO cuando el caller mando un
+  // X-Session-Id explicito (hasExplicitSessionId) — ese es el unico caso
+  // donde una sesion real y reusable existe, y donde el bleed original era
+  // posible. Un caller stdio (sessionId siempre undefined, una sola
+  // conexion) o HTTP sin X-Session-Id (HttpSseTransport le asigna un id
+  // ALEATORIO nuevo en CADA request — ver http-transport.ts — asi que jamas
+  // podria reusar el mismo id entre `initialize` y una llamada posterior)
+  // cae al flag global, igual que el comportamiento original: no hay
+  // continuidad de sesion real que proteger ahi, y exigir el handshake por
+  // request rompería a cualquier cliente HTTP simple que no adopto el
+  // header.
+  private globalInitialized = false;
+  private readonly initializedSessions = new Set<string>();
 
   constructor(config: McpServerConfig) {
     this.core = config.core;
@@ -96,7 +122,7 @@ export class McpServer {
   }
 
   /** Procesa un mensaje JSON-RPC. Util para custom transports y testing. */
-  async handleMessage(request: JsonRpcRequest, sessionId?: string): Promise<JsonRpcResponse | null> {
+  async handleMessage(request: JsonRpcRequest, sessionId?: string, hasExplicitSessionId?: boolean): Promise<JsonRpcResponse | null> {
     // Notifications (no id) don't get responses
     if (request.id === undefined) {
       return null;
@@ -104,7 +130,7 @@ export class McpServer {
 
     switch (request.method) {
       case 'initialize':
-        return this.handleInitialize(request);
+        return this.handleInitialize(request, sessionId, hasExplicitSessionId);
       case 'notifications/initialized':
         // Client acknowledgement after initialize - no response needed for notifications
         return null;
@@ -113,7 +139,10 @@ export class McpServer {
       case 'tools/list':
       case 'tools/call': {
         // Reject requests before initialization per MCP spec
-        if (!this.initialized) {
+        const isInitialized = hasExplicitSessionId && sessionId !== undefined
+          ? this.initializedSessions.has(sessionId)
+          : this.globalInitialized;
+        if (!isInitialized) {
           return {
             jsonrpc: '2.0',
             id: request.id!,
@@ -133,8 +162,16 @@ export class McpServer {
     }
   }
 
-  private handleInitialize(request: JsonRpcRequest): JsonRpcResponse {
-    this.initialized = true;
+  private handleInitialize(request: JsonRpcRequest, sessionId?: string, hasExplicitSessionId?: boolean): JsonRpcResponse {
+    if (hasExplicitSessionId && sessionId !== undefined) {
+      if (!this.initializedSessions.has(sessionId) && this.initializedSessions.size >= MAX_INITIALIZED_SESSIONS) {
+        const oldest = this.initializedSessions.values().next().value;
+        if (oldest !== undefined) this.initializedSessions.delete(oldest);
+      }
+      this.initializedSessions.add(sessionId);
+    } else {
+      this.globalInitialized = true;
+    }
     const result: McpInitializeResult = {
       protocolVersion: '2024-11-05',
       capabilities: { tools: {} },

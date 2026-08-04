@@ -834,6 +834,13 @@ describe('HttpSseTransport', () => {
             sessionId ? { 'X-Session-Id': sessionId } : undefined,
           );
 
+        // A caller that sends an explicit X-Session-Id is tracked as its own
+        // MCP session (ronda 75 del audit) — it must complete the
+        // initialize handshake under that SAME id before tools/call, it
+        // can't piggyback on the header-less initialize above.
+        await rpcRequest(transport.port, { jsonrpc: '2.0', id: 0, method: 'initialize', params: {} }, { 'X-Session-Id': 'session-A' });
+        await rpcRequest(transport.port, { jsonrpc: '2.0', id: 0, method: 'initialize', params: {} }, { 'X-Session-Id': 'session-B' });
+
         await cliExec(`workspace:init --path "${dirA}"`, 'session-A');
         await cliExec(`workspace:init --path "${dirB}"`, 'session-B');
 

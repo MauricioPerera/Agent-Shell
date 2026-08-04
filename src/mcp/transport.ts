@@ -13,8 +13,16 @@ import type { JsonRpcRequest, JsonRpcResponse } from './types.js';
  * inherently single-tenant — one agent, one process, no cross-session risk).
  * HttpSseTransport is the transport that actually supplies it, since it's
  * the one where multiple concurrent callers can share a single Core.
+ *
+ * hasExplicitSessionId distinguishes a client-supplied X-Session-Id from
+ * HttpSseTransport's random per-request fallback (see http-transport.ts) —
+ * McpServer uses it to decide whether the MCP initialize handshake should be
+ * tracked per-session (real, reusable session id) or against a single shared
+ * flag (stdio, or an HTTP caller that never opted into session continuity).
+ * stdio never sets it (always falsy/undefined, matching its single-tenant
+ * nature above).
  */
-export type MessageHandler = (message: JsonRpcRequest, sessionId?: string) => Promise<JsonRpcResponse | null>;
+export type MessageHandler = (message: JsonRpcRequest, sessionId?: string, hasExplicitSessionId?: boolean) => Promise<JsonRpcResponse | null>;
 
 /**
  * Transporte stdio para JSON-RPC 2.0.

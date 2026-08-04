@@ -248,8 +248,20 @@ function serveStdio(args: string[]): void {
   // registry entero moria con el proceso) al recibir SIGINT/SIGTERM.
   // Regresion (ronda 50 del audit, HIGH): mismo hueco en CronScheduler —
   // ni siquiera existia un parametro para pasar la instancia hasta ahora.
-  process.on('SIGINT', async () => { server.stop(); await processManager.destroy(); cronScheduler.destroy(); process.exit(0); });
-  process.on('SIGTERM', async () => { server.stop(); await processManager.destroy(); cronScheduler.destroy(); process.exit(0); });
+  // Regresion (ronda 75 del audit, MEDIUM): la cadena de shutdown era un
+  // `await` secuencial sin try/catch — si processManager.destroy() (o
+  // cualquier paso previo) tiraba, cronScheduler.destroy() nunca corria y
+  // el proceso quedaba colgado sin llegar a process.exit(0). Cada paso va
+  // envuelto individualmente para que el fallo de uno no le impida correr
+  // a los demas.
+  const shutdownStdio = async (): Promise<void> => {
+    try { server.stop(); } catch (err) { console.error('Error stopping server:', err); }
+    try { await processManager.destroy(); } catch (err) { console.error('Error destroying processManager:', err); }
+    try { cronScheduler.destroy(); } catch (err) { console.error('Error destroying cronScheduler:', err); }
+    process.exit(0);
+  };
+  process.on('SIGINT', shutdownStdio);
+  process.on('SIGTERM', shutdownStdio);
 
   server.start();
 }
@@ -257,7 +269,14 @@ function serveStdio(args: string[]): void {
 async function serveHttp(args: string[]): Promise<void> {
   const fileConfig = loadConfigFile();
 
-  const port = validatePort(String(parseFlag(args, '--port') || process.env.AGENT_SHELL_PORT || fileConfig.port || '3000'));
+  // Regresion (ronda 75 del audit, LOW/MEDIUM): `||` trata 0 como falsy —
+  // `fileConfig.port: 0` (un valor VALIDO, pedirle al SO un puerto
+  // efimero) se descartaba en silencio y caia al default '3000' en vez de
+  // respetarse. Los otros dos origenes (parseFlag/env var) son siempre
+  // strings no vacios cuando estan presentes, asi que `??` (que solo
+  // cae al default en null/undefined, no en 0/"") es un cambio seguro y
+  // mas correcto para los tres.
+  const port = validatePort(String(parseFlag(args, '--port') ?? process.env.AGENT_SHELL_PORT ?? fileConfig.port ?? '3000'));
   const host = parseFlag(args, '--host') || process.env.AGENT_SHELL_HOST || fileConfig.host || '0.0.0.0';
   const token = parseFlag(args, '--token') || process.env.AGENT_SHELL_TOKEN || fileConfig.auth?.bearerToken;
   const profile = validateProfile(parseFlag(args, '--profile') || process.env.AGENT_SHELL_PROFILE || fileConfig.agentProfile);
@@ -306,7 +325,7 @@ async function serveHttp(args: string[]): Promise<void> {
     auditLogger,
   });
 
-  transport.onMessage(async (msg, sessionId) => mcpServer.handleMessage(msg, sessionId));
+  transport.onMessage(async (msg, sessionId, hasExplicitSessionId) => mcpServer.handleMessage(msg, sessionId, hasExplicitSessionId));
   await transport.start();
 
   console.log(`Agent Shell v${VERSION}`);
@@ -332,9 +351,17 @@ async function serveHttp(args: string[]): Promise<void> {
   // Regresion (ronda 47 del audit, HIGH): mismo fix que serveStdio() arriba
   // — sin esto, un proceso spawneado via process:spawn quedaba huerfano al
   // recibir SIGINT/SIGTERM. Regresion (ronda 50 del audit, HIGH): mismo
-  // hueco para CronScheduler.
-  process.on('SIGINT', async () => { await transport.stop(); await processManager.destroy(); cronScheduler.destroy(); process.exit(0); });
-  process.on('SIGTERM', async () => { await transport.stop(); await processManager.destroy(); cronScheduler.destroy(); process.exit(0); });
+  // hueco para CronScheduler. Regresion (ronda 75 del audit, MEDIUM): mismo
+  // fix de try/catch por paso que serveStdio() arriba — un `await` fallido
+  // no debe impedir que los pasos restantes de shutdown corran.
+  const shutdownHttp = async (): Promise<void> => {
+    try { await transport.stop(); } catch (err) { console.error('Error stopping transport:', err); }
+    try { await processManager.destroy(); } catch (err) { console.error('Error destroying processManager:', err); }
+    try { cronScheduler.destroy(); } catch (err) { console.error('Error destroying cronScheduler:', err); }
+    process.exit(0);
+  };
+  process.on('SIGINT', shutdownHttp);
+  process.on('SIGTERM', shutdownHttp);
 }
 
 /** CLI entry point. */

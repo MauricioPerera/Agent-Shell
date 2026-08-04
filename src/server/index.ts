@@ -144,7 +144,10 @@ function loadConfig(): ServerConfig {
       // value is a security-relevant config error and must abort startup, not
       // be swallowed into the same warn-and-continue path as a JSON syntax typo.
       const fileConfig = validateConfigFile(raw, configPath);
-      if (fileConfig.port) config.port = fileConfig.port;
+      // Regresion (ronda 75 del audit, LOW/MEDIUM): `if (fileConfig.port)` es un
+      // chequeo truthy — `port: 0` (valor VALIDO, pedirle al SO un puerto
+      // efimero) se descartaba en silencio en vez de aplicarse.
+      if (fileConfig.port !== undefined) config.port = fileConfig.port;
       if (fileConfig.host) config.host = fileConfig.host;
       if (fileConfig.auth?.bearerToken) config.auth = { bearerToken: fileConfig.auth.bearerToken };
       if (fileConfig.agentProfile) config.agentProfile = fileConfig.agentProfile;
@@ -312,8 +315,8 @@ async function main() {
     auditLogger,
   });
 
-  transport.onMessage(async (msg, sessionId) => {
-    const response = await mcpServer.handleMessage(msg, sessionId);
+  transport.onMessage(async (msg, sessionId, hasExplicitSessionId) => {
+    const response = await mcpServer.handleMessage(msg, sessionId, hasExplicitSessionId);
     return response;
   });
 
@@ -350,20 +353,24 @@ async function main() {
   // this process) on SIGINT/SIGTERM (ronda 47 del audit, HIGH). Same gap
   // for CronScheduler (ronda 50 del audit, HIGH) — there wasn't even a
   // parameter to pass the instance through until now.
+  // Regresion (ronda 75 del audit, MEDIUM): the shutdown chain was a plain
+  // sequential `await` with no try/catch — a throw from any one step (e.g.
+  // transport.stop()) skipped every step after it, including
+  // cronScheduler.destroy(), and the process never reached process.exit(0).
+  // Each step is now isolated so one failure can't block the rest.
+  const shutdown = async (): Promise<void> => {
+    try { await transport.stop(); } catch (err) { console.error('Error stopping transport:', err); }
+    try { await processManager.destroy(); } catch (err) { console.error('Error destroying processManager:', err); }
+    try { cronScheduler.destroy(); } catch (err) { console.error('Error destroying cronScheduler:', err); }
+    process.exit(0);
+  };
+
   process.on('SIGINT', async () => {
     console.log('\nShutting down...');
-    await transport.stop();
-    await processManager.destroy();
-    cronScheduler.destroy();
-    process.exit(0);
+    await shutdown();
   });
 
-  process.on('SIGTERM', async () => {
-    await transport.stop();
-    await processManager.destroy();
-    cronScheduler.destroy();
-    process.exit(0);
-  });
+  process.on('SIGTERM', shutdown);
 }
 
 // Guarded the same way cli/index.ts is: without this, importing this module

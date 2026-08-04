@@ -59,6 +59,16 @@ describe('shared/config-validation', () => {
       .toThrow("field 'agentProfile' should be a string");
   });
 
+  /**
+   * Regresion (ronda 75 del audit, MEDIUM): a diferencia de sus hermanos de
+   * control de acceso, auth.bearerToken mal tipado solo generaba un warn()
+   * y arrancaba SIN autenticacion en vez de abortar el arranque.
+   */
+  it('SCV05b: validateCommonConfigFields falla cerrado en auth.bearerToken mal tipado', () => {
+    expect(() => validateCommonConfigFields({ auth: { bearerToken: 12345 } }, 'x.json', { fail: throwingFail, warn: () => {} }))
+      .toThrow("field 'auth.bearerToken' should be a string");
+  });
+
   it('SCV06: validateCommonConfigFields avisa (no falla) en port mal tipado', () => {
     const warn = vi.fn();
     const result = validateCommonConfigFields({ port: 'not-a-number' }, 'x.json', { fail: throwingFail, warn });
