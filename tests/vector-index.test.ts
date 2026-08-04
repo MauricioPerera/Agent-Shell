@@ -1085,6 +1085,22 @@ describe('Vector Index', () => {
       const exact = truncateVector(vector, 3);
       expect(exact).toBe(vector);
     });
+
+    /**
+     * Regresion (ronda 65 del audit, MEDIUM): mismo bug class que el topK
+     * negativo de ronda 60 — slice(0, N) con N negativo en JS significa
+     * "todo menos los ultimos |N| elementos", no "trunca a N". Sin
+     * Math.max(0, ...), truncateVector(v, -5) sobre un vector de 768
+     * devolvia 763 elementos en vez de un vector vacio/truncado.
+     */
+    it('M17: dimensions negativo trunca a longitud 0 en vez de devolver "todo menos los ultimos |N|"', async () => {
+      const { truncateVector } = await import('../src/vector-index/matryoshka.js');
+      const vector = Array.from({ length: 768 }, (_, i) => i * 0.01);
+
+      const truncated = truncateVector(vector, -5);
+
+      expect(truncated).toHaveLength(0);
+    });
   });
 
   // ==========================================================================
@@ -1142,6 +1158,44 @@ describe('Vector Index', () => {
 
       expect(result.results.some(r => r.id === 'short:vec')).toBe(false);
       expect(result.results.some(r => r.id === 'good:a')).toBe(true);
+    });
+
+    /**
+     * Regresion (ronda 65 del audit, MEDIUM): mismo bug class que el topK
+     * negativo de ronda 60, nunca portado a candidateTopK/finalTopK. Sin
+     * Math.max(0, ...), un candidateTopK negativo dejaba pasar casi todo
+     * el candidate pool (slice(0, N) invertido) en vez de angostarlo.
+     */
+    it('M18: candidateTopK negativo angosta el pool a 0 en vez de dejar pasar casi todo', async () => {
+      const { funnelSearch } = await import('../src/vector-index/matryoshka.js');
+      const queryVector = Array.from({ length: 8 }, (_, i) => i * 0.1);
+      const entries: [string, { vector: number[]; metadata: any }][] = Array.from({ length: 10 }, (_, i) => [
+        `cmd:${i}`,
+        { vector: Array.from({ length: 8 }, (_, j) => (i + j) * 0.1), metadata: makeMetadata('cmd', String(i)) },
+      ]);
+
+      const result = funnelSearch(queryVector, entries, [{ dimensions: 4, candidateTopK: -1 }], 8, 10, 0);
+
+      expect(result.stages[0].candidatesOut).toBe(0);
+      expect(result.results).toHaveLength(0);
+    });
+
+    /**
+     * Regresion (ronda 65 del audit, MEDIUM): mismo guard en finalTopK —
+     * funnelSearch() es API publica exportada directamente, no siempre se
+     * llega a ella via VectorIndex.search() (que ya clampea su propio topK).
+     */
+    it('M19: finalTopK negativo devuelve 0 resultados en vez de "todos menos los ultimos |N|"', async () => {
+      const { funnelSearch } = await import('../src/vector-index/matryoshka.js');
+      const queryVector = Array.from({ length: 8 }, (_, i) => i * 0.1);
+      const entries: [string, { vector: number[]; metadata: any }][] = Array.from({ length: 10 }, (_, i) => [
+        `cmd:${i}`,
+        { vector: Array.from({ length: 8 }, (_, j) => (i + j) * 0.1), metadata: makeMetadata('cmd', String(i)) },
+      ]);
+
+      const result = funnelSearch(queryVector, entries, [{ dimensions: 4, candidateTopK: 10 }], 8, -1, 0);
+
+      expect(result.results).toHaveLength(0);
     });
   });
 });

@@ -31,10 +31,23 @@ export { MatryoshkaEmbeddingAdapter, funnelSearch, truncateVector, defaultMatryo
  * Truncates a vector to the given number of dimensions.
  * This is the core Matryoshka operation: for models trained with Matryoshka
  * loss, `vector.slice(0, N)` is a valid N-dimensional embedding.
+ *
+ * Regresion (ronda 65 del audit, MEDIUM): sin el Math.max(0, ...), un
+ * `dimensions` negativo (via MatryoshkaConfig.layers[].dimensions o
+ * MatryoshkaEmbeddingAdapter's maxDimensions, ambos config de quien
+ * despliega, no del atacante) llegaba intacto a Array.prototype.slice.
+ * slice(0, N) con N negativo en JS significa "todo menos los ultimos |N|
+ * elementos", no "trunca a N" — el mismo bug class que el topK negativo de
+ * ronda 60 (vector-index/index.ts), nunca portado a este archivo. Como
+ * query y candidato se truncan igual, las longitudes seguian coincidiendo,
+ * asi que cosineSimilaritySafe() no lo detectaba: el stage de baja
+ * resolucion terminaba comparando vectores casi completos, derrotando el
+ * proposito del funnel sin tirar ningun error.
  */
 function truncateVector(vector: number[], dimensions: number): number[] {
-  if (dimensions >= vector.length) return vector;
-  return vector.slice(0, dimensions);
+  const dim = Math.max(0, dimensions);
+  if (dim >= vector.length) return vector;
+  return vector.slice(0, dim);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -134,9 +147,14 @@ function funnelSearch(
     }
     candidates = scored;
 
-    // Sort descending by score and keep top candidateTopK
+    // Sort descending by score and keep top candidateTopK.
+    // Regresion (ronda 65 del audit, MEDIUM): mismo bug class que topK
+    // negativo (ronda 60) — sin Math.max(0, ...), un candidateTopK
+    // negativo hace que slice(0, N) devuelva "todo menos los ultimos |N|"
+    // en vez de acotar, dejando pasar casi todo el candidate pool al
+    // siguiente stage (mas caro) en vez de angostarlo.
     candidates.sort((a, b) => b.score - a.score);
-    candidates = candidates.slice(0, layer.candidateTopK);
+    candidates = candidates.slice(0, Math.max(0, layer.candidateTopK));
 
     stages.push({
       dimensions: dim,
@@ -163,9 +181,14 @@ function funnelSearch(
 
   candidates.sort((a, b) => b.score - a.score);
 
-  // Apply threshold at the final stage
+  // Apply threshold at the final stage.
+  // Regresion (ronda 65 del audit, MEDIUM): mismo guard que candidateTopK
+  // arriba. VectorIndex.search() ya clampea el topK que le pasa aca (ronda
+  // 60), pero funnelSearch() es API publica exportada directamente — un
+  // caller que la invoca sin pasar por VectorIndex podia pasar un
+  // finalTopK negativo y sufrir el mismo comportamiento invertido de slice.
   candidates = candidates.filter(c => c.score >= threshold);
-  candidates = candidates.slice(0, finalTopK);
+  candidates = candidates.slice(0, Math.max(0, finalTopK));
 
   stages.push({
     dimensions: finalDim,
