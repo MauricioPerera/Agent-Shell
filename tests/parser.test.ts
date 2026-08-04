@@ -489,6 +489,57 @@ describe('Parser', () => {
       if (isParseResult(result)) return;
       expect(result.errorType).toBe('E_NESTED_BATCH');
     });
+
+    /**
+     * @test T14d - Item de batch con filtro jq multi-campo
+     * @priority Alta
+     * Regresion (ronda 74 del audit, HIGH): findClosingBracket() no
+     * trackeaba profundidad de brackets — el "]" del filtro jq multi-campo
+     * (`| [.name, .email]`, sintaxis documentada y valida) se tomaba como
+     * el cierre del batch, truncando el contenido antes de tiempo y
+     * perdiendo el resto del batch en silencio. Ahora cuenta [/] para
+     * encontrar el "]" que realmente cierra el batch.
+     */
+    it('T14d: parsea batch donde un item tiene un filtro jq multi-campo (bracket anidado)', () => {
+      const result = parse('batch[users:get --id 1 | [.name, .email], orders:count]');
+
+      expect(isParseResult(result)).toBe(true);
+      if (!isParseResult(result)) return;
+
+      expect(result.type).toBe('batch');
+      expect(result.commands).toHaveLength(2);
+      expect(result.commands[0].namespace).toBe('users');
+      expect(result.commands[0].command).toBe('get');
+      expect(result.commands[0].jqFilter).not.toBeNull();
+      expect(result.commands[0].jqFilter!.type).toBe('multi_field');
+      expect(result.commands[0].jqFilter!.fields).toEqual(['name', 'email']);
+      expect(result.commands[1].namespace).toBe('orders');
+      expect(result.commands[1].command).toBe('count');
+    });
+
+    it('T14e: parsea batch donde el PRIMER item tiene un filtro jq multi-campo', () => {
+      const result = parse('batch[orders:count, users:get --id 1 | [.name, .email]]');
+
+      expect(isParseResult(result)).toBe(true);
+      if (!isParseResult(result)) return;
+
+      expect(result.type).toBe('batch');
+      expect(result.commands).toHaveLength(2);
+      expect(result.commands[1].jqFilter).not.toBeNull();
+      expect(result.commands[1].jqFilter!.fields).toEqual(['name', 'email']);
+    });
+
+    it('T14f: parsea batch con VARIOS items con filtro jq multi-campo (multiples pares de brackets anidados)', () => {
+      const result = parse('batch[users:get --id 1 | [.name, .email], orders:get --id 2 | [.total, .status]]');
+
+      expect(isParseResult(result)).toBe(true);
+      if (!isParseResult(result)) return;
+
+      expect(result.type).toBe('batch');
+      expect(result.commands).toHaveLength(2);
+      expect(result.commands[0].jqFilter!.fields).toEqual(['name', 'email']);
+      expect(result.commands[1].jqFilter!.fields).toEqual(['total', 'status']);
+    });
   });
 
   // ----------------------------------------------------------

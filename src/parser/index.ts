@@ -256,12 +256,33 @@ function parseBatch(trimmed: string, raw: string): ParseResult | ParseError {
   return { type: 'batch', commands, raw };
 }
 
-/** Encuentra el `]` de cierre correspondiente, respetando comillas. */
+/**
+ * Encuentra el `]` de cierre correspondiente, respetando comillas Y
+ * anidamiento de brackets.
+ *
+ * Regresion (ronda 74 del audit, HIGH): antes retornaba el PRIMER `]` sin
+ * comillas, sin trackear profundidad — un item de batch con un filtro jq
+ * multi-campo (`| [.a, .b]`, sintaxis documentada) contiene su PROPIO `]`
+ * de cierre antes del `]` real del batch. Ese `]` interno se tomaba como
+ * el cierre del batch, truncando `content` antes de tiempo: todo lo que
+ * viniera despues (mas items del batch) se descartaba en silencio, y el
+ * fragmento restante (con su `[` sin `]` correspondiente) fallaba mas
+ * tarde con un E_INVALID_JQ enganoso que culpaba al filtro jq en vez de
+ * al bracket-matching. Ahora cuenta `[`/`]` sin comillas para encontrar el
+ * `]` que realmente cierra el `[` de `openPos`, sin importar cuantos
+ * pares balanceados haya en el medio.
+ */
 function findClosingBracket(input: string, openPos: number): number {
   let inQuote: string | null = null;
+  let depth = 1;
   for (let i = openPos + 1; i < input.length; ) {
-    if (inQuote === null && input[i] === ']') {
-      return i;
+    if (inQuote === null) {
+      if (input[i] === '[') {
+        depth++;
+      } else if (input[i] === ']') {
+        depth--;
+        if (depth === 0) return i;
+      }
     }
     const step = scanQuoteChar(input, i, inQuote);
     inQuote = step.inQuote;
@@ -270,18 +291,36 @@ function findClosingBracket(input: string, openPos: number): number {
   return -1;
 }
 
-/** Separa un string por comas, ignorando comas dentro de comillas. */
+/**
+ * Separa un string por comas, ignorando comas dentro de comillas Y dentro
+ * de brackets anidados.
+ *
+ * Regresion (ronda 74 del audit, HIGH): mismo motivo que
+ * findClosingBracket() arriba — incluso con `content` ya correctamente
+ * acotado por el fix de ahi, splitear por CUALQUIER coma sin comillas
+ * seguia partiendo un filtro jq multi-campo (`[.a, .b]`) por la coma DE
+ * ADENTRO, fabricando 3 segmentos rotos en vez de 1. Ahora una coma solo
+ * separa items del batch cuando esta fuera de TODO bracket, no solo fuera
+ * de comillas.
+ */
 function splitByCommaRespectingQuotes(input: string): string[] {
   const segments: string[] = [];
   let current = '';
   let inQuote: string | null = null;
+  let depth = 0;
 
   for (let i = 0; i < input.length; ) {
-    if (inQuote === null && input[i] === ',') {
-      segments.push(current);
-      current = '';
-      i++;
-      continue;
+    if (inQuote === null) {
+      if (input[i] === '[') {
+        depth++;
+      } else if (input[i] === ']') {
+        depth = Math.max(0, depth - 1);
+      } else if (depth === 0 && input[i] === ',') {
+        segments.push(current);
+        current = '';
+        i++;
+        continue;
+      }
     }
     const step = scanQuoteChar(input, i, inQuote);
     current += input.slice(i, i + step.length);
