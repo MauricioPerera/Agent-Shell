@@ -419,7 +419,14 @@ describe('Core + AuditLogger', () => {
     const evt = events.find(e => e.type === 'command:executed');
     expect(evt).toBeDefined();
     expect(evt.data.command).not.toContain('hunter2secret');
-    expect(evt.data.command).toContain('[REDACTED:password]');
+    // Regresion (ronda 63 del audit, HIGH): redactSecretSetValue() ahora
+    // fuerza el redactado del --value de secret:set INCONDICIONALMENTE
+    // (antes de que maskSecrets() intente su deteccion por patron), asi
+    // que el placeholder generico "[REDACTED]" reemplaza al especifico
+    // "[REDACTED:password]" que solo aplicaba por coincidencia con este
+    // valor de test en particular (que casualmente tenia forma de
+    // password=... reconocible por el patron generico).
+    expect(evt.data.command).toContain('--value [REDACTED]');
   });
 
   it('AU19: error:handler (falla generica) enmascara secretos inline en el texto del comando', async () => {
@@ -446,7 +453,8 @@ describe('Core + AuditLogger', () => {
     const evt = events.find(e => e.type === 'permission:denied' && e.data.reason === 'rate-limit');
     expect(evt).toBeDefined();
     expect(evt.data.command).not.toContain('hunter2secret');
-    expect(evt.data.command).toContain('[REDACTED:password]');
+    // Regresion (ronda 63 del audit, HIGH): ver comentario identico en AU18.
+    expect(evt.data.command).toContain('--value [REDACTED]');
   });
 
   it('AU21: error:timeout enmascara secretos inline en el texto del comando', async () => {
@@ -486,7 +494,8 @@ describe('Core + AuditLogger', () => {
     const evt = events.find(e => e.type === 'command:executed' && e.data.command?.includes('secret:set'));
     expect(evt).toBeDefined();
     expect(evt.data.command).not.toContain('hunter2secret');
-    expect(evt.data.command).toContain('[REDACTED:password]');
+    // Regresion (ronda 63 del audit, HIGH): ver comentario identico en AU18.
+    expect(evt.data.command).toContain('--value [REDACTED]');
   });
 
   /**

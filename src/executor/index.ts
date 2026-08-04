@@ -262,12 +262,14 @@ export class Executor {
     }
 
     if (mode === 'confirm') {
+      // Regresion (ronda 63 del audit, HIGH): mismo fix que Core — ver el
+      // comentario de MAX_PENDING_PER_SESSION en pending-confirm-store.ts.
       const confirmToken = this.pendingConfirms.create({
         namespace: cmd.namespace,
         command: cmd.command,
         args: validatedArgs,
         registeredCommand,
-      });
+      }, this.context.sessionId);
 
       this.context.auditLogger?.audit('confirm:requested', { command: fullName, token: confirmToken });
 
@@ -656,8 +658,8 @@ export class Executor {
     this.context.history.append({
       id,
       command,
-      args: maskSecrets(args),
-      result: maskSecrets(result),
+      args: maskSecrets(redactSecretValueField(command, args)),
+      result: maskSecrets(redactSecretValueField(command, result)),
       reversible,
       executedAt: new Date().toISOString(),
     });
@@ -702,6 +704,24 @@ export class Executor {
   revokeAllConfirms(): number {
     return this.pendingConfirms.revokeAll();
   }
+}
+
+/**
+ * Regresion (ronda 63 del audit, HIGH): maskSecrets() solo redacta valores
+ * con "forma" de secreto conocida — un valor arbitrario sin esa forma (ej.
+ * 'hunter2') bajo la key `value` de secret:set/secret:get pasaba en texto
+ * plano a recordHistory(), pese a que ese campo es ESTRUCTURALMENTE
+ * material secreto para esos 2 comandos especificos (secret:set's arg
+ * `value`, secret:get's resultado `value`) — a diferencia de cualquier
+ * otro campo `value` generico del resto del sistema. Fuerza el redactado
+ * de esa key ANTES de que maskSecrets() intente su deteccion por patron.
+ */
+function redactSecretValueField(command: string, obj: any): any {
+  if (command !== 'secret:set' && command !== 'secret:get') return obj;
+  if (obj && typeof obj === 'object' && !Array.isArray(obj) && 'value' in obj) {
+    return { ...obj, value: '[REDACTED]' };
+  }
+  return obj;
 }
 
 /** Calcula la profundidad maxima de un valor JSON. */

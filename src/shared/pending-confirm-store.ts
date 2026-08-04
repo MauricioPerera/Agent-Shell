@@ -22,12 +22,35 @@ import { randomUUID } from 'node:crypto';
  * server, so in practice nothing else stops it. Same evict-before-insert
  * FIFO pattern already used for MAX_SESSIONS in WorkspaceSessionStore/
  * SessionScopedContextStore/InMemoryStorageAdapter (ronda 46 del audit).
+ *
+ * Kept as a GLOBAL backstop on top of MAX_PENDING_PER_SESSION below (ronda
+ * 63 del audit) — many distinct sessions each individually under their own
+ * per-session cap could still sum past a sane total.
  */
 const MAX_PENDING = 1000;
+
+/**
+ * Regresion (ronda 63 del audit, HIGH): esta store es UNA SOLA instancia
+ * compartida por TODAS las sesiones concurrentes (Core/Executor cada uno
+ * construyen una unica instancia para todo el proceso — ver
+ * core/index.ts, executor/index.ts). El cap de arriba (MAX_PENDING) era
+ * puramente global: la eviccion FIFO al llegar al techo borraba el token
+ * mas viejo SIN IMPORTAR de que sesion era. Una sesion (con el mismo
+ * bearer token compartido que cualquier otro caller legitimo del
+ * deployment, sin necesitar adivinar ningun X-Session-Id) podia disparar
+ * 1000 `--confirm` rapidos y evictar el token, todavia fresco (bien
+ * dentro del TTL), que ACABABA de generar una sesion completamente
+ * distinta — un DoS confiable contra el flujo de confirmacion de OTROS
+ * callers. Este cap por-sesion hace que la eviccion, cuando la dispara
+ * UNA sesion, borre SOLO la entrada mas vieja de ESA MISMA sesion —
+ * jamas la de otra.
+ */
+const MAX_PENDING_PER_SESSION = 100;
 
 interface StoredEntry<T> {
   payload: T;
   createdAt: number;
+  sessionKey: string;
 }
 
 /** Resultado de intentar resolver (consumir) un token pendiente. */
@@ -58,21 +81,56 @@ export class PendingConfirmStore<T> {
     return this.entries.size;
   }
 
-  /** Genera un token nuevo, guarda el payload, y lo retorna. */
-  create(payload: T): string {
+  /**
+   * Genera un token nuevo, guarda el payload, y lo retorna.
+   *
+   * @param sessionKey Identifica la sesion duena de este token, SOLO para
+   *   acotar a que entradas puede afectar la eviccion (ver
+   *   MAX_PENDING_PER_SESSION arriba) — nunca se usa para autorizar quien
+   *   puede resolverlo despues (eso sigue dependiendo unicamente de
+   *   conocer el token, un UUID no adivinable; ver el comentario de
+   *   resolve() en los callers sobre por que eso es seguro). Sesiones sin
+   *   identidad propia (ej. stdio, inherentemente single-tenant) pueden
+   *   omitirlo — todas caen en el mismo balde compartido, lo cual es
+   *   inofensivo ahi porque no hay OTRAS sesiones concurrentes con las
+   *   que competir.
+   */
+  create(payload: T, sessionKey: string = ''): string {
     const token = randomUUID();
-    // Bound the map BEFORE inserting — same reasoning as MAX_SESSIONS
-    // elsewhere in this codebase. Evicts the OLDEST pending confirm (Map
-    // iteration order is insertion order) to make room; a token evicted
-    // this way simply stops existing, same as one that expires unresolved
-    // via sweepExpired() — the caller who requested it just never manages
-    // to resolve it, same failure mode as letting the TTL lapse.
+
+    // Bound BEFORE inserting, igual que antes — pero ahora en dos capas.
+    // Capa 1 (por-sesion): si ESTA sesion ya esta en su propio techo,
+    // evict SOLO su entrada mas vieja — nunca la de otra sesion.
+    if (this.countBySession(sessionKey) >= MAX_PENDING_PER_SESSION) {
+      this.evictOldestForSession(sessionKey);
+    }
+    // Capa 2 (backstop global): igual que antes de este fix, protege
+    // contra que MUCHAS sesiones distintas, cada una bajo su propio cap,
+    // sumen igual un total no acotado.
     if (this.entries.size >= MAX_PENDING) {
       const oldestToken = this.entries.keys().next().value;
       if (oldestToken !== undefined) this.entries.delete(oldestToken);
     }
-    this.entries.set(token, { payload, createdAt: Date.now() });
+
+    this.entries.set(token, { payload, createdAt: Date.now(), sessionKey });
     return token;
+  }
+
+  private countBySession(sessionKey: string): number {
+    let count = 0;
+    for (const entry of this.entries.values()) {
+      if (entry.sessionKey === sessionKey) count++;
+    }
+    return count;
+  }
+
+  private evictOldestForSession(sessionKey: string): void {
+    for (const [token, entry] of this.entries) {
+      if (entry.sessionKey === sessionKey) {
+        this.entries.delete(token);
+        return;
+      }
+    }
   }
 
   /**

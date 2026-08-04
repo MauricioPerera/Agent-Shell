@@ -26,6 +26,25 @@ export type { CoreResponse, CoreConfig, CoreRegistry, CoreVectorIndex, CoreConte
 
 const LOG_LEVELS: Record<string, number> = { DEBUG: 0, INFO: 1, WARN: 2, ERROR: 3 };
 
+/**
+ * Regresion (ronda 63 del audit, HIGH): maskSecrets() solo redacta valores
+ * con "forma" de secreto conocida (Bearer/JWT/password=/hex 32+/...) — un
+ * valor arbitrario sin esa forma (ej. `hunter2`) bajo `secret:set --value`
+ * pasaba en texto plano a history/audit log, pese a que ese argumento es
+ * ESTRUCTURALMENTE material secreto (a diferencia de cualquier otro
+ * --value generico del resto del sistema). Aplica antes de maskSecrets()
+ * en cada punto donde el string crudo del comando se guarda/audita, para
+ * que el secreto nunca llegue siquiera a la etapa de deteccion por patron.
+ * No cubre secret:get (no tiene --value en el comando; su leak de RESULTADO
+ * se corrige por separado en applyJqFilter/recordHistory de Executor, el
+ * unico lugar que persiste resultados — Core nunca guarda resultados en
+ * history/audit).
+ */
+function redactSecretSetValue(command: string): string {
+  if (!/^\s*secret:set\b/.test(command)) return command;
+  return command.replace(/(--value\s+)(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S+)/, '$1[REDACTED]');
+}
+
 /** Calcula la profundidad maxima de un valor JSON. Ported from executor/index.ts's getJsonDepth. */
 function getJsonDepth(value: any, current: number = 0): number {
   if (value === null || typeof value !== 'object') return current;
@@ -291,7 +310,7 @@ class Core {
       // persistente/SIEM) recibia el secreto en texto plano. Misma clase
       // de fuga que la ronda 39 ya cerro para otro canal (los preview de
       // dry-run/validate/confirm).
-      this.auditLogger?.audit('permission:denied', { command: maskSecrets(cmd.slice(0, 50)), reason: 'rate-limit' }, sessionId);
+      this.auditLogger?.audit('permission:denied', { command: maskSecrets(redactSecretSetValue(cmd).slice(0, 50)), reason: 'rate-limit' }, sessionId);
       return this.buildResponse(3, null, 'Rate limit exceeded', cmd.slice(0, 50), mode, startTime);
     }
 
@@ -307,7 +326,7 @@ class Core {
     try {
       return await this.withTimeout(this.execInternal(cmd, startTime, sessionId, controller.signal), globalTimeout, 'Request', controller);
     } catch (err: any) {
-      this.auditLogger?.audit('error:timeout', { command: maskSecrets(cmd.slice(0, 50)), timeout_ms: globalTimeout }, sessionId);
+      this.auditLogger?.audit('error:timeout', { command: maskSecrets(redactSecretSetValue(cmd).slice(0, 50)), timeout_ms: globalTimeout }, sessionId);
       return this.buildResponse(1, null, err.message || 'Request timed out', cmd.slice(0, 50), mode, startTime);
     }
   }
@@ -393,7 +412,7 @@ class Core {
             // code 3 is reserved exclusively for permission/rate-limit denial
             // across Core (see HELP_TEXT: "code 3: Permission denied / rate
             // limit") — every other code here is a lookup/handler failure.
-            this.auditLogger?.audit(code === 3 ? 'permission:denied' : 'error:handler', { command: maskSecrets(cmd.slice(0, 100)), code, error }, sessionId);
+            this.auditLogger?.audit(code === 3 ? 'permission:denied' : 'error:handler', { command: maskSecrets(redactSecretSetValue(cmd).slice(0, 100)), code, error }, sessionId);
           }
           this.recordHistory(cmd, code);
         }
@@ -419,7 +438,7 @@ class Core {
         const jqResult = this.applyJqFilter(data, firstCmd.jqFilter.raw);
         if (!jqResult.ok) {
           if (!isConfirmResolution) {
-            this.auditLogger?.audit('error:handler', { command: maskSecrets(cmd.slice(0, 100)), code: jqResult.code, error: jqResult.message }, sessionId);
+            this.auditLogger?.audit('error:handler', { command: maskSecrets(redactSecretSetValue(cmd).slice(0, 100)), code: jqResult.code, error: jqResult.message }, sessionId);
             this.recordHistory(cmd, 1);
           }
           return this.buildResponse(1, null, jqResult.message, cmd, mode, startTime);
@@ -444,12 +463,12 @@ class Core {
       if (!isConfirmResolution) {
         this.recordHistory(cmd, 0);
         if (!isPipeline) {
-          this.auditLogger?.audit('command:executed', { command: maskSecrets(cmd.slice(0, 100)), duration_ms: Date.now() - startTime }, sessionId);
+          this.auditLogger?.audit('command:executed', { command: maskSecrets(redactSecretSetValue(cmd).slice(0, 100)), duration_ms: Date.now() - startTime }, sessionId);
         }
       }
       return this.buildResponse(0, data, null, cmd, mode, startTime);
     } catch (err: any) {
-      this.auditLogger?.audit('error:handler', { command: maskSecrets(cmd.slice(0, 100)), error: err.message }, sessionId);
+      this.auditLogger?.audit('error:handler', { command: maskSecrets(redactSecretSetValue(cmd).slice(0, 100)), error: err.message }, sessionId);
       return this.buildResponse(1, null, err.message || 'Unknown error', cmd, mode, startTime);
     }
   }
@@ -575,7 +594,11 @@ class Core {
     handlerArgs: Record<string, any>,
     sessionId?: string
   ): any {
-    const token = this.pendingConfirms.create({ namespace, command, registeredCmd, handlerArgs, sessionId });
+    // Regresion (ronda 63 del audit, HIGH): sin el 2do argumento, la
+    // eviccion de PendingConfirmStore era global-FIFO — una sesion podia
+    // evictar el token recien creado de OTRA sesion. Ver el comentario de
+    // MAX_PENDING_PER_SESSION en pending-confirm-store.ts.
+    const token = this.pendingConfirms.create({ namespace, command, registeredCmd, handlerArgs, sessionId }, sessionId ?? '');
     this.auditLogger?.audit('confirm:requested', { command: `${namespace}:${command}`, token }, sessionId);
 
     return {
@@ -1188,7 +1211,7 @@ class Core {
       // segmento del batch (p.ej. "secret:set --value hunter2"), sin pasar
       // por maskSecrets() antes de los 3 audit() de abajo — mismo hueco que
       // el resto de exec()/execInternal(), cerrado aca igual.
-      const label = maskSecrets(cmd.meta.rawSegment.slice(0, 100));
+      const label = maskSecrets(redactSecretSetValue(cmd.meta.rawSegment).slice(0, 100));
       try {
         const data = await this.executeCommand(cmd, sessionId, signal);
         if (data && typeof data === 'object' && '_error' in data) {
@@ -1300,8 +1323,19 @@ class Core {
     // an arbitrary value under an unrecognized flag name (e.g. --value)
     // that doesn't itself look like a known secret shape — that's a
     // limitation shared with Executor's identical args masking.
+    //
+    // Regresion (ronda 63 del audit, HIGH): esa limitacion documentada NO
+    // es teorica para secret:set especificamente — su --value ES,
+    // estructuralmente, siempre material secreto (a diferencia de
+    // cualquier otro --value generico del resto del sistema, donde
+    // "podria" serlo). secret-store.ts's propio doc-comment promete
+    // "values... never appear in logs or history" — un valor sin forma
+    // reconocible (ej. 'hunter2') la incumplia. redactSecretSetValue()
+    // fuerza el redactado del argumento --value de secret:set
+    // incondicionalmente, ANTES de que maskSecrets() intente su deteccion
+    // por patron sobre el resto del string.
     this.history.push({
-      command: maskSecrets(command),
+      command: maskSecrets(redactSecretSetValue(command)),
       code,
       timestamp: new Date().toISOString(),
     });

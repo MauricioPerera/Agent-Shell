@@ -146,18 +146,72 @@ describe('PendingConfirmStore', () => {
    * esta wireado por defecto en el CLI/server shipeado). Mismo patron de
    * MAX_SESSIONS ya usado en otros stores acotados de esta base de codigo.
    */
-  it('T10: create() acota el tamano del store — supera el limite evict-ea el token mas viejo (FIFO)', () => {
+  /**
+   * Regresion (ronda 63 del audit, HIGH): distribuido en muchas sesiones
+   * distintas (cada una bien por debajo de su propio cap por-sesion), asi
+   * que lo que dispara la eviccion aca es especificamente el backstop
+   * GLOBAL (MAX_PENDING), no el nuevo cap por-sesion — ver T11/T12 abajo
+   * para el cap por-sesion en si.
+   */
+  it('T10: create() acota el tamano TOTAL del store (backstop global) — evict-ea el token mas viejo GLOBAL', () => {
     const store = new PendingConfirmStore<number>(60_000);
     const MAX_PENDING = 1000; // debe coincidir con la constante interna del modulo
+    const GROUP_SIZE = 90; // bien por debajo de MAX_PENDING_PER_SESSION (100)
 
-    const firstToken = store.create(0);
-    for (let i = 1; i < MAX_PENDING; i++) store.create(i);
+    const firstToken = store.create(0, 'session-0');
+    for (let i = 1; i < MAX_PENDING; i++) {
+      store.create(i, `session-${Math.floor(i / GROUP_SIZE)}`);
+    }
     expect(store.size).toBe(MAX_PENDING);
 
-    // Un token mas alla del limite: el mas viejo (firstToken) se evict-ea.
-    const overflowToken = store.create(MAX_PENDING);
+    // Un token mas alla del limite GLOBAL, en una sesion nueva: el mas
+    // viejo GLOBAL (firstToken, de session-0) se evict-ea igual, aunque
+    // este en otra sesion que la que dispara la insercion.
+    const overflowToken = store.create(MAX_PENDING, 'session-overflow');
     expect(store.size).toBe(MAX_PENDING);
     expect(store.resolve(firstToken)).toEqual({ status: 'not_found' });
     expect(store.resolve(overflowToken)).toEqual({ status: 'ok', payload: MAX_PENDING });
+  });
+
+  /**
+   * Regresion (ronda 63 del audit, HIGH): PendingConfirmStore es una
+   * UNICA instancia compartida por TODAS las sesiones concurrentes (Core/
+   * Executor construyen una sola instancia por proceso). La eviccion
+   * antes era global-FIFO puro — una sesion podia saturar el store y
+   * evictar el token, todavia fresco (bien dentro del TTL), que ACABABA
+   * de generar una sesion completamente distinta: un DoS confiable contra
+   * el flujo de confirmacion de OTROS callers, con el mismo bearer token
+   * compartido que cualquiera, sin necesitar adivinar ningun
+   * X-Session-Id. Ahora la eviccion disparada por UNA sesion que supera
+   * su PROPIO cap (MAX_PENDING_PER_SESSION) solo puede borrar la entrada
+   * mas vieja de ESA MISMA sesion — nunca la de otra.
+   */
+  it('T11: la eviccion por MAX_PENDING_PER_SESSION solo afecta a la MISMA sesion, nunca a otra', () => {
+    const store = new PendingConfirmStore<string>(60_000);
+    const MAX_PENDING_PER_SESSION = 100; // debe coincidir con la constante interna del modulo
+
+    // session-B genera un solo token, fresco, ANTES de que session-A sature su propio cap.
+    const freshTokenB = store.create('fresh-from-B', 'session-B');
+
+    // session-A satura su PROPIO cap.
+    const firstTokenA = store.create('first-from-A', 'session-A');
+    for (let i = 1; i < MAX_PENDING_PER_SESSION; i++) store.create(`item-${i}-from-A`, 'session-A');
+
+    // Un token MAS alla del cap de session-A: evict-ea el mas viejo DE
+    // session-A (firstTokenA) — el token de session-B sigue intacto.
+    const overflowTokenA = store.create('overflow-from-A', 'session-A');
+
+    expect(store.resolve(firstTokenA)).toEqual({ status: 'not_found' });
+    expect(store.resolve(overflowTokenA)).toEqual({ status: 'ok', payload: 'overflow-from-A' });
+    expect(store.resolve(freshTokenB)).toEqual({ status: 'ok', payload: 'fresh-from-B' });
+  });
+
+  it('T12: sesiones sin sessionKey (ej. stdio, inherentemente single-tenant) caen en un balde compartido por defecto, sin romper', () => {
+    const store = new PendingConfirmStore<string>(60_000);
+    const a = store.create('a'); // sin sessionKey -> balde default ('')
+    const b = store.create('b', ''); // explicito, mismo balde
+
+    expect(store.resolve(a)).toEqual({ status: 'ok', payload: 'a' });
+    expect(store.resolve(b)).toEqual({ status: 'ok', payload: 'b' });
   });
 });
