@@ -316,6 +316,50 @@ describe('Secret Masking (maskSecrets)', () => {
     expect(masked).toContain('[REDACTED:password]');
   });
 
+  describe('url-credentials (defensa contra ReDoS)', () => {
+    it('T24: enmascara credenciales embebidas en una URL de conexion', () => {
+      const input = 'postgres://user:hunter2secret@db.internal:5432/prod';
+      const masked = maskSecrets(input);
+      expect(masked).toContain('[REDACTED:url-credentials]');
+      expect(masked).not.toContain('hunter2secret');
+    });
+
+    /**
+     * Regresion (ronda 67 del audit, CRITICAL): [a-z0-9+.-]* (resto del
+     * esquema) y [^/\s@]+ (parte credential antes de @) eran greedy sin
+     * cota, cada uno seguido de un literal obligatorio ("://" y "@") que
+     * nunca aparece en una URL sin credenciales embebidas. Con el flag /g,
+     * el motor de regex reintenta desde CADA posicion del string — sobre
+     * un tramo largo sin "://" ni "@", el backtracking cuesta
+     * O(resto-del-string) POR posicion, sumando O(n^2) total. Bloquea el
+     * event loop sincronicamente, inmune al timeout de Core/Executor.
+     * Este test falla por TIMEOUT (no por assertion) si la cuadratica
+     * reaparece — 60KB tardaba varios segundos con el regex viejo.
+     */
+    it('T25: no sufre blowup cuadratico en una URL larga sin "@" ni credenciales', () => {
+      const longUrlNoCredentials = 'https://example.com/?data=' + 'a'.repeat(60_000);
+
+      const start = Date.now();
+      const masked = maskSecrets(longUrlNoCredentials);
+      const elapsedMs = Date.now() - start;
+
+      expect(elapsedMs).toBeLessThan(500);
+      expect(masked).toBe(longUrlNoCredentials); // sin '@', no hay credencial que enmascarar
+    });
+
+    it('T26: no sufre blowup cuadratico en un valor de env var largo sin credenciales (filterSensitiveEnv)', async () => {
+      const { filterSensitiveEnv } = await import('../src/security/secret-patterns.js');
+      const env = { WEBHOOK_URL: 'https://hooks.example.com/?d=' + 'b'.repeat(60_000) };
+
+      const start = Date.now();
+      const filtered = filterSensitiveEnv(env as any);
+      const elapsedMs = Date.now() - start;
+
+      expect(elapsedMs).toBeLessThan(500);
+      expect(filtered.WEBHOOK_URL).toBe(env.WEBHOOK_URL);
+    });
+  });
+
   /**
    * Regresion (ronda 61 del audit, CRITICAL — hallada por un pase de QA
    * independiente vía pool exec, sin contexto de rondas previas): el

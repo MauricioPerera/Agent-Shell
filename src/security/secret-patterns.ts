@@ -64,8 +64,27 @@ export const DEFAULT_SECRET_PATTERNS: SecretPattern[] = [
     // https://<key>@o123.ingest.sentry.io/... (Sentry DSN), redis://:pass@host,
     // amqp://user:pass@host. Catches values whose secret isn't behind a
     // `key=value`-shaped prefix like the patterns above expect.
+    //
+    // Regresion (ronda 67 del audit, CRITICAL): [a-z0-9+.-]* (resto del
+    // esquema) y [^/\s@]+ (parte credential antes de @) eran greedy sin
+    // cota, cada uno seguido de un literal obligatorio ("://" y "@") que
+    // puede no aparecer nunca en el input. Con el flag /g, el motor
+    // reintenta el regex completo desde CADA posicion del string — en
+    // cualquier posicion dentro de un tramo largo sin "://" ni "@" (ej.
+    // una URL de 40KB sin credenciales embebidas), el backtracking de
+    // [a-z0-9+.-]* buscando "://" cuesta O(resto-del-string) POR posicion,
+    // sumando O(n^2) total (~600ms a 40KB, sin limite superior probado —
+    // >120s a 1MB). Bloquea el event loop sincronicamente, inmune al
+    // timeout de Core/Executor (Promise.race no puede interrumpir un
+    // regex.replace() en curso). Alcanzable via cualquier argumento en el
+    // path validate/dry-run/confirm, o cualquier env var con forma de URL
+    // larga (filterSensitiveEnv corre esto en CADA shell:exec/git/spawn).
+    // Acotar ambos cuantificadores greedy a un maximo razonable (esquemas
+    // reales tienen <20 chars; un user:pass realista cabe en 512) limita
+    // el backtracking a O(cota) por posicion en vez de O(n), volviendo el
+    // costo total lineal sin importar el largo del input.
     name: 'url-credentials',
-    pattern: /[a-z][a-z0-9+.-]*:\/\/[^/\s@]+@[^\s'"]+/gi,
+    pattern: /[a-z][a-z0-9+.-]{0,20}:\/\/[^/\s@]{1,512}@[^\s'"]+/gi,
     replacement: '[REDACTED:url-credentials]',
   },
 ];
