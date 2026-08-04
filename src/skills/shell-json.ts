@@ -6,6 +6,7 @@
 
 import { command } from '../command-builder/index.js';
 import { applyFilter } from '../jq-filter/index.js';
+import { MAX_INPUT_SIZE_BYTES } from '../jq-filter/types.js';
 import type { SkillEntry } from './scaffold.js';
 
 const filterDef = command('json', 'filter')
@@ -47,12 +48,41 @@ export const jsonCommands: SkillEntry[] = [
   {
     definition: parseDef,
     handler: async (args: any) => {
+      let parsed: any;
       try {
-        const parsed = JSON.parse(args.text);
-        return { success: true, data: parsed };
+        parsed = JSON.parse(args.text);
       } catch (err: any) {
         return { success: false, data: null, error: `Invalid JSON: ${err.message}` };
       }
+
+      // Regresion (ronda 62 del audit, HIGH): a diferencia de json:filter
+      // (cuyo --input es type:'json', asi que Core/Executor's convertType
+      // ya le aplica un chequeo de profundidad antes de que llegue al
+      // handler — y applyFilter() aplica ademas su propio limite de
+      // tamano via validateInput()), json:parse's `text` es type:'string'
+      // por necesidad (su trabajo ES parsear un string crudo) y no tenia
+      // NINGUNA validacion de profundidad/tamano sobre el resultado. Un
+      // payload de anidamiento profundo (`[[[[...]]]]`) de apenas ~10KB
+      // — muy por debajo de cualquier cap de body existente — parsea
+      // instantaneo, pero un JSON.stringify() posterior (al serializar la
+      // respuesta hacia el caller, en mcp/server.ts o mcp/http-transport.ts)
+      // revienta con "RangeError: Maximum call stack size exceeded",
+      // degradando a un "Internal error" opaco. Mismo mecanismo de
+      // defensa que jq-filter's propio validateInput() ya usa: intentar
+      // serializar ACA (antes de que el resultado salga del handler) para
+      // atrapar tanto el stack overflow por anidamiento profundo como un
+      // resultado sobredimensionado, en vez de dejar que el problema
+      // aparezca recien en la capa de transporte.
+      try {
+        const serialized = JSON.stringify(parsed);
+        if (serialized && serialized.length > MAX_INPUT_SIZE_BYTES) {
+          return { success: false, data: null, error: `Parsed JSON exceeds maximum size of ${MAX_INPUT_SIZE_BYTES} bytes` };
+        }
+      } catch {
+        return { success: false, data: null, error: 'Parsed JSON is too deeply nested to serialize safely' };
+      }
+
+      return { success: true, data: parsed };
     },
   },
 ];

@@ -1011,6 +1011,57 @@ describe('Cron Sandbox Adapter Injection', () => {
     const listAfter = await list({});
     expect(listAfter.data.count).toBe(0);
   });
+
+  /**
+   * Regresion (ronda 62 del audit, HIGH): la eviccion por MAX_TASKS en
+   * schedule() borraba la entrada mas vieja del Map INCONDICIONALMENTE,
+   * incluso con una ejecucion en curso — exactamente el mismo bug que
+   * cancel() tenia antes de la ronda 50 (ver CR14 arriba), pero nunca se
+   * le aplico el mismo fix. El comando de la tarea evictada seguia
+   * corriendo del lado del adapter contra un objeto `task` huerfano: al
+   * terminar, su resultado se perdia en silencio (sin aparecer ni en
+   * cron:list() ni en cron:history()) — un comando quedaba corriendo
+   * como un "zombie" invisible para el operador.
+   */
+  it('CR15: evictar por MAX_TASKS una tarea en ejecucion no descarta su resultado en silencio', async () => {
+    let resolveRun: (v: any) => void;
+    execMock.mockImplementationOnce(() => new Promise((resolve) => { resolveRun = resolve; }));
+
+    const schedule = findHandler(cmds, 'cron', 'schedule');
+    await schedule({ name: 'oldest-running', command: 'sleep-forever', interval: '1s' });
+
+    await vi.advanceTimersByTimeAsync(1000); // dispara la corrida, queda colgada (isRunning=true)
+
+    // Llenar hasta MAX_TASKS (200) — la entrada 200 disparara la eviccion
+    // de la MAS VIEJA (oldest-running, todavia corriendo).
+    for (let i = 0; i < 199; i++) {
+      const res = await schedule({ name: `filler-${i}`, command: 'echo hi', interval: '1h' });
+      expect(res.success).toBe(true);
+    }
+    const triggerRes = await schedule({ name: 'trigger-eviction', command: 'echo hi', interval: '1h' });
+    expect(triggerRes.success).toBe(true);
+
+    // oldest-running sigue viva en cron:list() (su ejecucion en curso NO
+    // fue abortada, el adapter no expone forma de hacerlo) — pero marcada
+    // como cancelling, mismo patron que cancel() sobre una tarea corriendo
+    // (CR14): el timer ya esta detenido (ningun tick futuro), y la entrada
+    // desaparece recien cuando esa corrida termina.
+    const list = findHandler(cmds, 'cron', 'list');
+    const listRes = await list({});
+    const evicted = listRes.data.tasks.find((t: any) => t.name === 'oldest-running');
+    expect(evicted).toBeDefined();
+    expect(evicted.cancelling).toBe(true);
+
+    // Su ejecucion en curso SI queda registrada en history al terminar,
+    // en vez de perderse.
+    resolveRun!({ stdout: '', stderr: '', exitCode: 0 });
+    await vi.advanceTimersByTimeAsync(0);
+
+    const history = findHandler(cmds, 'cron', 'history');
+    const histRes = await history({ name: 'oldest-running' });
+    expect(histRes.data.count).toBe(1);
+    expect(histRes.data.history[0].exitCode).toBe(0);
+  });
 });
 
 // ===========================================================================

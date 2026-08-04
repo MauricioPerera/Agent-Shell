@@ -116,7 +116,27 @@ export class CronScheduler {
       if (oldestKey !== undefined) {
         const oldest = this.tasks.get(oldestKey)!;
         clearInterval(oldest.timer);
-        this.tasks.delete(oldestKey);
+        // Regresion (ronda 62 del audit, HIGH): esta eviccion borraba la
+        // entrada del Map incondicionalmente, incluso con una ejecucion
+        // en curso — exactamente el mismo bug que cancel() tenia antes de
+        // la ronda 50 (ver el comentario de CronTask.cancelled arriba).
+        // El comando de la tarea evictada seguia corriendo del lado del
+        // ShellAdapter (sin forma de abortarlo, esa interfaz no tiene
+        // AbortSignal) contra un objeto `task` huerfano: cuando
+        // executeTask() terminaba, su finally chequeaba `task.cancelled`
+        // (undefined/falso) y descartaba el resultado en silencio — el
+        // comando quedaba corriendo como un zombie invisible, sin rastro
+        // en cron:list() ni cron:history(). Mismo fix que cancel(): si
+        // esta corriendo, marcarla `cancelled` (el timer YA esta
+        // detenido arriba, asi que no sigue contando contra el limite de
+        // timers vivos que MAX_TASKS existe para acotar) y dejar que el
+        // finally de executeTask() archive su resultado y la borre recien
+        // cuando esa corrida termine — igual que ya hace con cancel().
+        if (oldest.isRunning) {
+          oldest.cancelled = true;
+        } else {
+          this.tasks.delete(oldestKey);
+        }
       }
     }
 

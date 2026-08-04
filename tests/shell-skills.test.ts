@@ -115,6 +115,36 @@ describe('JSON Skills', () => {
     expect(result.success).toBe(false);
     expect(result.error).toContain('Invalid JSON');
   });
+
+  /**
+   * Regresion (ronda 62 del audit, HIGH): a diferencia de json:filter
+   * (cuyo --input es type:'json' y ya recibe un chequeo de profundidad
+   * de Core/Executor's convertType, mas el propio limite de tamano de
+   * applyFilter()'s validateInput()), json:parse no tenia NINGUNA
+   * validacion sobre el resultado parseado. Un texto de apenas ~10KB con
+   * anidamiento profundo (`[[[[...]]]]`) parseaba instantaneo, pero un
+   * JSON.stringify() posterior (al serializar la RESPUESTA hacia el
+   * caller, en la capa de transporte MCP) revienta con "RangeError:
+   * Maximum call stack size exceeded", degradando a un "Internal error"
+   * opaco — un DoS barato y repetible alcanzable con el permiso mas bajo
+   * del modelo (json:read).
+   */
+  it('JS07: json:parse rechaza un resultado demasiado anidado para serializar de forma segura', async () => {
+    const handler = findHandler(jsonCommands, 'json', 'parse');
+    const deeplyNested = '['.repeat(5000) + ']'.repeat(5000);
+    const result = await handler({ text: deeplyNested });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('too deeply nested');
+  });
+
+  it('JS08: json:parse sigue aceptando JSON normal, no anidado, sin falsos positivos', async () => {
+    const handler = findHandler(jsonCommands, 'json', 'parse');
+    const result = await handler({ text: '{"users":[{"name":"Alice"},{"name":"Bob"}],"count":2}' });
+
+    expect(result.success).toBe(true);
+    expect(result.data.count).toBe(2);
+  });
 });
 
 // ===========================================================================
