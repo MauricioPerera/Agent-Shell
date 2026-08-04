@@ -333,7 +333,19 @@ class Core {
 
   private async execInternal(cmd: string, startTime: number, sessionId?: string, signal?: AbortSignal): Promise<CoreResponse> {
     let mode = 'execute';
-    this.logger.log('INFO', 'core', 'exec', { command: cmd.slice(0, 100) });
+    // Regresion (ronda 66 del audit, CRITICAL): este this.logger.log() (y los
+    // de buildResponse() mas abajo, el otro unico sitio que loguea el
+    // comando) pasaban el texto CRUDO sin maskSecrets(redactSecretSetValue(...))
+    // — a diferencia de auditLogger.audit()/recordHistory(), que si lo hacen
+    // desde ronda 49/63. Un `secret:set --value <secreto-sin-forma-conocida>`
+    // con un TYPO en cualquier otro flag (ej. --limit invalido) nunca llega a
+    // parsear con exito, asi que recordHistory() jamas corre para ese
+    // comando — este logger.log() de la linea de arriba, y el de
+    // buildResponse() en el branch de parseError, terminaban siendo el UNICO
+    // registro del comando fallido, en texto plano, en cualquier deployment
+    // que conecte config.logging.onLog (la forma estandar de capturar logs
+    // de Core).
+    this.logger.log('INFO', 'core', 'exec', { command: maskSecrets(redactSecretSetValue(cmd)).slice(0, 100) });
 
     try {
       // Parse
@@ -1355,10 +1367,17 @@ class Core {
   ): CoreResponse {
     const duration_ms = Date.now() - startTime;
 
+    // Regresion (ronda 66 del audit, CRITICAL): mismo motivo que el
+    // logger.log() de execInternal() arriba — command aca es el `cmd` crudo
+    // reenviado por CADA sitio que llama buildResponse(), incluido el branch
+    // de parseError (donde recordHistory() nunca corre). Este es el unico
+    // choke point de logging por el que pasan TODOS esos sitios, asi que
+    // enmascarar aca cierra la fuga sin tener que tocar cada call site.
+    const maskedCommand = maskSecrets(redactSecretSetValue(command)).slice(0, 100);
     if (error) {
-      this.logger.log('ERROR', 'core', error, { command: command.slice(0, 100), code, duration_ms });
+      this.logger.log('ERROR', 'core', error, { command: maskedCommand, code, duration_ms });
     } else if (duration_ms > 5000) {
-      this.logger.log('WARN', 'core', 'Slow command execution', { command: command.slice(0, 100), duration_ms });
+      this.logger.log('WARN', 'core', 'Slow command execution', { command: maskedCommand, duration_ms });
     }
 
     return {

@@ -557,4 +557,53 @@ describe('Core + AuditLogger', () => {
     expect(res.code).toBe(0);
     expect(res.data.greeting).toBe('hi');
   });
+
+  /**
+   * Regresion (ronda 66 del audit, CRITICAL): this.logger.log() (tanto el
+   * de execInternal() como los dos dentro de buildResponse()) pasaban el
+   * comando CRUDO sin maskSecrets(redactSecretSetValue(...)) — a diferencia
+   * de auditLogger.audit()/recordHistory(), que si lo hacen desde ronda
+   * 49/63. Un secret:set cuyo VALOR no matchea ningun patron conocido (ej.
+   * "hunter2") y que ademas tiene un typo en OTRO flag (asi nunca parsea
+   * con exito) nunca llega a recordHistory() — el logger.log() terminaba
+   * siendo el UNICO registro del comando fallido, en texto plano.
+   */
+  describe('logger.log() (config.logging.onLog) enmascara secretos — ronda 66', () => {
+    function collectLogs(entries: any[]) {
+      return (entry: any) => entries.push(entry);
+    }
+
+    it('AU25: el logger.log() de execInternal() (nivel INFO, cada comando) enmascara el secreto', async () => {
+      const entries: any[] = [];
+      const core = new Core({
+        registry: createMockRegistry() as any,
+        logging: { level: 'DEBUG', onLog: collectLogs(entries) },
+      });
+
+      await core.exec('secret:set --value password=hunter2secret', 'session-T');
+
+      const evt = entries.find(e => e.module === 'core' && e.message === 'exec');
+      expect(evt).toBeDefined();
+      expect(JSON.stringify(evt.data)).not.toContain('hunter2secret');
+      expect(evt.data.command).toContain('--value [REDACTED]');
+    });
+
+    it('AU26: el logger.log() de buildResponse() en el branch de parseError enmascara el secreto (recordHistory() nunca corre para este caso)', async () => {
+      const entries: any[] = [];
+      const core = new Core({
+        registry: createMockRegistry() as any,
+        logging: { level: 'DEBUG', onLog: collectLogs(entries) },
+      });
+
+      // --limit invalido hace que el comando nunca parsee con exito, asi
+      // que recordHistory() (el otro sitio que enmascara) jamas corre para
+      // este caso — el logger.log() de buildResponse() es el UNICO registro.
+      await core.exec('secret:set --value password=hunter2secret --limit xx', 'session-U');
+
+      const evt = entries.find(e => e.level === 'ERROR' && e.module === 'core');
+      expect(evt).toBeDefined();
+      expect(JSON.stringify(evt.data)).not.toContain('hunter2secret');
+      expect(evt.data.command).toContain('--value [REDACTED]');
+    });
+  });
 });
