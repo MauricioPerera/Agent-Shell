@@ -228,6 +228,26 @@ describe('Workspace Skills', () => {
     expect(res.data.recentCommands).toHaveLength(1);
   });
 
+  /**
+   * Regresion (ronda 71 del audit, HIGH): a diferencia de ProcessManager.list()
+   * y CronScheduler.list(), que ya enmascaran `command` con maskSecrets()
+   * antes de exponerlo, WorkspaceState.recordHistory() guardaba el comando
+   * en texto plano. workspace:status solo exige workspace:read (un tier mas
+   * bajo que workspace:write+shell:exec, lo que hace falta para POBLAR la
+   * historia via workspace:run) — un caller con permisos mas bajos podia
+   * leer secretos ejecutados por otro caller con permisos mas altos.
+   */
+  it('WS16b: recordHistory enmascara secretos antes de guardar, workspace:status nunca los expone', async () => {
+    state.recordHistory('curl -H "Authorization: Bearer sk-live-abcdefghij1234567890" https://api.example.com', 0, 10);
+
+    const status = findHandler(cmds, 'workspace', 'status');
+    const res = await status({});
+
+    expect(res.data.recentCommands).toHaveLength(1);
+    expect(res.data.recentCommands[0].command).not.toContain('sk-live-abcdefghij1234567890');
+    expect(res.data.recentCommands[0].command).toContain('Bearer [REDACTED]');
+  });
+
   // -----------------------------------------------------------------------
   // workspace:reset
   // -----------------------------------------------------------------------

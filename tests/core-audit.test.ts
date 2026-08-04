@@ -104,6 +104,47 @@ describe('Core + AuditLogger', () => {
     expect(evt.sessionId).toBe('session-C');
   });
 
+  /**
+   * Regresion (ronda 71 del audit, HIGH): checkRateLimit() se llamaba UNA
+   * SOLA VEZ, al entrar a exec() antes de parsear — un batch[...] con
+   * muchos items consumia un solo token del rate limiter en vez de uno
+   * por comando real ejecutado, bypaseando la proteccion de abuso/DoS con
+   * hasta Nx el throughput previsto por request. Con maxRequests:2, un
+   * batch de 5 items NO debe permitir que los 5 tengan exito — al menos
+   * uno debe rechazarse por rate-limit, algo que ANTES del fix nunca
+   * pasaba (el batch entero corria sin importar cuan chico fuera el
+   * limite, mientras hubiera al menos 1 token disponible al INICIO).
+   */
+  it('AU03b: batch[] respeta el rate limit POR ITEM, no solo al entrar a exec()', async () => {
+    const auditLogger = new AuditLogger('default');
+    const core = new Core({ registry: createMockRegistry() as any, auditLogger, rateLimit: { maxRequests: 2, windowMs: 60_000 } });
+
+    const res = await core.exec('batch[users:list, users:list, users:list, users:list, users:list]', 'session-RL1');
+
+    const results = res.data as any[];
+    expect(results.length).toBe(5);
+    const successCount = results.filter(r => r.code === 0).length;
+    const rateLimitedCount = results.filter(r => r.code === 3 && r.error === 'Rate limit exceeded').length;
+    expect(successCount).toBeLessThan(5);
+    expect(rateLimitedCount).toBeGreaterThan(0);
+  });
+
+  /**
+   * Regresion (ronda 71 del audit, HIGH): mismo motivo que AU03b, para
+   * pipelines. Un pipeline de varios pasos con un rate limit restrictivo
+   * debe abortar por rate-limit en algun paso, no correr entero sin
+   * importar cuantos pasos tenga.
+   */
+  it('AU03c: pipeline (>>) respeta el rate limit POR PASO, no solo al entrar a exec()', async () => {
+    const auditLogger = new AuditLogger('default');
+    const core = new Core({ registry: createMockRegistry() as any, auditLogger, rateLimit: { maxRequests: 2, windowMs: 60_000 } });
+
+    const res = await core.exec('users:list >> users:list >> users:list >> users:list', 'session-RL2');
+
+    expect(res.code).not.toBe(0);
+    expect(res.error).toContain('Rate limit exceeded');
+  });
+
   it('AU04: error:handler se emite cuando el handler reporta success:false', async () => {
     const auditLogger = new AuditLogger('default');
     const events = collectEvents(auditLogger);

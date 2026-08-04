@@ -1089,6 +1089,19 @@ class Core {
 
       const stepLabel = `${namespace}:${command}`;
 
+      // Regresion (ronda 71 del audit, HIGH): checkRateLimit() se llamaba
+      // UNA SOLA VEZ, al entrar a exec() antes de parsear — un `batch[...]`
+      // o pipeline con hasta 20/10 comandos consumia un solo token del
+      // rate limiter en vez de uno por comando real ejecutado, bypaseando
+      // la proteccion de abuso/DoS del limiter con `maxRequests:1` real
+      // logrando hasta 20x el throughput previsto por request. Ahora cada
+      // paso vuelve a chequear, igual que Executor.executeSingle() ya hace
+      // en cada invocacion (via su propio bucle de pipeline/batch).
+      if (!this.checkRateLimit()) {
+        auditStep('permission:denied', stepLabel, { code: 3, error: 'Rate limit exceeded', reason: 'rate-limit' });
+        return { _error: { code: 3, error: 'Rate limit exceeded' } };
+      }
+
       const lookupResult = this.registry.get(namespace, command);
       if (!lookupResult.ok) {
         auditStep('error:handler', stepLabel, { code: 2, error: `Command not found: ${namespace}:${command}` });
@@ -1224,6 +1237,20 @@ class Core {
       // por maskSecrets() antes de los 3 audit() de abajo — mismo hueco que
       // el resto de exec()/execInternal(), cerrado aca igual.
       const label = maskSecrets(redactSecretSetValue(cmd.meta.rawSegment).slice(0, 100));
+
+      // Regresion (ronda 71 del audit, HIGH): mismo motivo que en
+      // executePipeline() arriba — checkRateLimit() nunca se llamaba por
+      // item, solo una vez al entrar a exec(). Chequear aca, por cada item
+      // del batch, hace que una vez agotado el limite los items restantes
+      // tambien lo agoten (misma ventana deslizante), preservando la
+      // correlacion de indices entre `commands` y `results` sin truncar el
+      // array.
+      if (!this.checkRateLimit()) {
+        this.auditLogger?.audit('permission:denied', { command: label, code: 3, error: 'Rate limit exceeded', reason: 'rate-limit' }, sessionId);
+        results.push({ code: 3, data: null, error: 'Rate limit exceeded' });
+        continue;
+      }
+
       try {
         const data = await this.executeCommand(cmd, sessionId, signal);
         if (data && typeof data === 'object' && '_error' in data) {

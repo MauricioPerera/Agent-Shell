@@ -14,6 +14,7 @@ import type { SkillEntry } from './scaffold.js';
 import type { ShellAdapter } from '../just-bash/types.js';
 import { NativeShellAdapter } from '../just-bash/adapter.js';
 import { createPathJail } from '../security/path-jail.js';
+import { maskSecrets } from '../security/secret-patterns.js';
 import type { HandlerContext } from '../shared/handler-context.js';
 
 // ---------------------------------------------------------------------------
@@ -32,8 +33,20 @@ export class WorkspaceState {
     this.cwd = initialCwd ?? process.cwd();
   }
 
+  // Regresion (ronda 71 del audit, HIGH): esta historia se guardaba en
+  // texto plano — a diferencia de ProcessManager.list() y
+  // CronScheduler.list(), que ya enmascaran `command` con maskSecrets()
+  // antes de exponerlo, este metodo nunca lo hacia. workspace:status solo
+  // exige `workspace:read` (un tier mas bajo que `workspace:write` +
+  // `shell:exec`, lo que hace falta para POBLAR la historia via
+  // workspace:run), asi que un caller con `workspace:run --command "curl
+  // -H 'Authorization: Bearer sk-XXX' ..."` dejaba ese secreto legible en
+  // texto plano para cualquier otro caller con permisos mas bajos que
+  // luego llame workspace:status. Enmascarar aca (al guardar, mismo patron
+  // que process-mgr.ts) en vez de en el read-path evita tener que tocar
+  // cada lugar que lee `.history` por separado.
   recordHistory(cmd: string, exitCode: number, duration_ms: number): void {
-    this.history.push({ command: cmd, exitCode, duration_ms, timestamp: new Date().toISOString() });
+    this.history.push({ command: maskSecrets(cmd), exitCode, duration_ms, timestamp: new Date().toISOString() });
     while (this.history.length > MAX_HISTORY) this.history.shift();
   }
 
