@@ -216,6 +216,7 @@ export const VECTOR_ERROR_CODES = {
   E008: 'CIRCUIT_OPEN',
   E009: 'HEALTH_CHECK_FAILED',
   E010: 'UNKNOWN_ERROR',
+  E011: 'INVALID_EMBEDDING',
 } as const;
 
 /** Error tipado del VectorIndex con codigo estructurado. */

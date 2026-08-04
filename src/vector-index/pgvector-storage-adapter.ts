@@ -12,6 +12,7 @@
  * Zero dependencias runtime - acepta cualquier cliente PostgreSQL inyectado.
  */
 
+import { createHash } from 'node:crypto';
 import type {
   VectorStorageAdapter,
   VectorEntry,
@@ -21,6 +22,42 @@ import type {
   HealthStatus,
 } from './types.js';
 import type { PgClient, PgVectorConfig } from './pgvector-types.js';
+
+/**
+ * Regresion (ronda 77 del audit, MEDIUM): el nombre del indice HNSW se
+ * construia como `idx_${tableName}_embedding` sin considerar el limite de
+ * 63 bytes de PostgreSQL para identificadores (NAMEDATALEN-1). tableName
+ * ya estaba validado para permitir hasta 63 caracteres (constructor de
+ * esta clase), asi que `idx_` (4) + tableName (hasta 63) + `_embedding`
+ * (10) podia llegar a 77 bytes — Postgres trunca el identificador en
+ * silencio a los primeros 63 bytes al ejecutar el DDL, sin error. Dos
+ * PgVectorStorageAdapter con tableNames DISTINTOS que comparten el mismo
+ * prefijo de ~49 caracteres (ej. dos tenants con nombres de tabla largos
+ * y un sufijo distinto) terminan generando el MISMO nombre de indice
+ * truncado — el segundo `CREATE INDEX IF NOT EXISTS` hace no-op contra el
+ * indice de la PRIMERA tabla en vez de crear el suyo propio, dejando esa
+ * segunda tabla sin indice HNSW (degrada en silencio a sequential scan,
+ * sin ningun error que lo delate). Si el tableName completo cabe dentro
+ * del limite, el nombre no cambia (compatibilidad con instalaciones
+ * existentes); si no cabe, se trunca dejando espacio fijo para un hash
+ * corto del tableName COMPLETO, haciendo que dos tableNames que comparten
+ * el mismo prefijo largo terminen en nombres de indice distintos.
+ */
+function buildIndexName(tableName: string): string {
+  const PREFIX = 'idx_';
+  const SUFFIX = '_embedding';
+  const MAX_IDENTIFIER_LENGTH = 63;
+  const HASH_LENGTH = 8;
+  const available = MAX_IDENTIFIER_LENGTH - PREFIX.length - SUFFIX.length;
+
+  if (tableName.length <= available) {
+    return `${PREFIX}${tableName}${SUFFIX}`;
+  }
+
+  const hash = createHash('sha256').update(tableName).digest('hex').slice(0, HASH_LENGTH);
+  const truncated = tableName.slice(0, available - HASH_LENGTH - 1);
+  return `${PREFIX}${truncated}_${hash}${SUFFIX}`;
+}
 
 export class PgVectorStorageAdapter implements VectorStorageAdapter {
   private readonly client: PgClient;
@@ -89,8 +126,9 @@ export class PgVectorStorageAdapter implements VectorStorageAdapter {
 
     if (this.createIndex) {
       const opClass = this.getOpClass();
+      const indexName = buildIndexName(this.tableName);
       await this.client.query(`
-        CREATE INDEX IF NOT EXISTS idx_${this.tableName}_embedding
+        CREATE INDEX IF NOT EXISTS ${indexName}
         ON ${this.tableIdent}
         USING hnsw (embedding ${opClass})
         WITH (m = ${this.hnswOptions.m}, ef_construction = ${this.hnswOptions.efConstruction})

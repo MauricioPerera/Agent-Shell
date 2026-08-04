@@ -856,6 +856,93 @@ describe('Vector Index', () => {
       // Debe ser no-op con warning, no excepcion
       await expect(vectorIndex.removeCommand('nonexistent:cmd')).resolves.not.toThrow();
     });
+
+    /**
+     * Regresion (ronda 77 del audit, MEDIUM): indexCommand() no validaba
+     * embResult.vector antes de persistirlo — un embedding adapter
+     * degradado que devuelve NaN/Infinity en algun componente se
+     * guardaba tal cual, degradando ese comando a "nunca matchea ninguna
+     * query" en silencio (cosineSimilaritySafe lo excluye en busqueda,
+     * pero el vector corrupto queda indexado indefinidamente sin ninguna
+     * senal de error).
+     */
+    it('E010: indexCommand rechaza un embedding con NaN/Infinity en vez de persistirlo', async () => {
+      const badAdapter: EmbeddingAdapter = {
+        async embed() { return { vector: [1, NaN, 3], dimensions: 3, tokenCount: 1, model: 'bad' }; },
+        async embedBatch(texts) { return Promise.all(texts.map(() => this.embed())); },
+        getDimensions() { return 3; },
+        getModelId() { return 'bad'; },
+      };
+      const badIndex = new VectorIndex({
+        embeddingAdapter: badAdapter,
+        storageAdapter,
+        defaultTopK: 5,
+        defaultThreshold: 0.3,
+      });
+
+      await expect(badIndex.indexCommand(createSampleCommand())).rejects.toThrow(/non-finite/);
+      expect(await storageAdapter.count()).toBe(0);
+    });
+
+    it('E011: indexBatch reporta como fallido (no crashea el batch) un item con embedding NaN', async () => {
+      const badAdapter: EmbeddingAdapter = {
+        async embed(text: string) {
+          const vector = text.includes('bad') ? [1, Infinity, 3] : [1, 2, 3];
+          return { vector, dimensions: 3, tokenCount: 1, model: 'mixed' };
+        },
+        async embedBatch(texts) { return Promise.all(texts.map(t => this.embed(t))); },
+        getDimensions() { return 3; },
+        getModelId() { return 'mixed'; },
+      };
+      const mixedIndex = new VectorIndex({
+        embeddingAdapter: badAdapter,
+        storageAdapter,
+        defaultTopK: 5,
+        defaultThreshold: 0.3,
+      });
+
+      const result = await mixedIndex.indexBatch([
+        createSampleCommand({ namespace: 'ns1', name: 'bad' }),
+        createSampleCommand({ namespace: 'ns2', name: 'good' }),
+      ]);
+
+      expect(result.total).toBe(2);
+      expect(result.success).toBe(1);
+      expect(result.failed).toBe(1);
+      expect(await storageAdapter.count()).toBe(1);
+    });
+
+    /**
+     * Regresion (ronda 77 del audit, MEDIUM): search() en el path estandar
+     * (no-matryoshka) copiaba r.score del storageAdapter sin clampear —
+     * storageAdapter es una interfaz publica pluggeable, un adapter
+     * custom con un bug (o un score NaN) llegaba tal cual al caller.
+     */
+    it('E012: search clampea defensivamente un score fuera de [0,1] devuelto por storageAdapter', async () => {
+      const cmd = createSampleCommand();
+      await vectorIndex.indexCommand(cmd);
+
+      const searchSpy = vi.spyOn(storageAdapter, 'search').mockResolvedValueOnce([
+        { id: 'users:create', score: 42, metadata: { namespace: 'users', command: 'create', description: '', signature: '', parameters: [], tags: [], indexedAt: '', version: '1', example: '' } },
+      ]);
+
+      const response = await vectorIndex.search('anything');
+      expect(response.results[0].score).toBe(1);
+      searchSpy.mockRestore();
+    });
+
+    it('E013: search convierte un score NaN de storageAdapter en 0 en vez de propagarlo', async () => {
+      const cmd = createSampleCommand();
+      await vectorIndex.indexCommand(cmd);
+
+      const searchSpy = vi.spyOn(storageAdapter, 'search').mockResolvedValueOnce([
+        { id: 'users:create', score: NaN, metadata: { namespace: 'users', command: 'create', description: '', signature: '', parameters: [], tags: [], indexedAt: '', version: '1', example: '' } },
+      ]);
+
+      const response = await vectorIndex.search('anything');
+      expect(response.results[0].score).toBe(0);
+      searchSpy.mockRestore();
+    });
   });
 
   // ==========================================================================
@@ -1023,6 +1110,25 @@ describe('Vector Index', () => {
       expect(result.dimensions).toBe(256);
     });
 
+    /**
+     * Regresion (ronda 77 del audit, MEDIUM): el vector truncado no se
+     * renormalizaba antes de persistirse. Para comparaciones coseno es
+     * neutro, pero storageAdapter es pluggeable y con
+     * distanceType='inner_product' (dot product crudo, no normalizado) la
+     * magnitud SI importa — sin renormalizar, truncar cambia la magnitud
+     * de forma dependiente del contenido, no un escalado uniforme.
+     */
+    it('M09b: el vector truncado queda con norma unitaria (L2 = 1)', async () => {
+      const inner = createMockEmbeddingAdapter(768);
+      const { MatryoshkaEmbeddingAdapter } = await import('../src/vector-index/matryoshka.js');
+      const adapter = new MatryoshkaEmbeddingAdapter(inner, 256);
+
+      const result = await adapter.embed('test query');
+      const norm = Math.sqrt(result.vector.reduce((sum, x) => sum + x * x, 0));
+
+      expect(norm).toBeCloseTo(1, 10);
+    });
+
     it('M10: passes through when no maxDimensions', async () => {
       const inner = createMockEmbeddingAdapter(768);
       const { MatryoshkaEmbeddingAdapter } = await import('../src/vector-index/matryoshka.js');
@@ -1031,6 +1137,17 @@ describe('Vector Index', () => {
       const result = await adapter.embed('test query');
 
       expect(result.vector).toHaveLength(768);
+    });
+
+    it('M10b: pass-through vector (sin truncar) NO se renormaliza', async () => {
+      const inner = createMockEmbeddingAdapter(768);
+      const { MatryoshkaEmbeddingAdapter } = await import('../src/vector-index/matryoshka.js');
+      const adapter = new MatryoshkaEmbeddingAdapter(inner);
+
+      const raw = await inner.embed('test query');
+      const result = await adapter.embed('test query');
+
+      expect(result.vector).toEqual(raw.vector);
     });
 
     it('M11: embedBatch truncates all results', async () => {

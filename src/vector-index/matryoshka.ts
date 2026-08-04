@@ -243,16 +243,40 @@ class MatryoshkaEmbeddingAdapter implements EmbeddingAdapter {
     return this.inner.getModelId();
   }
 
+  // Regresion (ronda 77 del audit, MEDIUM): la version truncada NO se
+  // renormalizaba antes de devolverse — para comparaciones coseno esto es
+  // matematicamente neutro (cosineSimilarity ya normaliza por la magnitud
+  // de cada vector, truncado o no), pero el vector devuelto aca es lo que
+  // VectorIndex.indexCommand() efectivamente PERSISTE, y storageAdapter es
+  // pluggeable: con distanceType='inner_product' (pgvector-storage-adapter.ts,
+  // ya documentado ahi como "dot product crudo, no normalizado") la
+  // magnitud SI afecta el resultado. Truncar cambia la magnitud de forma
+  // dependiente del contenido de cada vector (no es un escalado uniforme),
+  // asi que dos comandos con embeddings originalmente comparables podian
+  // terminar con magnitudes truncadas arbitrariamente distintas,
+  // degradando el ranking de inner_product de forma evitable. Renormalizar
+  // a norma unitaria aca es neutro para el path coseno (mayoria de casos)
+  // y hace que el dot product crudo de inner_product vuelva a equivaler a
+  // similaridad coseno para estos vectores especificamente.
   private maybeTruncate(result: EmbeddingResult): EmbeddingResult {
     if (this.maxDimensions === null || result.vector.length <= this.maxDimensions) {
       return result;
     }
     return {
       ...result,
-      vector: result.vector.slice(0, this.maxDimensions),
+      vector: normalizeVector(result.vector.slice(0, this.maxDimensions)),
       dimensions: this.maxDimensions,
     };
   }
+}
+
+/** L2-normaliza un vector a norma unitaria. Vector cero se devuelve intacto (evita division por 0). */
+function normalizeVector(vector: number[]): number[] {
+  let sumSquares = 0;
+  for (const x of vector) sumSquares += x * x;
+  const norm = Math.sqrt(sumSquares);
+  if (norm === 0) return vector;
+  return vector.map(x => x / norm);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

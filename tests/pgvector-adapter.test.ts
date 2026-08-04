@@ -410,6 +410,52 @@ describe('PgVectorStorageAdapter', () => {
     expect(tableQuery!.text).toContain('my_vectors');
   });
 
+  /**
+   * Regresion (ronda 77 del audit, MEDIUM): el nombre del indice HNSW
+   * (`idx_${tableName}_embedding`) no consideraba el limite de 63 bytes
+   * de PostgreSQL para identificadores — con un tableName largo, Postgres
+   * trunca el identificador en silencio, y dos tableNames DISTINTOS que
+   * comparten el mismo prefijo largo terminan colisionando en el MISMO
+   * nombre de indice truncado: el segundo CREATE INDEX IF NOT EXISTS hace
+   * no-op contra el indice de la primera tabla en vez de crear el suyo.
+   */
+  it('T24: nombre de indice corto queda sin cambios (compatibilidad)', async () => {
+    const c = new MockPgClient();
+    const a = new PgVectorStorageAdapter({ client: c, dimensions: 3, tableName: 'my_vectors' });
+    await a.initialize();
+
+    const indexQuery = c.queries.find(q => q.text.toUpperCase().includes('CREATE INDEX'));
+    expect(indexQuery!.text).toContain('idx_my_vectors_embedding');
+  });
+
+  it('T25: nombre de indice generado nunca excede 63 bytes (limite de identificador de Postgres)', async () => {
+    const c = new MockPgClient();
+    // 63 chars: el maximo permitido por la validacion de tableName del constructor.
+    const longTableName = 'a'.repeat(63);
+    const a = new PgVectorStorageAdapter({ client: c, dimensions: 3, tableName: longTableName });
+    await a.initialize();
+
+    const indexQuery = c.queries.find(q => q.text.toUpperCase().includes('CREATE INDEX'));
+    const match = indexQuery!.text.match(/CREATE INDEX IF NOT EXISTS (\S+)/);
+    expect(match).not.toBeNull();
+    expect(match![1].length).toBeLessThanOrEqual(63);
+  });
+
+  it('T26: dos tableNames largos que comparten prefijo generan nombres de indice DISTINTOS', async () => {
+    const prefix = 'a'.repeat(60);
+    const c1 = new MockPgClient();
+    const a1 = new PgVectorStorageAdapter({ client: c1, dimensions: 3, tableName: `${prefix}1` });
+    await a1.initialize();
+
+    const c2 = new MockPgClient();
+    const a2 = new PgVectorStorageAdapter({ client: c2, dimensions: 3, tableName: `${prefix}2` });
+    await a2.initialize();
+
+    const idx1 = c1.queries.find(q => q.text.toUpperCase().includes('CREATE INDEX'))!.text.match(/CREATE INDEX IF NOT EXISTS (\S+)/)![1];
+    const idx2 = c2.queries.find(q => q.text.toUpperCase().includes('CREATE INDEX'))!.text.match(/CREATE INDEX IF NOT EXISTS (\S+)/)![1];
+    expect(idx1).not.toBe(idx2);
+  });
+
   it('T22: distanceType l2 usa operador correcto', async () => {
     const c = new MockPgClient();
     const a = new PgVectorStorageAdapter({ client: c, dimensions: 3, distanceType: 'l2' });

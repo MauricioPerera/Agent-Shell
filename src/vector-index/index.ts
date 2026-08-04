@@ -141,6 +141,7 @@ class VectorIndex {
       this.recordFailure();
       throw new VectorIndexError('E001', `Embedding failed for ${id}: ${(err as Error).message}`, { id });
     }
+    assertFiniteVector(embResult.vector, id);
 
     const metadata: CommandMetadata = {
       namespace: command.namespace,
@@ -197,6 +198,7 @@ class VectorIndex {
             const cmd = chunk[i];
             const id = `${cmd.namespace}:${cmd.name}`;
             const embResult = embeddings[i];
+            assertFiniteVector(embResult.vector, id);
 
             const metadata: CommandMetadata = {
               namespace: cmd.namespace,
@@ -323,9 +325,19 @@ class VectorIndex {
       } catch (err) {
         throw new VectorIndexError('E004', `Vector storage unavailable: ${(err as Error).message}`);
       }
+      // Regresion (ronda 77 del audit, MEDIUM): storageAdapter es una
+      // interfaz publica pluggeable — un adapter custom (o uno con un bug)
+      // puede devolver un score fuera de [0,1] sin que VectorIndex lo
+      // corrija. PgVectorStorageAdapter y cosineSimilaritySafe ya clampean
+      // en su propio path (ver similarity.ts y pgvector-storage-adapter.ts),
+      // pero ese clamp vive DENTRO de cada adapter — este es el unico punto
+      // por el que pasan TODOS los resultados del path estandar antes de
+      // llegar al caller, asi que es donde corresponde la ultima linea de
+      // defensa, igual que el resto de este codebase (cada capa se cuida de
+      // su propio input, no confia en que la capa de abajo ya lo hizo).
       candidates = storageResults.map(r => ({
         id: r.id,
-        score: r.score,
+        score: Number.isFinite(r.score) ? Math.max(0, Math.min(1, r.score)) : 0,
         metadata: r.metadata,
       }));
     }
@@ -459,6 +471,26 @@ class VectorIndex {
 
     this.lastSyncAt = new Date().toISOString();
     return { added, updated, removed, duration_ms: Date.now() - startTime };
+  }
+}
+
+/**
+ * Regresion (ronda 77 del audit, MEDIUM): indexCommand()/indexBatch() no
+ * validaban embResult.vector antes de guardarlo — un embedding adapter
+ * degradado/buggy que devuelve NaN/Infinity en algun componente se
+ * almacenaba tal cual en this.indexed y se pasaba a storageAdapter.upsert()
+ * sin chequeo. cosineSimilaritySafe() ya protege las COMPARACIONES contra
+ * un vector asi (retorna null, excluye el candidato), pero eso solo actua
+ * en tiempo de busqueda — el vector corrupto queda persistido igual,
+ * indefinidamente, silenciosamente degradando ESE comando a "nunca
+ * matchea ninguna query" hasta que alguien lo reindexe manualmente sin
+ * saber por que. Fallar temprano en el insert (mismo momento que ya falla
+ * si el embedding adapter tira una excepcion) da una senal clara en vez de
+ * un comando fantasma en el indice.
+ */
+function assertFiniteVector(vector: number[], id: string): void {
+  if (vector.length === 0 || !vector.every(Number.isFinite)) {
+    throw new VectorIndexError('E011', `Embedding for ${id} contains non-finite values (NaN/Infinity) or is empty`, { id });
   }
 }
 
