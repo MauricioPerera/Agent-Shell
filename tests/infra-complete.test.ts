@@ -1751,6 +1751,87 @@ describe('Process Jail (opt-in path containment)', () => {
   });
 });
 
+/**
+ * Regresion (ronda 79 del audit, LOW/MEDIUM — bypassing ShellAdapter):
+ * process:spawn always shelled out via real child_process.spawn(),
+ * unconditionally, even when the operator configured `prefer: 'just-bash'`
+ * specifically to sandbox command execution — createProcessCommands()
+ * never received the active adapter at all, unlike createFileCommands()/
+ * createShellCommands()/createWorkspaceCommands()/createCronCommands().
+ * There's no clean pass-through fix (just-bash has no concept of a real
+ * background process — see process-mgr.ts's createProcessCommands doc
+ * comment), so the fix is fail-closed: reject with a clear error under
+ * just-bash instead of silently running unsandboxed.
+ */
+describe('Process ShellAdapter gating (just-bash sandbox)', () => {
+  let pm: ProcessManager;
+
+  beforeEach(() => {
+    pm = new ProcessManager();
+  });
+
+  afterEach(async () => {
+    await pm.destroy();
+  });
+
+  it('PA01: process:spawn is rejected under a just-bash-backed adapter', async () => {
+    const fakeAdapter: ShellAdapter = {
+      backend: 'just-bash',
+      exec: vi.fn(),
+      which: vi.fn(),
+      readFile: vi.fn(),
+      writeFile: vi.fn(),
+      listDir: vi.fn(),
+      mkdir: vi.fn(),
+      remove: vi.fn(),
+      rename: vi.fn(),
+      chmod: vi.fn(),
+    };
+    const cmds = createProcessCommands(pm, undefined, fakeAdapter);
+    const handler = findHandler(cmds, 'process', 'spawn');
+    const res = await handler({ name: 'sandboxed', command: 'echo hi' });
+
+    expect(res.success).toBe(false);
+    expect(res.error).toMatch(/just-bash/i);
+  });
+
+  it('PA02: process:spawn is unaffected by a native-backed adapter', async () => {
+    const fakeAdapter: ShellAdapter = {
+      backend: 'native',
+      exec: vi.fn(),
+      which: vi.fn(),
+      readFile: vi.fn(),
+      writeFile: vi.fn(),
+      listDir: vi.fn(),
+      mkdir: vi.fn(),
+      remove: vi.fn(),
+      rename: vi.fn(),
+      chmod: vi.fn(),
+    };
+    const cmds = createProcessCommands(pm, undefined, fakeAdapter);
+    const handler = findHandler(cmds, 'process', 'spawn');
+    const kill = findHandler(cmds, 'process', 'kill');
+    const res = await handler({ name: 'native-ok', command: 'echo hi' });
+    try {
+      expect(res.success).toBe(true);
+    } finally {
+      await kill({ name: 'native-ok' });
+    }
+  });
+
+  it('PA03: process:spawn is unaffected when no adapter is passed (backward compat)', async () => {
+    const cmds = createProcessCommands(pm);
+    const handler = findHandler(cmds, 'process', 'spawn');
+    const kill = findHandler(cmds, 'process', 'kill');
+    const res = await handler({ name: 'no-adapter-ok', command: 'echo hi' });
+    try {
+      expect(res.success).toBe(true);
+    } finally {
+      await kill({ name: 'no-adapter-ok' });
+    }
+  });
+});
+
 // ===========================================================================
 // REGISTRATION
 // ===========================================================================

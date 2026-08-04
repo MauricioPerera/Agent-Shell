@@ -11,6 +11,7 @@ import type { SkillEntry } from './scaffold.js';
 import { filterSensitiveEnv, maskSecrets } from '../security/secret-patterns.js';
 import { createPathJail } from '../security/path-jail.js';
 import type { HandlerContext } from '../shared/handler-context.js';
+import type { ShellAdapter } from '../just-bash/types.js';
 
 // ---------------------------------------------------------------------------
 // ProcessManager
@@ -355,8 +356,27 @@ logsDef.requiredPermissions = ['process:read'];
  *
  * Without jailRoot, behavior is byte-identical to before this option
  * existed (unresolved `args.cwd`, natural child_process cwd default).
+ *
+ * Regresion (ronda 79 del audit, LOW/MEDIUM — bypassing ShellAdapter): this
+ * function never received the active `ShellAdapter` at all, unlike
+ * createFileCommands()/createShellCommands()/createWorkspaceCommands()/
+ * createCronCommands() — so process:spawn always shelled out via real
+ * child_process.spawn(), unconditionally, even when the operator configured
+ * `prefer: 'just-bash'` specifically to sandbox command execution (no real
+ * filesystem, network allowlist, execution limits). Unlike file:*'s fix
+ * (route through adapter.mkdir/remove/rename/chmod), there's no clean
+ * pass-through here: process:spawn's semantics (long-running, backgrounded,
+ * streamed stdout/stderr, killable by pid) don't fit ShellAdapter.exec()'s
+ * single-shot model, and just-bash has no concept of a real background
+ * process at all (see README.md — "sin procesos reales", by design). Faking
+ * a "sandboxed" background process would mean lying about having a real
+ * pid/live streaming/real kill, which is worse than the current gap. The
+ * honest fix: fail closed with a clear error under just-bash instead of
+ * silently running unsandboxed — an optional 3rd `adapter` param lets
+ * callers opt in; omitted, behavior is unchanged (native spawn, no gate),
+ * same "omitted = prior behavior" convention as jailRoot above.
  */
-export function createProcessCommands(manager?: ProcessManager, jailRoot?: string): SkillEntry[] {
+export function createProcessCommands(manager?: ProcessManager, jailRoot?: string, adapter?: ShellAdapter): SkillEntry[] {
   const pm = manager || new ProcessManager();
   const assertInsideJail = createPathJail(jailRoot);
   const jailRootAbs = jailRoot ? resolve(jailRoot) : null;
@@ -371,6 +391,9 @@ export function createProcessCommands(manager?: ProcessManager, jailRoot?: strin
 
   return [
     { definition: spawnDef, handler: async (args: any, _previousData?: any, ctx?: HandlerContext) => {
+      if (adapter?.backend === 'just-bash') {
+        return { success: false, data: null, error: 'process:spawn is not supported under the just-bash sandbox (no real background process support) — configure shellAdapter: "native" to allow it.' };
+      }
       const cwdCheck = resolveCwd(args.cwd || undefined);
       if (!cwdCheck.ok) return { success: false, data: null, error: cwdCheck.error };
       const res = pm.spawn(args.name, args.command, cwdCheck.cwd, ctx?.sessionId);

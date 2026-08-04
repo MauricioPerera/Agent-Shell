@@ -139,7 +139,7 @@ export function registerShellSkills(registry: CommandRegistry, shellAdapter?: Sh
   registerAll(registry, createGitCommands(jailRoot));
   registerAll(registry, createCronCommands(cronScheduler, adapter, jailRoot));
   registerAll(registry, createSecretCommands());
-  registerAll(registry, createProcessCommands(processManager, jailRoot));
+  registerAll(registry, createProcessCommands(processManager, jailRoot, adapter));
 }
 
 /** Registers ALL skills (CLI creation + shell). */
