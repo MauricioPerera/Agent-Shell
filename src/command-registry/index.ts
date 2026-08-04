@@ -9,6 +9,7 @@
 
 import type { CommandDefinition, CommandParam, RegisteredCommand, RegistryError, Result } from './types.js';
 import { NAME_PATTERN, isValidParamType } from './types.js';
+import { GLOBAL_FLAG_NAMES } from '../parser/types.js';
 
 export { type CommandDefinition, type CommandParam, type RegisteredCommand, type RegistryError, type Result } from './types.js';
 
@@ -339,6 +340,25 @@ export class CommandRegistry {
 
     // Validate params
     if (def.params && Array.isArray(def.params)) {
+      // Regresion (ronda 70 del audit, HIGH): CommandBuilder._claimParamName()
+      // ya rechaza nombres de param duplicados y colisiones con flags
+      // globales reservados — pero SOLO ahi, no en este validateDefinition(),
+      // el UNICO punto por el que pasa CUALQUIER definicion antes de
+      // registrarse. wizard.ts/scaffold.ts arman su `params` array a mano,
+      // esquivando el builder por completo. Sin este chequeo, dos params con
+      // el mismo nombre pasaban validacion (cada uno type-checkea el mismo
+      // valor crudo del caller de forma independiente), pero
+      // Core.convertArgTypes/Executor.validateArgs hacen
+      // `result[def.name] = converted.value` sobreescribiendo en cada
+      // iteracion — el handler termina recibiendo el tipo/valor del ULTIMO
+      // duplicado en el array, mientras que la resolucion de required/
+      // default usa el PRIMERO, un modo de fallo confuso y dependiente del
+      // orden. Un param cuyo nombre colisiona con un flag global reservado
+      // (dry-run/validate/confirm/format/limit/offset) nunca puede recibir
+      // un valor del caller (el parser los extrae SIEMPRE a un objeto
+      // `flags` separado, nunca a `named`) — el comando queda roto en TODA
+      // invocacion (required) o usa su default para siempre (optional).
+      const seenParamNames = new Set<string>();
       for (const param of def.params) {
         // Regresion (ronda 59 del audit, MEDIUM): `param.name` nunca se
         // validaba en NINGUN punto del pipeline (ni aca, ni en
@@ -361,6 +381,19 @@ export class CommandRegistry {
             message: `Invalid param name '${param.name}': must match ^[a-z][a-z0-9-]{0,49}$`,
           };
         }
+        if (seenParamNames.has(param.name)) {
+          return {
+            code: 'INVALID_DEFINITION',
+            message: `Duplicate param name '${param.name}': each param must have a unique name`,
+          };
+        }
+        seenParamNames.add(param.name);
+        if ((GLOBAL_FLAG_NAMES as readonly string[]).includes(param.name)) {
+          return {
+            code: 'INVALID_DEFINITION',
+            message: `Param name '${param.name}' collides with a reserved global flag (${GLOBAL_FLAG_NAMES.join(', ')}) and would never be reachable through the parser`,
+          };
+        }
         if (!isValidParamType(param.type)) {
           return {
             code: 'INVALID_DEFINITION',
@@ -368,6 +401,22 @@ export class CommandRegistry {
           };
         }
       }
+    }
+
+    // Regresion (ronda 70 del audit, MEDIUM-HIGH): `tags`/`requiredPermissions`
+    // nunca se validaban — un `tags` malformado (ej. un numero en vez de
+    // array, producible por un `--tags` mal pasado a wizard:create-command)
+    // pasaba registro sin error, y luego registry:stats's `for (const tag of
+    // def.tags)` tira TypeError ("not iterable") — rompiendo registry:stats
+    // para TODOS los callers, no solo el que registro la definicion
+    // malformada, hasta el proximo restart. Mismo riesgo de crash
+    // (TypeError: "not a function") para requiredPermissions via
+    // matchPermissions()'s `required.every(...)` si no es array.
+    if (def.tags !== undefined && !Array.isArray(def.tags)) {
+      return { code: 'INVALID_DEFINITION', message: `tags must be an array, got ${typeof def.tags}` };
+    }
+    if (def.requiredPermissions !== undefined && !Array.isArray(def.requiredPermissions)) {
+      return { code: 'INVALID_DEFINITION', message: `requiredPermissions must be an array, got ${typeof def.requiredPermissions}` };
     }
 
     return null;

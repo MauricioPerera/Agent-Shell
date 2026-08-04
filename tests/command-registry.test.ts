@@ -242,6 +242,92 @@ describe('Command Registry', () => {
     });
 
     /**
+     * @test T06d - Rechaza nombres de parametro duplicados
+     * @error INVALID_DEFINITION
+     * @priority Alta
+     * Regresion (ronda 70 del audit, HIGH): CommandBuilder._claimParamName()
+     * ya rechazaba duplicados, pero SOLO ahi — validateDefinition() (el
+     * unico punto por el que pasa CUALQUIER definicion antes de
+     * registrarse, incluidas las armadas a mano por wizard.ts/scaffold.ts)
+     * nunca lo chequeaba. Dos params con el mismo nombre pasaban
+     * validacion; Core.convertArgTypes/Executor.validateArgs hacen
+     * `result[def.name] = valor` sobreescribiendo en cada iteracion, asi
+     * que el handler terminaba recibiendo el tipo/valor del ULTIMO
+     * duplicado, mientras required/default se resolvian con el PRIMERO.
+     */
+    it('T06d: rechaza definicion con nombres de parametro duplicados', () => {
+      const def = createValidDefinition({
+        params: [
+          { name: 'amount', type: 'int', required: true, constraints: 'min:1,max:100' },
+          { name: 'amount', type: 'string', required: false },
+        ],
+      });
+      const result = registry.register(def, createMockHandler());
+
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.error.code).toBe('INVALID_DEFINITION');
+      expect(result.error.message).toContain('Duplicate param name');
+      expect(result.error.message).toContain('amount');
+    });
+
+    /**
+     * @test T06e - Rechaza colision con flags globales reservados
+     * @error INVALID_DEFINITION
+     * @priority Media
+     * Regresion (ronda 70 del audit, MEDIUM): mismo gap que T06d. El parser
+     * SIEMPRE extrae dry-run/validate/confirm/format/limit/offset a un
+     * objeto `flags` separado, nunca a `named` — un param con uno de esos
+     * nombres nunca puede recibir un valor del caller, dejando el comando
+     * permanentemente roto (required) o usando su default para siempre
+     * (optional), sin que el registro lo detecte.
+     */
+    it('T06e: rechaza definicion cuyo param colisiona con un flag global reservado', () => {
+      const def = createValidDefinition({
+        params: [{ name: 'limit', type: 'int', required: false, default: 10 }],
+      });
+      const result = registry.register(def, createMockHandler());
+
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.error.code).toBe('INVALID_DEFINITION');
+      expect(result.error.message).toContain('reserved global flag');
+    });
+
+    /**
+     * @test T06f - Rechaza tags/requiredPermissions malformados
+     * @error INVALID_DEFINITION
+     * @priority Media
+     * Regresion (ronda 70 del audit, MEDIUM-HIGH): `tags` nunca se
+     * validaba — un `tags` no-array (ej. producible por un --tags mal
+     * parseado en wizard:create-command) pasaba registro sin error, y
+     * luego registry:stats's `for (const tag of def.tags)` tira TypeError
+     * ("not iterable"), rompiendo registry:stats para TODOS los callers
+     * hasta el proximo restart. Mismo riesgo (TypeError "not a function")
+     * para requiredPermissions via matchPermissions()'s `.every(...)`.
+     */
+    it('T06f: rechaza definicion con tags que no es un array', () => {
+      const def = createValidDefinition({ tags: 5 as any });
+      const result = registry.register(def, createMockHandler());
+
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.error.code).toBe('INVALID_DEFINITION');
+      expect(result.error.message).toContain('tags must be an array');
+    });
+
+    it('T06g: rechaza definicion con requiredPermissions que no es un array', () => {
+      const def: any = createValidDefinition();
+      def.requiredPermissions = 'not-an-array';
+      const result = registry.register(def, createMockHandler());
+
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.error.code).toBe('INVALID_DEFINITION');
+      expect(result.error.message).toContain('requiredPermissions must be an array');
+    });
+
+    /**
      * @test T21 - Handler no es modificado
      * @mustnot Modificar el handler recibido
      * @priority Alta
