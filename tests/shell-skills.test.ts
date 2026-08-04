@@ -145,6 +145,42 @@ describe('JSON Skills', () => {
     expect(result.success).toBe(true);
     expect(result.data.count).toBe(2);
   });
+
+  /**
+   * Regresion (ronda 69 del audit, HIGH): applyFilter()'s propio
+   * validateInput() ya limitaba el tamano a MAX_INPUT_SIZE_BYTES, pero
+   * recien DESPUES de que JSON.parse(data) ya pagara el costo completo de
+   * parsear (y, dentro de validateInput(), un JSON.stringify() adicional
+   * para medir el tamano). Un payload plano grande (sin necesitar
+   * anidamiento, asi que el chequeo de profundidad de Core/convertType
+   * tampoco lo agarraba) pagaba ese costo antes de ser rechazado — peor
+   * aun via pipeline, que nunca pasa por Core.convertType en absoluto.
+   */
+  it('JS09: json:filter rechaza un --input string que excede el cap de tamano ANTES de parsearlo', async () => {
+    const handler = findHandler(jsonCommands, 'json', 'filter');
+    const oversized = '"' + 'a'.repeat(10 * 1024 * 1024 + 1) + '"';
+    const result = await handler({ expression: '.', input: oversized });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('exceeds maximum size');
+  });
+
+  it('JS10: json:filter rechaza un input de PIPELINE (string) que excede el cap, no solo --input', async () => {
+    const handler = findHandler(jsonCommands, 'json', 'filter');
+    const oversized = '"' + 'a'.repeat(10 * 1024 * 1024 + 1) + '"';
+    const result = await handler({ expression: '.' }, oversized);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('exceeds maximum size');
+  });
+
+  it('JS11: json:filter sigue funcionando normalmente con --input string chico', async () => {
+    const handler = findHandler(jsonCommands, 'json', 'filter');
+    const result = await handler({ expression: '.x', input: '{"x": 42}' });
+
+    expect(result.success).toBe(true);
+    expect(result.data).toBe(42);
+  });
 });
 
 // ===========================================================================

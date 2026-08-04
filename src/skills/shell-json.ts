@@ -37,6 +37,22 @@ export const jsonCommands: SkillEntry[] = [
       if (data === null || data === undefined) {
         return { success: false, data: null, error: 'No input data. Provide --input or pipe via pipeline.' };
       }
+      // Regresion (ronda 69 del audit, HIGH): applyFilter()'s propio
+      // validateInput() ya limita el tamano a MAX_INPUT_SIZE_BYTES, pero
+      // recien DESPUES de que JSON.parse(data) ya pago el costo completo
+      // de parsear (y, dentro de validateInput(), un JSON.stringify()
+      // adicional para medir el tamano) — un payload plano grande (no
+      // necesariamente anidado, asi que el chequeo de profundidad de
+      // Core/convertType tampoco lo agarra) paga ese costo dos veces antes
+      // de ser rechazado. Peor aun para --input via PIPELINE (el 2do
+      // argumento del handler): ese path nunca pasa por Core.convertType
+      // en absoluto, asi que un string proveniente de un pipeline no tenia
+      // NINGUN chequeo previo. Mismo mecanismo que json:parse ya usa un
+      // nivel mas abajo (chequear el tamano del INPUT crudo antes de
+      // parsear), aplicado aca antes del JSON.parse en vez de despues.
+      if (typeof data === 'string' && data.length > MAX_INPUT_SIZE_BYTES) {
+        return { success: false, data: null, error: `Input exceeds maximum size of ${MAX_INPUT_SIZE_BYTES} bytes` };
+      }
       const parsed = typeof data === 'string' ? JSON.parse(data) : data;
       const result = applyFilter(parsed, args.expression);
       if (result.success) {

@@ -8,6 +8,22 @@ import { NativeShellAdapter } from '../just-bash/adapter.js';
 import type { ShellAdapter } from '../just-bash/types.js';
 import type { SkillEntry } from './scaffold.js';
 import { createPathJail } from '../security/path-jail.js';
+import { stat } from 'node:fs/promises';
+
+/**
+ * Regresion (ronda 69 del audit, HIGH): ni file:read ni file:write tenian
+ * ningun cap de tamano en TODA la cadena (param -> adapter -> fs.readFile/
+ * writeFile) — a diferencia del patron ya establecido en el resto del
+ * repo (shell-http.ts's MAX_RESPONSE_BODY_SIZE, jq-filter's
+ * MAX_INPUT_SIZE_BYTES, process-mgr.ts's MAX_OUTPUT_BYTES, todos 10MB).
+ * Concretamente explotable via el transport por defecto: StdioTransport
+ * (mcp/transport.ts) no tiene ningun limite de tamano de request, asi que
+ * un solo `file:write --content <string enorme>` no encontraba cap en
+ * ningun punto de la cadena, pudiendo escribir una cantidad ilimitada a
+ * disco o agotar memoria. Mismo valor que el resto del repo para
+ * consistencia.
+ */
+const MAX_FILE_BYTES = 10 * 1024 * 1024;
 
 const readDef = command('file', 'read')
   .version('1.0.0')
@@ -110,6 +126,16 @@ export function createFileCommands(adapter: ShellAdapter, jailRoot?: string): Sk
         try {
           const check = assertInsideJail(args.path);
           if (!check.ok) return { success: false, data: null, error: check.error };
+          try {
+            const stats = await stat(check.resolved);
+            if (stats.size > MAX_FILE_BYTES) {
+              return { success: false, data: null, error: `file:read failed: file exceeds maximum size of ${MAX_FILE_BYTES} bytes (${stats.size} bytes)` };
+            }
+          } catch {
+            // stat failure (nonexistent path, or a just-bash virtual path
+            // real fs.stat can't see) -> fall through to adapter.readFile(),
+            // whose own error is more accurate than a synthetic one here.
+          }
           const data = await adapter.readFile(check.resolved, args.encoding);
           return { success: true, data };
         } catch (err: any) {
@@ -123,6 +149,10 @@ export function createFileCommands(adapter: ShellAdapter, jailRoot?: string): Sk
         try {
           const check = assertInsideJail(args.path);
           if (!check.ok) return { success: false, data: null, error: check.error };
+          const contentBytes = Buffer.byteLength(args.content, 'utf-8');
+          if (contentBytes > MAX_FILE_BYTES) {
+            return { success: false, data: null, error: `file:write failed: content exceeds maximum size of ${MAX_FILE_BYTES} bytes (${contentBytes} bytes)` };
+          }
           const data = await adapter.writeFile(check.resolved, args.content);
           return { success: true, data };
         } catch (err: any) {

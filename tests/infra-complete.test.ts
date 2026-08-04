@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from 'vitest';
-import { mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, statSync, readFileSync, chmodSync, realpathSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, appendFileSync, rmSync, existsSync, mkdirSync, statSync, readFileSync, chmodSync, realpathSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execSync } from 'node:child_process';
@@ -126,6 +126,58 @@ describe('File CRUD Operations', () => {
       expect(definition.requiredPermissions).toBeDefined();
       expect(definition.requiredPermissions!.length).toBeGreaterThan(0);
     }
+  });
+
+  /**
+   * Regresion (ronda 69 del audit, HIGH): ni file:read ni file:write tenian
+   * cap de tamano en ningun punto de la cadena — un file:write con content
+   * enorme (o un file:read sobre un archivo enorme) no encontraba limite ni
+   * en el param, ni en el adapter, ni en fs.readFile/writeFile. Alcanzable
+   * en particular via StdioTransport, que tampoco tiene limite de tamano de
+   * request.
+   */
+  it('FO08: file:write rechaza content que excede el cap de 10MB, sin escribir nada a disco', async () => {
+    const writeH = findHandler(cmds, 'file', 'write');
+    const path = join(tempDir, 'toobig.txt');
+    const oversized = 'a'.repeat(10 * 1024 * 1024 + 1);
+    const res = await writeH({ path, content: oversized });
+    expect(res.success).toBe(false);
+    expect(res.error).toContain('exceeds maximum size');
+    expect(existsSync(path)).toBe(false);
+  });
+
+  it('FO09: file:write acepta content justo por debajo del cap de 10MB', async () => {
+    const writeH = findHandler(cmds, 'file', 'write');
+    const path = join(tempDir, 'justfits.txt');
+    const content = 'a'.repeat(1024); // pequeno y rapido; solo confirma que el guard no rechaza de mas
+    const res = await writeH({ path, content });
+    expect(res.success).toBe(true);
+    expect(existsSync(path)).toBe(true);
+  });
+
+  it('FO10: file:read rechaza un archivo que excede el cap de 10MB sin cargarlo en memoria', async () => {
+    const writeH = findHandler(cmds, 'file', 'write');
+    const readH = findHandler(cmds, 'file', 'read');
+    const path = join(tempDir, 'toobig-read.txt');
+    // Escribe en pedazos via fs real (no via file:write, que ahora rechaza
+    // el mismo tamano) para simular un archivo grande YA existente en disco.
+    const chunk = 'a'.repeat(1024 * 1024); // 1MB
+    for (let i = 0; i < 11; i++) {
+      appendFileSync(path, chunk);
+    }
+    const res = await readH({ path });
+    expect(res.success).toBe(false);
+    expect(res.error).toContain('exceeds maximum size');
+  });
+
+  it('FO11: file:read normal (chico) sigue funcionando sin verse afectado por el cap', async () => {
+    const writeH = findHandler(cmds, 'file', 'write');
+    const readH = findHandler(cmds, 'file', 'read');
+    const path = join(tempDir, 'small.txt');
+    await writeH({ path, content: 'hello world' });
+    const res = await readH({ path });
+    expect(res.success).toBe(true);
+    expect(res.data.content).toBe('hello world');
   });
 });
 
