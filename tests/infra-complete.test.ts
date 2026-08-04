@@ -750,6 +750,58 @@ describe('Cron Skills', () => {
     expect(res.data.tasks[0].command).not.toContain('abcdefghijklmnopqrstuvwxyz1234567890');
   });
 
+  /**
+   * Regresion (ronda 72 del audit, HIGH — confirmado independientemente
+   * por 2 agentes de audit distintos): CronScheduler es una unica
+   * instancia compartida por TODAS las sesiones concurrentes. Sin
+   * scoping por sessionKey, cron:list exponia las tareas de OTRAS
+   * sesiones a cualquier caller con solo cron:read.
+   */
+  it('CR02c: list() solo muestra las tareas de la MISMA sessionKey, nunca las de otra', () => {
+    scheduler.schedule('task-a', 'echo a', '1m', undefined, 'session-A');
+    scheduler.schedule('task-b', 'echo b', '1m', undefined, 'session-B');
+
+    const namesA = scheduler.list('session-A').map(t => t.name);
+    const namesB = scheduler.list('session-B').map(t => t.name);
+
+    expect(namesA).toEqual(['task-a']);
+    expect(namesB).toEqual(['task-b']);
+  });
+
+  /**
+   * Regresion (ronda 72 del audit, HIGH): cron:cancel podia cancelar la
+   * tarea de OTRA sesion conociendo/adivinando su nombre (nombres son
+   * strings elegidos por el desarrollador, no UUIDs).
+   */
+  it('CR02d: cancel() no puede cancelar la tarea de otra sessionKey — reporta not-found', () => {
+    scheduler.schedule('shared-name', 'echo a', '1m', undefined, 'session-A');
+
+    const resultFromOtherSession = scheduler.cancel('shared-name', 'session-B');
+    expect(resultFromOtherSession).toBeNull();
+
+    // La tarea de session-A sigue viva, sin verse afectada.
+    expect(scheduler.list('session-A').map(t => t.name)).toEqual(['shared-name']);
+  });
+
+  /**
+   * Regresion (ronda 72 del audit, HIGH): la eviccion de MAX_TASKS_PER_SESSION
+   * solo debe afectar a la MISMA sesion, nunca a otra — mismo patron ya
+   * verificado para PendingConfirmStore (ronda 63).
+   */
+  it('CR02e: la eviccion por MAX_TASKS_PER_SESSION solo afecta a la MISMA sesion, nunca a otra', () => {
+    scheduler.schedule('fresh-from-B', 'echo b', '1h', undefined, 'session-B');
+
+    for (let i = 0; i < 50; i++) {
+      scheduler.schedule(`task-${i}-from-A`, 'echo a', '1h', undefined, 'session-A');
+    }
+    scheduler.schedule('overflow-from-A', 'echo a', '1h', undefined, 'session-A');
+
+    const namesA = scheduler.list('session-A').map(t => t.name);
+    expect(namesA).not.toContain('task-0-from-A');
+    expect(namesA).toContain('overflow-from-A');
+    expect(scheduler.list('session-B').map(t => t.name)).toEqual(['fresh-from-B']);
+  });
+
   it('CR03: cron:cancel removes task', async () => {
     const schedule = findHandler(cmds, 'cron', 'schedule');
     await schedule({ name: 'temp', command: 'echo temp', interval: '10s' });
@@ -1406,6 +1458,60 @@ describe('Process Manager Skills', () => {
     const res = await list({});
     expect(res.data.processes[0].command).toContain('Bearer [REDACTED]');
     expect(res.data.processes[0].command).not.toContain('abcdefghijklmnopqrstuvwxyz1234567890');
+  });
+
+  /**
+   * Regresion (ronda 72 del audit, HIGH — confirmado independientemente
+   * por 2 agentes de audit distintos): ProcessManager es una unica
+   * instancia compartida por TODAS las sesiones concurrentes. Sin scoping
+   * por sessionKey, process:list exponia los procesos de OTRAS sesiones a
+   * cualquier caller con solo process:read.
+   */
+  it('PM02c: list() solo muestra los procesos de la MISMA sessionKey, nunca los de otra', () => {
+    pm.spawn('proc-a', 'echo a', undefined, 'session-A');
+    pm.spawn('proc-b', 'echo b', undefined, 'session-B');
+
+    const namesA = pm.list('session-A').map(p => p.name);
+    const namesB = pm.list('session-B').map(p => p.name);
+
+    expect(namesA).toEqual(['proc-a']);
+    expect(namesB).toEqual(['proc-b']);
+  });
+
+  /**
+   * Regresion (ronda 72 del audit, HIGH): process:kill/logs podian
+   * afectar/leer el proceso de OTRA sesion conociendo/adivinando su
+   * nombre (nombres son strings elegidos por el desarrollador, no UUIDs).
+   */
+  it('PM02d: kill()/logs() no pueden afectar el proceso de otra sessionKey', async () => {
+    pm.spawn('shared-name', 'echo a', undefined, 'session-A');
+
+    const killedFromOtherSession = await pm.kill('shared-name', 'session-B');
+    expect(killedFromOtherSession).toBe(false);
+    expect(pm.logs('shared-name', 'session-B')).toBeNull();
+
+    // El proceso de session-A sigue viva, sin verse afectado.
+    expect(pm.list('session-A').map(p => p.name)).toEqual(['shared-name']);
+  });
+
+  /**
+   * Regresion (ronda 72 del audit, HIGH): la eviccion de
+   * MAX_PROCESSES_PER_SESSION solo debe afectar a la MISMA sesion, nunca
+   * a otra — mismo patron ya verificado para PendingConfirmStore (ronda
+   * 63) y CronScheduler (ronda 72).
+   */
+  it('PM02e: la eviccion por MAX_PROCESSES_PER_SESSION solo afecta a la MISMA sesion, nunca a otra', () => {
+    pm.spawn('fresh-from-B', 'echo b', undefined, 'session-B');
+
+    for (let i = 0; i < 50; i++) {
+      pm.spawn(`job-${i}-from-A`, 'echo a', undefined, 'session-A');
+    }
+    pm.spawn('overflow-from-A', 'echo a', undefined, 'session-A');
+
+    const namesA = pm.list('session-A').map(p => p.name);
+    expect(namesA).not.toContain('job-0-from-A');
+    expect(namesA).toContain('overflow-from-A');
+    expect(pm.list('session-B').map(p => p.name)).toEqual(['fresh-from-B']);
   });
 
   it('PM03: process:kill stops a process', async () => {

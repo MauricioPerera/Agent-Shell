@@ -10,6 +10,7 @@ import { resolve, isAbsolute } from 'node:path';
 import type { SkillEntry } from './scaffold.js';
 import { filterSensitiveEnv, maskSecrets } from '../security/secret-patterns.js';
 import { createPathJail } from '../security/path-jail.js';
+import type { HandlerContext } from '../shared/handler-context.js';
 
 // ---------------------------------------------------------------------------
 // ProcessManager
@@ -30,6 +31,14 @@ interface ManagedProcess {
   stderr: OutputBuffer;
   startedAt: string;
   exitCode: number | null;
+  // Regresion (ronda 72 del audit, HIGH — confirmado independientemente
+  // por 2 agentes de audit distintos, mismo patron que CronTask.sessionKey
+  // en cron.ts): ProcessManager es una UNICA instancia compartida por
+  // TODAS las sesiones concurrentes. Sin esta key, process:list/kill/logs
+  // operaban cross-session — cualquier caller con solo process:read podia
+  // listar/leer logs de procesos de OTRA sesion, y con process:write
+  // matarlos por nombre.
+  sessionKey: string;
 }
 
 /**
@@ -75,10 +84,28 @@ const KILL_WAIT_MS = 2000;
 // SessionScopedContextStore (MAX_SESSIONS=200).
 const MAX_PROCESSES = 200;
 
+// Regresion (ronda 72 del audit, HIGH): la eviccion de MAX_PROCESSES era
+// puramente global-FIFO — una sesion agotando su propio volumen de
+// process:spawn podia evictar (matar) el proceso, todavia util, de OTRA
+// sesion. Mismo patron de dos capas ya usado en PendingConfirmStore
+// (ronda 63) y CronScheduler (ronda 72): un cap por-sesion evita solo el
+// proceso mas viejo DE ESA MISMA sesion, y el cap global de arriba queda
+// como backstop.
+const MAX_PROCESSES_PER_SESSION = 50;
+
 export class ProcessManager {
   private processes: Map<string, ManagedProcess> = new Map();
 
-  spawn(name: string, cmd: string, cwd?: string): { success: boolean; pid?: number; error?: string } {
+  /**
+   * @param sessionKey Identifica la sesion duena de este proceso — usado
+   *   para filtrar list()/kill()/logs() a los procesos de ESA sesion nada
+   *   mas, y para acotar a que procesos puede afectar la eviccion de
+   *   MAX_PROCESSES_PER_SESSION. Sesiones sin identidad propia (stdio)
+   *   pueden omitirlo — todas caen en el mismo balde compartido,
+   *   inofensivo ahi por ser single-tenant. La unicidad de `name` sigue
+   *   siendo GLOBAL (no por-sesion), igual que antes.
+   */
+  spawn(name: string, cmd: string, cwd?: string, sessionKey: string = ''): { success: boolean; pid?: number; error?: string } {
     if (this.processes.has(name)) {
       const existing = this.processes.get(name)!;
       if (existing.exitCode === null) {
@@ -88,12 +115,19 @@ export class ProcessManager {
       this.processes.delete(name);
     }
 
-    // Bound the map BEFORE inserting. A still-running evictee is killed
-    // first — dropping it from the map alone wouldn't reclaim anything,
-    // since its own stdout/stderr/close listeners keep it referenced (and
-    // the OS process running) for as long as node keeps the ChildProcess
-    // alive. Map iteration order is insertion order, so this evicts the
-    // oldest entry.
+    // Capa 1 (por-sesion): si ESTA sesion ya esta en su propio techo,
+    // evict SOLO su proceso mas viejo — nunca el de otra sesion.
+    if (this.countBySession(sessionKey) >= MAX_PROCESSES_PER_SESSION) {
+      this.evictOldestForSession(sessionKey);
+    }
+
+    // Capa 2 (backstop global, comportamiento preexistente). Bound the map
+    // BEFORE inserting. A still-running evictee is killed first —
+    // dropping it from the map alone wouldn't reclaim anything, since its
+    // own stdout/stderr/close listeners keep it referenced (and the OS
+    // process running) for as long as node keeps the ChildProcess alive.
+    // Map iteration order is insertion order, so this evicts the oldest
+    // entry.
     if (this.processes.size >= MAX_PROCESSES) {
       const oldestKey = this.processes.keys().next().value;
       if (oldestKey !== undefined) {
@@ -145,7 +179,7 @@ export class ProcessManager {
       // entradas. maskSecrets() se aplica aca, sobre el valor GUARDADO
       // (spawn() ya corrio con el `cmd` real momentos antes) — no afecta
       // la ejecucion real, solo lo que list() expone despues.
-      name, command: maskSecrets(cmd), pid: proc.pid, process: proc,
+      name, command: maskSecrets(cmd), pid: proc.pid, process: proc, sessionKey,
       stdout: { chunks: [], bytes: 0 }, stderr: { chunks: [], bytes: 0 },
       startedAt: new Date().toISOString(), exitCode: null,
     };
@@ -161,13 +195,41 @@ export class ProcessManager {
     return { success: true, pid: proc.pid };
   }
 
-  list(): Array<{ name: string; command: string; pid: number; running: boolean; exitCode: number | null; startedAt: string; uptimeMs: number }> {
-    return Array.from(this.processes.values()).map(p => ({
-      name: p.name, command: p.command, pid: p.pid,
-      running: p.exitCode === null,
-      exitCode: p.exitCode, startedAt: p.startedAt,
-      uptimeMs: Date.now() - new Date(p.startedAt).getTime(),
-    }));
+  private countBySession(sessionKey: string): number {
+    let count = 0;
+    for (const proc of this.processes.values()) {
+      if (proc.sessionKey === sessionKey) count++;
+    }
+    return count;
+  }
+
+  private evictOldestForSession(sessionKey: string): void {
+    for (const [key, proc] of this.processes) {
+      if (proc.sessionKey === sessionKey) {
+        if (proc.exitCode === null) {
+          this.terminate(proc).catch(() => { /* ignore */ });
+        }
+        this.processes.delete(key);
+        return;
+      }
+    }
+  }
+
+  /**
+   * Regresion (ronda 72 del audit, HIGH): antes devolvia TODOS los
+   * procesos sin importar que sesion los inicio — cualquier caller con
+   * solo process:read veia nombre/comando/pid de procesos de CUALQUIER
+   * otra sesion. Ahora filtra a los de `sessionKey` nada mas.
+   */
+  list(sessionKey: string = ''): Array<{ name: string; command: string; pid: number; running: boolean; exitCode: number | null; startedAt: string; uptimeMs: number }> {
+    return Array.from(this.processes.values())
+      .filter(p => p.sessionKey === sessionKey)
+      .map(p => ({
+        name: p.name, command: p.command, pid: p.pid,
+        running: p.exitCode === null,
+        exitCode: p.exitCode, startedAt: p.startedAt,
+        uptimeMs: Date.now() - new Date(p.startedAt).getTime(),
+      }));
   }
 
   /**
@@ -177,17 +239,26 @@ export class ProcessManager {
    * died, not just that a signal was sent (ronda 47 del audit, MEDIUM F2).
    * Escalation/verification itself lives in terminate() below, shared
    * with destroy() and the MAX_PROCESSES eviction path.
+   *
+   * Regresion (ronda 72 del audit, HIGH): sin el filtro de sessionKey,
+   * cualquier caller con process:write podia matar el proceso de OTRA
+   * sesion adivinando/conociendo su nombre.
    */
-  async kill(name: string): Promise<boolean> {
+  async kill(name: string, sessionKey: string = ''): Promise<boolean> {
     const proc = this.processes.get(name);
-    if (!proc || proc.exitCode !== null) return false;
+    if (!proc || proc.sessionKey !== sessionKey || proc.exitCode !== null) return false;
     await this.terminate(proc);
     return true;
   }
 
-  logs(name: string): { stdout: string; stderr: string } | null {
+  /**
+   * Regresion (ronda 72 del audit, HIGH): mismo filtro que kill()/list() —
+   * sin el, un caller con solo process:read podia leer stdout/stderr de
+   * un proceso spawneado por OTRA sesion.
+   */
+  logs(name: string, sessionKey: string = ''): { stdout: string; stderr: string } | null {
     const proc = this.processes.get(name);
-    if (!proc) return null;
+    if (!proc || proc.sessionKey !== sessionKey) return null;
     return { stdout: proc.stdout.chunks.join(''), stderr: proc.stderr.chunks.join('') };
   }
 
@@ -299,26 +370,26 @@ export function createProcessCommands(manager?: ProcessManager, jailRoot?: strin
   }
 
   return [
-    { definition: spawnDef, handler: async (args: any) => {
+    { definition: spawnDef, handler: async (args: any, _previousData?: any, ctx?: HandlerContext) => {
       const cwdCheck = resolveCwd(args.cwd || undefined);
       if (!cwdCheck.ok) return { success: false, data: null, error: cwdCheck.error };
-      const res = pm.spawn(args.name, args.command, cwdCheck.cwd);
+      const res = pm.spawn(args.name, args.command, cwdCheck.cwd, ctx?.sessionId);
       return res.success
         ? { success: true, data: { name: args.name, pid: res.pid, command: args.command, spawned: true } }
         : { success: false, data: null, error: res.error };
     }},
-    { definition: listDef, handler: async () => {
-      const procs = pm.list();
+    { definition: listDef, handler: async (_args?: any, _previousData?: any, ctx?: HandlerContext) => {
+      const procs = pm.list(ctx?.sessionId);
       return { success: true, data: { processes: procs, count: procs.length } };
     }},
-    { definition: killDef, handler: async (args: any) => {
-      const killed = await pm.kill(args.name);
+    { definition: killDef, handler: async (args: any, _previousData?: any, ctx?: HandlerContext) => {
+      const killed = await pm.kill(args.name, ctx?.sessionId);
       return killed
         ? { success: true, data: { name: args.name, killed: true } }
         : { success: false, data: null, error: `Process '${args.name}' not found or already stopped` };
     }},
-    { definition: logsDef, handler: async (args: any) => {
-      const logs = pm.logs(args.name);
+    { definition: logsDef, handler: async (args: any, _previousData?: any, ctx?: HandlerContext) => {
+      const logs = pm.logs(args.name, ctx?.sessionId);
       if (!logs) return { success: false, data: null, error: `Process '${args.name}' not found` };
       return { success: true, data: { name: args.name, ...logs } };
     }},

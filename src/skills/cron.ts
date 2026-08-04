@@ -17,6 +17,7 @@ import { NativeShellAdapter } from '../just-bash/adapter.js';
 import { createPathJail } from '../security/path-jail.js';
 import { maskSecrets } from '../security/secret-patterns.js';
 import { resolve, isAbsolute } from 'node:path';
+import type { HandlerContext } from '../shared/handler-context.js';
 
 // ---------------------------------------------------------------------------
 // CronScheduler
@@ -52,6 +53,19 @@ interface CronTask {
   // de tratarlo como "corriendo". Un cron:schedule posterior con el MISMO
   // nombre reemplaza una entrada cancelada e inactiva (ver schedule()).
   cancelled?: boolean;
+  // Regresion (ronda 72 del audit, HIGH — confirmado independientemente
+  // por 2 agentes de audit distintos): CronScheduler es una UNICA
+  // instancia compartida por TODAS las sesiones concurrentes (mismo Core,
+  // wireado una sola vez en cli/index.ts/server/index.ts). Sin esta key,
+  // cron:list/history exponian las tareas de CUALQUIER sesion a cualquier
+  // caller con solo cron:read, y cron:cancel podia cancelar la tarea de
+  // OTRA sesion por nombre (nombres son strings elegidos por el
+  // desarrollador, no UUIDs no-adivinables como los tokens de
+  // PendingConfirmStore — ese es el motivo por el que el fix ahi fue
+  // solo de eviccion, y aca hace falta ademas filtrar acceso). Ver
+  // MAX_TASKS_PER_SESSION mas abajo para el mismo problema del lado de
+  // la eviccion (una sesion podia evictar la tarea de otra).
+  sessionKey: string;
 }
 
 const MAX_HISTORY_PER_TASK = 20;
@@ -76,6 +90,15 @@ const MAX_INTERVAL_MS = 2_147_483_647;
 // the number of tasks/timers itself.
 const MAX_TASKS = 200;
 
+// Regresion (ronda 72 del audit, HIGH): la eviccion de MAX_TASKS era
+// puramente global-FIFO — una sesion agotando su propio volumen de
+// cron:schedule podia evictar (cancelar) la tarea, todavia util, de OTRA
+// sesion. Mismo patron de dos capas ya usado en PendingConfirmStore
+// (ronda 63): un cap por-sesion evita solo la tarea mas vieja DE ESA
+// MISMA sesion, y el cap global de arriba queda como backstop para el
+// caso de muchas sesiones distintas cada una bajo su propio limite.
+const MAX_TASKS_PER_SESSION = 50;
+
 // Regresion (ronda 50 del audit, HIGH): cuando cancel() se llama sobre una
 // tarea en ejecucion, executeTask() la borra de `tasks` recien cuando esa
 // corrida termina (ver el finally() de executeTask) — sin este archivo
@@ -87,14 +110,24 @@ const MAX_CANCELLED_HISTORY = 50;
 
 export class CronScheduler {
   private tasks: Map<string, CronTask> = new Map();
-  private cancelledTaskHistory: Array<{ task: string; exitCode: number; duration_ms: number; timestamp: string }> = [];
+  private cancelledTaskHistory: Array<{ task: string; sessionKey: string; exitCode: number; duration_ms: number; timestamp: string }> = [];
   private readonly adapter: ShellAdapter;
 
   constructor(adapter?: ShellAdapter) {
     this.adapter = adapter || new NativeShellAdapter();
   }
 
-  schedule(name: string, cmd: string, interval: string, cwd?: string): { success: boolean; error?: string } {
+  /**
+   * @param sessionKey Identifica la sesion duena de esta tarea — usado
+   *   para filtrar list()/getHistory()/cancel() a las tareas de ESA
+   *   sesion nada mas, y para acotar a que tareas puede afectar la
+   *   eviccion de MAX_TASKS_PER_SESSION (ver el comentario ahi). Sesiones
+   *   sin identidad propia (stdio) pueden omitirlo — todas caen en el
+   *   mismo balde compartido, inofensivo ahi por ser single-tenant. La
+   *   unicidad de `name` sigue siendo GLOBAL (no por-sesion): dos
+   *   sesiones no pueden usar el mismo nombre de tarea, igual que antes.
+   */
+  schedule(name: string, cmd: string, interval: string, cwd?: string, sessionKey: string = ''): { success: boolean; error?: string } {
     if (this.tasks.has(name)) {
       return { success: false, error: `Task '${name}' already exists. Cancel it first.` };
     }
@@ -107,10 +140,17 @@ export class CronScheduler {
       return { success: false, error: `Invalid interval: '${interval}' (${ms}ms) exceeds the maximum supported interval of ${MAX_INTERVAL_MS}ms (~24.8 days) — Node's setInterval silently misfires above this.` };
     }
 
-    // Bound BEFORE inserting. Unlike the other bounded stores, the
-    // evictee here holds a live timer that must be stopped — dropping it
-    // from the Map alone would leave its setInterval running forever,
-    // orphaned but still executing the scheduled command.
+    // Capa 1 (por-sesion): si ESTA sesion ya esta en su propio techo,
+    // evict SOLO su tarea mas vieja — nunca la de otra sesion.
+    if (this.countBySession(sessionKey) >= MAX_TASKS_PER_SESSION) {
+      this.evictOldestForSession(sessionKey);
+    }
+
+    // Capa 2 (backstop global, comportamiento preexistente): bound BEFORE
+    // inserting. Unlike the other bounded stores, the evictee here holds
+    // a live timer that must be stopped — dropping it from the Map alone
+    // would leave its setInterval running forever, orphaned but still
+    // executing the scheduled command.
     if (this.tasks.size >= MAX_TASKS) {
       const oldestKey = this.tasks.keys().next().value;
       if (oldestKey !== undefined) {
@@ -141,7 +181,7 @@ export class CronScheduler {
     }
 
     const task: CronTask = {
-      name, command: cmd, interval, intervalMs: ms,
+      name, command: cmd, interval, intervalMs: ms, sessionKey,
       history: [], createdAt: new Date().toISOString(), runCount: 0, isRunning: false,
       timer: setInterval(() => { void this.executeTask(task, cwd); }, ms),
     };
@@ -150,15 +190,43 @@ export class CronScheduler {
     return { success: true };
   }
 
+  private countBySession(sessionKey: string): number {
+    let count = 0;
+    for (const task of this.tasks.values()) {
+      if (task.sessionKey === sessionKey) count++;
+    }
+    return count;
+  }
+
+  private evictOldestForSession(sessionKey: string): void {
+    for (const [key, task] of this.tasks) {
+      if (task.sessionKey === sessionKey) {
+        clearInterval(task.timer);
+        if (task.isRunning) {
+          task.cancelled = true;
+        } else {
+          this.tasks.delete(key);
+        }
+        return;
+      }
+    }
+  }
+
   /**
    * Stops future ticks immediately. If the task has an execution in
    * flight right now, the Map entry is kept alive (marked `cancelled`)
    * until that execution's own finally block removes it, instead of
    * discarding its still-pending result — see CronTask.cancelled above.
+   *
+   * Regresion (ronda 72 del audit, HIGH): sin el filtro de sessionKey,
+   * cualquier caller con cron:write podia cancelar la tarea de OTRA
+   * sesion adivinando/conociendo su nombre. Una tarea de otra sesion se
+   * reporta como "not found" — igual que si no existiera — para no
+   * filtrar siquiera su existencia.
    */
-  cancel(name: string): { cancelled: boolean; stillRunning: boolean } | null {
+  cancel(name: string, sessionKey: string = ''): { cancelled: boolean; stillRunning: boolean } | null {
     const task = this.tasks.get(name);
-    if (!task) return null;
+    if (!task || task.sessionKey !== sessionKey) return null;
     clearInterval(task.timer);
     if (task.isRunning) {
       task.cancelled = true;
@@ -168,7 +236,14 @@ export class CronScheduler {
     return { cancelled: true, stillRunning: false };
   }
 
-  list(): Array<{ name: string; command: string; interval: string; runCount: number; createdAt: string; cancelling?: boolean }> {
+  /**
+   * Regresion (ronda 72 del audit, HIGH): antes devolvia TODAS las tareas
+   * sin importar que sesion las creo — cualquier caller con solo
+   * cron:read veia los nombres/comandos/intervalos de tareas programadas
+   * por CUALQUIER otra sesion. Ahora filtra a las de `sessionKey` nada
+   * mas.
+   */
+  list(sessionKey: string = ''): Array<{ name: string; command: string; interval: string; runCount: number; createdAt: string; cancelling?: boolean }> {
     // Regresion (ronda 39 del audit, HIGH): expuesto sin masquear a
     // CUALQUIER sesion con solo cron:read (cross-session — CronScheduler
     // es una unica instancia compartida por todas las sesiones del
@@ -179,30 +254,43 @@ export class CronScheduler {
     // rompería la tarea programada (ejecutaria el placeholder redactado en
     // vez del comando real). Se enmascara aca, solo en la lectura de
     // salida, dejando task.command intacto para la ejecucion real.
-    return Array.from(this.tasks.values()).map(t => ({
-      name: t.name, command: maskSecrets(t.command), interval: t.interval,
-      runCount: t.runCount, createdAt: t.createdAt,
-      // Present only while a cancelled task's in-flight execution hasn't
-      // finished yet — see CronTask.cancelled.
-      ...(t.cancelled ? { cancelling: true } : {}),
-    }));
+    return Array.from(this.tasks.values())
+      .filter(t => t.sessionKey === sessionKey)
+      .map(t => ({
+        name: t.name, command: maskSecrets(t.command), interval: t.interval,
+        runCount: t.runCount, createdAt: t.createdAt,
+        // Present only while a cancelled task's in-flight execution hasn't
+        // finished yet — see CronTask.cancelled.
+        ...(t.cancelled ? { cancelling: true } : {}),
+      }));
   }
 
-  getHistory(name?: string): Array<{ task: string; exitCode: number; duration_ms: number; timestamp: string }> {
+  /**
+   * Regresion (ronda 72 del audit, HIGH): mismo filtro que list() — antes
+   * un `name` de otra sesion devolvia su historial igual (la tarea SI
+   * existia en `tasks`, solo que era de otro dueno), y sin `name` se
+   * agregaba el historial de TODAS las sesiones junto.
+   */
+  getHistory(sessionKey: string = '', name?: string): Array<{ task: string; exitCode: number; duration_ms: number; timestamp: string }> {
     if (name) {
       const task = this.tasks.get(name);
-      if (task) return task.history.map(h => ({ task: name, ...h }));
+      if (task && task.sessionKey === sessionKey) return task.history.map(h => ({ task: name, ...h }));
       // The task itself may already be gone — cancel() on a still-running
       // task keeps its Map entry alive only until that run finishes (see
       // executeTask()'s finally), at which point it's removed and its
       // final result is archived here instead of vanishing with it.
-      return this.cancelledTaskHistory.filter(h => h.task === name);
+      return this.cancelledTaskHistory.filter(h => h.task === name && h.sessionKey === sessionKey).map(({ sessionKey: _sk, ...rest }) => rest);
     }
     const all: Array<{ task: string; exitCode: number; duration_ms: number; timestamp: string }> = [];
     for (const [n, t] of this.tasks) {
+      if (t.sessionKey !== sessionKey) continue;
       for (const h of t.history) all.push({ task: n, ...h });
     }
-    all.push(...this.cancelledTaskHistory);
+    for (const h of this.cancelledTaskHistory) {
+      if (h.sessionKey !== sessionKey) continue;
+      const { sessionKey: _sk, ...rest } = h;
+      all.push(rest);
+    }
     all.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
     return all.slice(0, 20);
   }
@@ -252,7 +340,7 @@ export class CronScheduler {
       if (task.cancelled) {
         const last = task.history[task.history.length - 1];
         if (last) {
-          this.cancelledTaskHistory.push({ task: task.name, ...last });
+          this.cancelledTaskHistory.push({ task: task.name, sessionKey: task.sessionKey, ...last });
           while (this.cancelledTaskHistory.length > MAX_CANCELLED_HISTORY) this.cancelledTaskHistory.shift();
         }
         this.tasks.delete(task.name);
@@ -343,19 +431,20 @@ export function createCronCommands(scheduler?: CronScheduler, adapter?: ShellAda
   }
 
   return [
-    { definition: scheduleDef, handler: async (args: any) => {
+    { definition: scheduleDef, handler: async (args: any, _previousData?: any, ctx?: HandlerContext) => {
       const cwdCheck = resolveCwd(args.cwd || undefined);
       if (!cwdCheck.ok) return { success: false, data: null, error: cwdCheck.error };
-      const res = cron.schedule(args.name, args.command, args.interval, cwdCheck.cwd);
+      const res = cron.schedule(args.name, args.command, args.interval, cwdCheck.cwd, ctx?.sessionId);
       return res.success
         ? { success: true, data: { name: args.name, command: args.command, interval: args.interval, scheduled: true } }
         : { success: false, data: null, error: res.error };
     }},
-    { definition: listDef, handler: async () => {
-      return { success: true, data: { tasks: cron.list(), count: cron.list().length } };
+    { definition: listDef, handler: async (_args?: any, _previousData?: any, ctx?: HandlerContext) => {
+      const tasks = cron.list(ctx?.sessionId);
+      return { success: true, data: { tasks, count: tasks.length } };
     }},
-    { definition: cancelDef, handler: async (args: any) => {
-      const result = cron.cancel(args.name);
+    { definition: cancelDef, handler: async (args: any, _previousData?: any, ctx?: HandlerContext) => {
+      const result = cron.cancel(args.name, ctx?.sessionId);
       if (!result) return { success: false, data: null, error: `Task '${args.name}' not found` };
       return {
         success: true,
@@ -372,8 +461,8 @@ export function createCronCommands(scheduler?: CronScheduler, adapter?: ShellAda
         },
       };
     }},
-    { definition: historyDef, handler: async (args: any) => {
-      const history = cron.getHistory(args.name || undefined);
+    { definition: historyDef, handler: async (args: any, _previousData?: any, ctx?: HandlerContext) => {
+      const history = cron.getHistory(ctx?.sessionId, args.name || undefined);
       return { success: true, data: { history, count: history.length } };
     }},
   ];
