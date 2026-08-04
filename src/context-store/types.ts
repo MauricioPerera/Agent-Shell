@@ -89,6 +89,28 @@ export interface RetentionPolicy {
   maxEntries?: number;
 }
 
+/**
+ * Regresion (ronda 78 del audit, MEDIUM): SQLiteStorageAdapter.load() y
+ * EncryptedStorageAdapter.load() parsean/desencriptan datos persistidos
+ * (JSON.parse de columnas TEXT, o descifrado AES-GCM) sin ningun try/catch
+ * — una fila con JSON malformado (escritura parcial por un crash, edicion
+ * manual de la DB, corrupcion de disco) o un blob que no desencripta
+ * (clave rotada, auth tag invalido) tiraba un SyntaxError/error de cripto
+ * sin capturar que se propagaba mas alla de ContextStore.loadStore()
+ * (que solo captura SessionExpiredError) hasta el caller de get()/set(),
+ * en vez del OperationResult con error tipado que el resto del contrato
+ * ya devuelve para cualquier otra falla de sesion. Los adapters lanzan
+ * este error especifico al fallar el parseo/descifrado; ContextStore lo
+ * traduce a un error 'SESSION_CORRUPTED', igual que ya hace con
+ * SessionExpiredError.
+ */
+export class SessionCorruptedError extends Error {
+  constructor(sessionId: string, cause: unknown) {
+    super(`Session '${sessionId}' data is corrupted and could not be read: ${cause instanceof Error ? cause.message : String(cause)}`);
+    this.name = 'SessionCorruptedError';
+  }
+}
+
 /** Interface del adaptador de storage. */
 export interface StorageAdapter {
   readonly name: string;

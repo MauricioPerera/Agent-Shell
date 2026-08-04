@@ -8,7 +8,7 @@
  */
 
 import type { StorageAdapter, SessionStore, HistoryEntry, UndoSnapshot, OperationResult, ContextStoreConfig, RetentionPolicy } from './types.js';
-import { MAX_KEY_LENGTH, MAX_VALUE_SIZE, MAX_KEYS, MAX_TOTAL_CONTEXT_SIZE, MAX_HISTORY, DEFAULT_HISTORY_LIMIT, KEY_PATTERN } from './types.js';
+import { MAX_KEY_LENGTH, MAX_VALUE_SIZE, MAX_KEYS, MAX_TOTAL_CONTEXT_SIZE, MAX_HISTORY, DEFAULT_HISTORY_LIMIT, KEY_PATTERN, SessionCorruptedError } from './types.js';
 import { maskSecrets, containsSecret } from '../security/secret-patterns.js';
 
 export { type StorageAdapter, type OperationResult, type HistoryEntry, type UndoSnapshot, type SessionStore, type ContextStoreConfig } from './types.js';
@@ -105,6 +105,10 @@ export class ContextStore {
       if (err instanceof SessionExpiredError) {
         return this.errorResult(1, 'SESSION_EXPIRED', err.message);
       }
+      // Regresion (ronda 78 del audit, MEDIUM): ver SessionCorruptedError en types.ts.
+      if (err instanceof SessionCorruptedError) {
+        return this.errorResult(1, 'SESSION_CORRUPTED', err.message);
+      }
       throw err;
     }
 
@@ -177,6 +181,10 @@ export class ContextStore {
       if (err instanceof SessionExpiredError) {
         return this.errorResult(1, 'SESSION_EXPIRED', err.message);
       }
+      // Regresion (ronda 78 del audit, MEDIUM): ver SessionCorruptedError en types.ts.
+      if (err instanceof SessionCorruptedError) {
+        return this.errorResult(1, 'SESSION_CORRUPTED', err.message);
+      }
       throw err;
     }
     const entry = store.context.entries[key];
@@ -200,6 +208,10 @@ export class ContextStore {
     } catch (err) {
       if (err instanceof SessionExpiredError) {
         return this.errorResult(1, 'SESSION_EXPIRED', err.message);
+      }
+      // Regresion (ronda 78 del audit, MEDIUM): ver SessionCorruptedError en types.ts.
+      if (err instanceof SessionCorruptedError) {
+        return this.errorResult(1, 'SESSION_CORRUPTED', err.message);
       }
       throw err;
     }
@@ -225,6 +237,10 @@ export class ContextStore {
     } catch (err) {
       if (err instanceof SessionExpiredError) {
         return this.errorResult(1, 'SESSION_EXPIRED', err.message);
+      }
+      // Regresion (ronda 78 del audit, MEDIUM): ver SessionCorruptedError en types.ts.
+      if (err instanceof SessionCorruptedError) {
+        return this.errorResult(1, 'SESSION_CORRUPTED', err.message);
       }
       throw err;
     }
@@ -252,6 +268,10 @@ export class ContextStore {
       if (err instanceof SessionExpiredError) {
         return this.errorResult(1, 'SESSION_EXPIRED', err.message);
       }
+      // Regresion (ronda 78 del audit, MEDIUM): ver SessionCorruptedError en types.ts.
+      if (err instanceof SessionCorruptedError) {
+        return this.errorResult(1, 'SESSION_CORRUPTED', err.message);
+      }
       throw err;
     }
     store.context.entries = {};
@@ -272,6 +292,10 @@ export class ContextStore {
     } catch (err) {
       if (err instanceof SessionExpiredError) {
         return this.errorResult(1, 'SESSION_EXPIRED', err.message);
+      }
+      // Regresion (ronda 78 del audit, MEDIUM): ver SessionCorruptedError en types.ts.
+      if (err instanceof SessionCorruptedError) {
+        return this.errorResult(1, 'SESSION_CORRUPTED', err.message);
       }
       throw err;
     }
@@ -366,6 +390,10 @@ export class ContextStore {
     } catch (err) {
       if (err instanceof SessionExpiredError) {
         return this.errorResult(1, 'SESSION_EXPIRED', err.message);
+      }
+      // Regresion (ronda 78 del audit, MEDIUM): ver SessionCorruptedError en types.ts.
+      if (err instanceof SessionCorruptedError) {
+        return this.errorResult(1, 'SESSION_CORRUPTED', err.message);
       }
       throw err;
     }

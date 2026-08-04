@@ -980,3 +980,37 @@ describe('Context Store — onExpired hook', () => {
     }
   });
 });
+
+/**
+ * Regresion (ronda 78 del audit, MEDIUM): loadStore() solo capturaba
+ * SessionExpiredError — un StorageAdapter cuyo load() falla por dato
+ * corrupto (SessionCorruptedError, lanzado ahora por SQLiteStorageAdapter/
+ * EncryptedStorageAdapter, ver types.ts) se propagaba sin capturar en vez
+ * de convertirse en el OperationResult con error tipado que el resto del
+ * contrato ya devuelve para cualquier otra falla de sesion.
+ */
+describe('Context Store — SessionCorruptedError', () => {
+  it('get()/set() devuelven un OperationResult con error SESSION_CORRUPTED en vez de propagar la excepcion', async () => {
+    const { SessionCorruptedError } = await import('../src/context-store/types.js');
+    const throwingAdapter: StorageAdapter = {
+      name: 'throwing',
+      async initialize() {},
+      async load(sessionId: string): Promise<any> {
+        throw new SessionCorruptedError(sessionId, new SyntaxError('Unexpected token'));
+      },
+      async save() {},
+      async destroy() {},
+      async healthCheck() { return true; },
+      async dispose() {},
+    };
+    const store = new ContextStore(throwingAdapter, 'corrupted-session');
+
+    const getRes = await store.get('k');
+    expect(getRes.status).toBe(1);
+    expect(getRes.error?.code).toBe('SESSION_CORRUPTED');
+
+    const setRes = await store.set('k', '"v"');
+    expect(setRes.status).toBe(1);
+    expect(setRes.error?.code).toBe('SESSION_CORRUPTED');
+  });
+});

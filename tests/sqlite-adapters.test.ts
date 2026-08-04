@@ -682,6 +682,20 @@ describe('SQLiteStorageAdapter', () => {
     await expect(adapter.dispose()).resolves.not.toThrow();
   });
 
+  /**
+   * Regresion (ronda 78 del audit, MEDIUM): load() parseaba JSON de
+   * columnas TEXT sin ningun try/catch — una fila con JSON malformado
+   * (escritura parcial, edicion manual de la DB) tiraba un SyntaxError sin
+   * capturar en vez de un error tipado y catcheable.
+   */
+  it('T14b: load() lanza SessionCorruptedError (no un SyntaxError crudo) si una columna JSON esta malformada', async () => {
+    const { SessionCorruptedError } = await import('../src/context-store/types.js');
+    await adapter.save('sess-1', createSampleStore());
+    db.prepare('UPDATE session_context SET value = ? WHERE session_id = ? AND key = ?').run('{not valid json', 'sess-1', 'theme');
+
+    await expect(adapter.load('sess-1')).rejects.toBeInstanceOf(SessionCorruptedError);
+  });
+
   it('T15: sesion vacia (sin entries, history ni snapshots) se guarda y carga', async () => {
     const empty: SessionStore = { context: { entries: {} }, history: [], undo_snapshots: [] };
     await adapter.save('empty-sess', empty);
@@ -746,6 +760,25 @@ describe('SQLiteStorageAdapter', () => {
 
       const reader = new EncryptedStorageAdapter(adapter, { key: keyB });
       await expect(reader.load('sess-wrongkey')).rejects.toThrow();
+    });
+
+    /**
+     * Regresion (ronda 78 del audit, MEDIUM): un auth-tag invalido (clave
+     * equivocada, o payload manipulado) tiraba el error crudo de
+     * node:crypto sin capturar. EncryptedStorageAdapter ahora lo envuelve
+     * en el mismo SessionCorruptedError tipado que SQLiteStorageAdapter.
+     */
+    it('T18b: con la clave equivocada, load() lanza especificamente SessionCorruptedError', async () => {
+      const { EncryptedStorageAdapter } = await import('../src/context-store/encrypted-storage-adapter.js');
+      const { SessionCorruptedError } = await import('../src/context-store/types.js');
+      const keyA = Buffer.alloc(32, 1);
+      const keyB = Buffer.alloc(32, 2);
+
+      const writer = new EncryptedStorageAdapter(adapter, { key: keyA });
+      await writer.save('sess-wrongkey-2', createSampleStore());
+
+      const reader = new EncryptedStorageAdapter(adapter, { key: keyB });
+      await expect(reader.load('sess-wrongkey-2')).rejects.toBeInstanceOf(SessionCorruptedError);
     });
 
     /**

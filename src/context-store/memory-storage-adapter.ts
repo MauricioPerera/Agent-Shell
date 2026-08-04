@@ -35,13 +35,25 @@ export class InMemoryStorageAdapter implements StorageAdapter {
     }
   }
 
+  // Regresion (ronda 78 del audit, MEDIUM): load()/save() pasaban la
+  // MISMA referencia de objeto que este adapter guarda internamente — a
+  // diferencia de SQLiteStorageAdapter/EncryptedStorageAdapter (que hacen
+  // un round-trip de (de)serializacion en cada load()/save(), rompiendo
+  // cualquier aliasing por construccion), este adapter es puro JS en
+  // memoria: sin clonar, un caller que muta el objeto devuelto por get()/
+  // getAll() (o cualquier consumidor externo de la libreria que use este
+  // adapter directamente) corrompe el estado "persistido" de la sesion
+  // sin pasar nunca por set()/save(). structuredClone() corta esa
+  // referencia compartida en ambas direcciones, igualando el
+  // comportamiento observable al de los otros dos adapters.
   async load(session_id: string): Promise<SessionStore | null> {
-    return this.stores.get(session_id) ?? null;
+    const stored = this.stores.get(session_id);
+    return stored ? structuredClone(stored) : null;
   }
 
   async save(session_id: string, store: SessionStore): Promise<void> {
     if (!this.stores.has(session_id)) this.evictIfFull();
-    this.stores.set(session_id, store);
+    this.stores.set(session_id, structuredClone(store));
   }
 
   async destroy(session_id: string): Promise<void> {

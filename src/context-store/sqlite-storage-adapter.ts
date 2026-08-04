@@ -11,6 +11,7 @@
  */
 
 import type { StorageAdapter, SessionStore, ContextEntry, HistoryEntry, UndoSnapshot } from './types.js';
+import { SessionCorruptedError } from './types.js';
 import type { SQLiteDatabase, SQLiteStorageConfig } from './sqlite-types.js';
 
 const MIGRATIONS = `
@@ -111,71 +112,84 @@ export class SQLiteStorageAdapter implements StorageAdapter {
       'UPDATE sessions SET last_access_at = ? WHERE session_id = ?'
     ).run(new Date().toISOString(), session_id);
 
-    // Blob mode: save() stored an already-encrypted payload (from
-    // EncryptedStorageAdapter) rather than a real SessionStore — hand it
-    // back as-is so the caller (EncryptedStorageAdapter.load()) can decrypt
-    // it. See save() for why this table can't just decompose it normally.
-    if (session.encrypted_blob) {
-      return JSON.parse(session.encrypted_blob) as unknown as SessionStore;
-    }
+    // Regresion (ronda 78 del audit, MEDIUM): todo lo que sigue parsea JSON
+    // persistido (columnas TEXT en session_context/command_history/
+    // undo_snapshots, o el encrypted_blob) sin ningun try/catch — una fila
+    // con JSON malformado (escritura parcial por un crash, edicion manual
+    // de la DB) tiraba un SyntaxError sin capturar hasta el caller de
+    // get()/set(). Envuelto en un solo bloque (son puras transformaciones
+    // JS sobre datos ya leidos, sin llamadas a la DB de por medio) para no
+    // enmascarar errores REALES de la DB (los SELECT de arriba) bajo el
+    // mismo tratamiento.
+    try {
+      // Blob mode: save() stored an already-encrypted payload (from
+      // EncryptedStorageAdapter) rather than a real SessionStore — hand it
+      // back as-is so the caller (EncryptedStorageAdapter.load()) can decrypt
+      // it. See save() for why this table can't just decompose it normally.
+      if (session.encrypted_blob) {
+        return JSON.parse(session.encrypted_blob) as unknown as SessionStore;
+      }
 
-    // Load context entries
-    const contextRows = this.db.prepare(
-      'SELECT * FROM session_context WHERE session_id = ?'
-    ).all(session_id) as any[];
+      // Load context entries
+      const contextRows = this.db.prepare(
+        'SELECT * FROM session_context WHERE session_id = ?'
+      ).all(session_id) as any[];
 
-    const entries: Record<string, ContextEntry> = {};
-    for (const row of contextRows) {
-      entries[row.key] = {
-        key: row.key,
-        value: JSON.parse(row.value),
-        type: row.value_type,
-        set_at: row.set_at,
-        updated_at: row.updated_at,
-        version: row.version,
+      const entries: Record<string, ContextEntry> = {};
+      for (const row of contextRows) {
+        entries[row.key] = {
+          key: row.key,
+          value: JSON.parse(row.value),
+          type: row.value_type,
+          set_at: row.set_at,
+          updated_at: row.updated_at,
+          version: row.version,
+        };
+      }
+
+      // Load history
+      const historyRows = this.db.prepare(
+        'SELECT * FROM command_history WHERE session_id = ? ORDER BY executed_at ASC'
+      ).all(session_id) as any[];
+
+      const history: HistoryEntry[] = historyRows.map((row: any) => ({
+        id: row.command_id,
+        command: row.command_raw,
+        namespace: row.namespace,
+        args: JSON.parse(row.args),
+        executed_at: row.executed_at,
+        duration_ms: row.duration_ms,
+        exit_code: row.exit_code,
+        result_summary: row.result_summary,
+        undoable: row.undoable === 1,
+        undo_status: row.undo_status,
+        snapshot_id: row.snapshot_id,
+      }));
+
+      // Load undo snapshots
+      const snapshotRows = this.db.prepare(
+        'SELECT * FROM undo_snapshots WHERE session_id = ? ORDER BY created_at ASC'
+      ).all(session_id) as any[];
+
+      const undo_snapshots: UndoSnapshot[] = snapshotRows.map((row: any) => ({
+        id: row.id,
+        command_id: row.command_id,
+        created_at: row.created_at,
+        state_before: JSON.parse(row.state_before),
+        rollback_command: row.rollback_command,
+        metadata: JSON.parse(row.metadata),
+      }));
+
+      return {
+        context: { entries },
+        history,
+        undo_snapshots,
+        createdAt: session.created_at,
+        lastAccessAt: session.last_access_at,
       };
+    } catch (err) {
+      throw new SessionCorruptedError(session_id, err);
     }
-
-    // Load history
-    const historyRows = this.db.prepare(
-      'SELECT * FROM command_history WHERE session_id = ? ORDER BY executed_at ASC'
-    ).all(session_id) as any[];
-
-    const history: HistoryEntry[] = historyRows.map((row: any) => ({
-      id: row.command_id,
-      command: row.command_raw,
-      namespace: row.namespace,
-      args: JSON.parse(row.args),
-      executed_at: row.executed_at,
-      duration_ms: row.duration_ms,
-      exit_code: row.exit_code,
-      result_summary: row.result_summary,
-      undoable: row.undoable === 1,
-      undo_status: row.undo_status,
-      snapshot_id: row.snapshot_id,
-    }));
-
-    // Load undo snapshots
-    const snapshotRows = this.db.prepare(
-      'SELECT * FROM undo_snapshots WHERE session_id = ? ORDER BY created_at ASC'
-    ).all(session_id) as any[];
-
-    const undo_snapshots: UndoSnapshot[] = snapshotRows.map((row: any) => ({
-      id: row.id,
-      command_id: row.command_id,
-      created_at: row.created_at,
-      state_before: JSON.parse(row.state_before),
-      rollback_command: row.rollback_command,
-      metadata: JSON.parse(row.metadata),
-    }));
-
-    return {
-      context: { entries },
-      history,
-      undo_snapshots,
-      createdAt: session.created_at,
-      lastAccessAt: session.last_access_at,
-    };
   }
 
   async save(session_id: string, store: SessionStore): Promise<void> {

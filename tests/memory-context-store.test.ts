@@ -89,6 +89,38 @@ describe('InMemoryStorageAdapter', () => {
     expect(await adapter.load('sess-1')).toBeNull();
   });
 
+  /**
+   * Regresion (ronda 78 del audit, MEDIUM): load()/save() devolvian/
+   * guardaban la MISMA referencia de objeto que este adapter mantiene
+   * internamente — a diferencia de SQLite/Encrypted (que hacen un
+   * round-trip de (de)serializacion), un caller que muta el objeto
+   * devuelto por load() corrompia el estado "persistido" sin llamar
+   * nunca a save().
+   */
+  it('IM07b: mutar el objeto devuelto por load() no corrompe el estado interno del adapter', async () => {
+    const adapter = new InMemoryStorageAdapter();
+    await adapter.save('sess-1', createSampleStore());
+
+    const loaded = await adapter.load('sess-1');
+    loaded!.context.entries.theme.value = 'CORRUPTED';
+    loaded!.context.entries.injected = { key: 'injected', value: 'x', type: 'string', set_at: '', updated_at: '', version: 1 };
+
+    const reloaded = await adapter.load('sess-1');
+    expect(reloaded!.context.entries.theme.value).toBe('dark');
+    expect(reloaded!.context.entries.injected).toBeUndefined();
+  });
+
+  it('IM07c: mutar el objeto pasado a save() despues de guardarlo no corrompe el estado interno del adapter', async () => {
+    const adapter = new InMemoryStorageAdapter();
+    const store = createSampleStore();
+    await adapter.save('sess-1', store);
+
+    store.context.entries.theme.value = 'CORRUPTED';
+
+    const loaded = await adapter.load('sess-1');
+    expect(loaded!.context.entries.theme.value).toBe('dark');
+  });
+
   it('IM08: funciona como StorageAdapter real de ContextStore (set/get/delete)', async () => {
     const adapter = new InMemoryStorageAdapter();
     const store = new ContextStore(adapter, 'sess-1');

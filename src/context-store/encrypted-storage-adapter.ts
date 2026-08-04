@@ -8,6 +8,7 @@
 
 import { createCipheriv, createDecipheriv, randomBytes, type CipherGCM, type DecipherGCM } from 'node:crypto';
 import type { StorageAdapter, SessionStore } from './types.js';
+import { SessionCorruptedError } from './types.js';
 
 /** Configuracion de encriptacion. */
 export interface EncryptionConfig {
@@ -53,7 +54,18 @@ export class EncryptedStorageAdapter implements StorageAdapter {
     // Backward compat: unencrypted data passes through
     if (!('_encrypted' in (raw as object))) return raw;
 
-    return this.decrypt(raw as unknown as EncryptedPayload, session_id);
+    // Regresion (ronda 78 del audit, MEDIUM): decrypt() puede tirar por
+    // varias razones legitimas de dato corrupto/no confiable — auth tag
+    // invalido (payload manipulado, o desencriptado con la clave
+    // equivocada tras una rotacion), base64 malformado, o JSON invalido
+    // en el plaintext resultante — y ninguna se capturaba, propagandose
+    // como una excepcion generica de node:crypto hasta el caller de
+    // get()/set() en vez de un error tipado del contrato.
+    try {
+      return this.decrypt(raw as unknown as EncryptedPayload, session_id);
+    } catch (err) {
+      throw new SessionCorruptedError(session_id, err);
+    }
   }
 
   async save(session_id: string, store: SessionStore): Promise<void> {
