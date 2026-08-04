@@ -136,7 +136,7 @@ export function registerShellSkills(registry: CommandRegistry, shellAdapter?: Sh
   registerAll(registry, createShellCommands(adapter, jailRoot));
   registerAll(registry, envCommands);
   registerAll(registry, createWorkspaceCommands(undefined, adapter, jailRoot));
-  registerAll(registry, createGitCommands(jailRoot));
+  registerAll(registry, createGitCommands(jailRoot, adapter));
   registerAll(registry, createCronCommands(cronScheduler, adapter, jailRoot));
   registerAll(registry, createSecretCommands());
   registerAll(registry, createProcessCommands(processManager, jailRoot, adapter));

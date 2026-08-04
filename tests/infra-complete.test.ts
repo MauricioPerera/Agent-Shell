@@ -678,6 +678,100 @@ describe('Git Jail (opt-in path containment)', () => {
   });
 });
 
+/**
+ * Regresion (ronda 80 del audit, LOW/MEDIUM — bypassing ShellAdapter):
+ * git:* always shelled out via real execSync/execFileSync, unconditionally,
+ * even when the operator configured `prefer: 'just-bash'` — createGitCommands()
+ * never received the active adapter. Unlike file:*'s fix, there's no safe
+ * pass-through (gitExecArgs() deliberately avoids a shell to prevent git
+ * flag-injection; ShellAdapter.exec() only accepts a shell command string),
+ * so the fix is fail-closed: reject with a clear error under just-bash
+ * instead of silently running unsandboxed or downgrading git's
+ * injection-hardened argv exec to a shell-string one.
+ */
+describe('Git ShellAdapter gating (just-bash sandbox)', () => {
+  let tempDir: string;
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), 'git-adapter-gate-'));
+    execSync('git init', { cwd: tempDir, stdio: 'pipe' });
+    execSync('git config user.email "test@test.com"', { cwd: tempDir, stdio: 'pipe' });
+    execSync('git config user.name "Test"', { cwd: tempDir, stdio: 'pipe' });
+    writeFileSync(join(tempDir, 'README.md'), '# Test');
+    execSync('git add -A && git commit -m "init"', { cwd: tempDir, stdio: 'pipe' });
+  });
+
+  afterEach(() => { rmSync(tempDir, { recursive: true, force: true }); });
+
+  it('GA01: git:status is rejected under a just-bash-backed adapter', async () => {
+    const fakeAdapter: ShellAdapter = {
+      backend: 'just-bash',
+      exec: vi.fn(),
+      which: vi.fn(),
+      readFile: vi.fn(),
+      writeFile: vi.fn(),
+      listDir: vi.fn(),
+      mkdir: vi.fn(),
+      remove: vi.fn(),
+      rename: vi.fn(),
+      chmod: vi.fn(),
+    };
+    const cmds = createGitCommands(undefined, fakeAdapter);
+    const handler = findHandler(cmds, 'git', 'status');
+    const res = await handler({ cwd: tempDir });
+
+    expect(res.success).toBe(false);
+    expect(res.error).toMatch(/just-bash/i);
+  });
+
+  it('GA02: every git:* command is gated, not just status', async () => {
+    const fakeAdapter: ShellAdapter = {
+      backend: 'just-bash',
+      exec: vi.fn(),
+      which: vi.fn(),
+      readFile: vi.fn(),
+      writeFile: vi.fn(),
+      listDir: vi.fn(),
+      mkdir: vi.fn(),
+      remove: vi.fn(),
+      rename: vi.fn(),
+      chmod: vi.fn(),
+    };
+    const cmds = createGitCommands(undefined, fakeAdapter);
+    for (const name of ['clone', 'status', 'diff', 'commit', 'push', 'pull']) {
+      const handler = findHandler(cmds, 'git', name);
+      const res = await handler({ url: 'https://example.invalid/repo.git', message: 'x', cwd: tempDir });
+      expect(res.success, `git:${name} should be rejected under just-bash`).toBe(false);
+      expect(res.error, `git:${name} error should mention just-bash`).toMatch(/just-bash/i);
+    }
+  });
+
+  it('GA03: git:status is unaffected by a native-backed adapter', async () => {
+    const fakeAdapter: ShellAdapter = {
+      backend: 'native',
+      exec: vi.fn(),
+      which: vi.fn(),
+      readFile: vi.fn(),
+      writeFile: vi.fn(),
+      listDir: vi.fn(),
+      mkdir: vi.fn(),
+      remove: vi.fn(),
+      rename: vi.fn(),
+      chmod: vi.fn(),
+    };
+    const cmds = createGitCommands(undefined, fakeAdapter);
+    const handler = findHandler(cmds, 'git', 'status');
+    const res = await handler({ cwd: tempDir });
+    expect(res.success).toBe(true);
+  });
+
+  it('GA04: git:status is unaffected when no adapter is passed (backward compat, legacy gitCommands export)', async () => {
+    const handler = findHandler(gitCommands, 'git', 'status');
+    const res = await handler({ cwd: tempDir });
+    expect(res.success).toBe(true);
+  });
+});
+
 // ===========================================================================
 // CRON
 // ===========================================================================

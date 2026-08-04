@@ -10,6 +10,7 @@ import type { SkillEntry } from './scaffold.js';
 import { createPathJail } from '../security/path-jail.js';
 import { filterSensitiveEnv } from '../security/secret-patterns.js';
 import { assertHostnameSafe } from './shell-http.js';
+import type { ShellAdapter } from '../just-bash/types.js';
 
 function gitExec(cmd: string, cwd?: string): { stdout: string; stderr: string; exitCode: number } {
   try {
@@ -180,10 +181,40 @@ pullDef.requiredPermissions = ['git:write'];
  *
  * Without jailRoot, every handler behaves byte-identical to before this
  * option existed (unresolved `args.cwd`, natural child_process cwd default).
+ *
+ * Regresion (ronda 80 del audit, LOW/MEDIUM — bypassing ShellAdapter): this
+ * function never received the active `ShellAdapter` at all, unlike
+ * createFileCommands()/createShellCommands()/createWorkspaceCommands()/
+ * createCronCommands() — so git:* always shelled out via real
+ * execSync/execFileSync, unconditionally, even under `prefer: 'just-bash'`.
+ * Unlike file:*'s fix (route through adapter.mkdir/remove/rename/chmod),
+ * there's no safe pass-through here: gitExecArgs() deliberately uses
+ * execFileSync with an argv array (`shell: false`) specifically to prevent
+ * git flag-injection via url/branch/remote (ronda 42, CRITICAL) — routing
+ * through ShellAdapter.exec(), which only accepts a shell command STRING,
+ * would mean rebuilding that argv into a quoted string and handing it to a
+ * real shell (NativeShellAdapter.exec() uses child_process.exec(), which on
+ * Windows runs via cmd.exe). Even careful quoting reopens exactly that
+ * injection class — this repo's own shellQuoteSingle() (just-bash/adapter.ts)
+ * is POSIX single-quote escaping, not valid against cmd.exe. And more
+ * fundamentally, just-bash has no way to invoke a real `git` binary at all
+ * (no real process support — same limitation as process:spawn). The honest
+ * fix: fail closed with a clear error under just-bash instead of silently
+ * running unsandboxed OR silently downgrading git's injection-hardened argv
+ * exec to a shell-string one. An optional 2nd `adapter` param lets callers
+ * opt in; omitted, behavior is unchanged, same "omitted = prior behavior"
+ * convention as jailRoot.
  */
-export function createGitCommands(jailRoot?: string): SkillEntry[] {
+export function createGitCommands(jailRoot?: string, adapter?: ShellAdapter): SkillEntry[] {
   const assertInsideJail = createPathJail(jailRoot);
   const jailRootAbs = jailRoot ? resolve(jailRoot) : null;
+
+  function checkSandboxSupport(): { ok: true } | { ok: false; error: string } {
+    if (adapter?.backend === 'just-bash') {
+      return { ok: false, error: 'git:* is not supported under the just-bash sandbox (no real git binary invocation) — configure shellAdapter: "native" to allow it.' };
+    }
+    return { ok: true };
+  }
 
   // git accepts a bare filesystem path (relative, absolute, or file://) as
 // --url with no scheme required — only these forms are genuinely remote.
@@ -207,6 +238,8 @@ function resolveCwd(rawCwd: string | undefined): { ok: true; cwd: string | undef
 
   return [
     { definition: cloneDef, handler: async (args: any) => {
+      const sandboxCheck = checkSandboxSupport();
+      if (!sandboxCheck.ok) return { success: false, data: null, error: sandboxCheck.error };
       const branch = args.branch ? String(args.branch) : '';
       let target = String(args.path || '.');
       const url = String(args.url);
@@ -260,6 +293,8 @@ function resolveCwd(rawCwd: string | undefined): { ok: true; cwd: string | undef
       return { success: res.exitCode === 0, data: res, error: res.exitCode !== 0 ? res.stderr : undefined };
     }},
     { definition: statusDef, handler: async (args: any) => {
+      const sandboxCheck = checkSandboxSupport();
+      if (!sandboxCheck.ok) return { success: false, data: null, error: sandboxCheck.error };
       const cwdCheck = resolveCwd(args.cwd || undefined);
       if (!cwdCheck.ok) return { success: false, data: null, error: cwdCheck.error };
       const res = gitExec('git status --porcelain', cwdCheck.cwd);
@@ -267,6 +302,8 @@ function resolveCwd(rawCwd: string | undefined): { ok: true; cwd: string | undef
       return { success: true, data: { ...res, clean, cwd: cwdCheck.cwd || process.cwd() } };
     }},
     { definition: diffDef, handler: async (args: any) => {
+      const sandboxCheck = checkSandboxSupport();
+      if (!sandboxCheck.ok) return { success: false, data: null, error: sandboxCheck.error };
       const cwdCheck = resolveCwd(args.cwd || undefined);
       if (!cwdCheck.ok) return { success: false, data: null, error: cwdCheck.error };
       const cmd = args.staged ? 'git diff --staged' : 'git diff';
@@ -274,6 +311,8 @@ function resolveCwd(rawCwd: string | undefined): { ok: true; cwd: string | undef
       return { success: true, data: res };
     }},
     { definition: commitDef, handler: async (args: any) => {
+      const sandboxCheck = checkSandboxSupport();
+      if (!sandboxCheck.ok) return { success: false, data: null, error: sandboxCheck.error };
       const cwdCheck = resolveCwd(args.cwd || undefined);
       if (!cwdCheck.ok) return { success: false, data: null, error: cwdCheck.error };
       const cwd = cwdCheck.cwd;
@@ -282,6 +321,8 @@ function resolveCwd(rawCwd: string | undefined): { ok: true; cwd: string | undef
       return { success: res.exitCode === 0, data: res, error: res.exitCode !== 0 ? res.stderr : undefined };
     }},
     { definition: pushDef, handler: async (args: any) => {
+      const sandboxCheck = checkSandboxSupport();
+      if (!sandboxCheck.ok) return { success: false, data: null, error: sandboxCheck.error };
       const cwdCheck = resolveCwd(args.cwd || undefined);
       if (!cwdCheck.ok) return { success: false, data: null, error: cwdCheck.error };
       const remote = args.remote || 'origin';
@@ -317,6 +358,8 @@ function resolveCwd(rawCwd: string | undefined): { ok: true; cwd: string | undef
       return { success: res.exitCode === 0, data: res, error: res.exitCode !== 0 ? res.stderr : undefined };
     }},
     { definition: pullDef, handler: async (args: any) => {
+      const sandboxCheck = checkSandboxSupport();
+      if (!sandboxCheck.ok) return { success: false, data: null, error: sandboxCheck.error };
       const cwdCheck = resolveCwd(args.cwd || undefined);
       if (!cwdCheck.ok) return { success: false, data: null, error: cwdCheck.error };
       const remote = args.remote || 'origin';
