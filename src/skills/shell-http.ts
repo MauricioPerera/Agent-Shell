@@ -107,19 +107,33 @@ function isBlockedIpv4(o: number[]): boolean {
 
 /** True if 16 IPv6 bytes fall in a blocked range (incl. IPv4-mapped unwrap). */
 function isBlockedIpv6Bytes(b: Uint8Array): boolean {
-  // ::1 loopback
+  // Regresion (ronda 68 del audit, CRITICAL): antes solo se bloqueaba ::1
+  // (chequeando b[15]===1) — la direccion "unspecified" :: (los 16 bytes en
+  // cero) nunca se chequeaba. Verificado con un socket real en este entorno:
+  // `fetch('http://[::]:<puerto>/')` conecta de hecho a un servicio
+  // bindeado en loopback, exactamente como ::1 — no es un literal inerte.
   let allZero = true;
   for (let i = 0; i < 15; i++) {
     if (b[i] !== 0) { allZero = false; break; }
   }
-  if (allZero && b[15] === 1) return true;
+  if (allZero && (b[15] === 0 || b[15] === 1)) return true;
 
-  // IPv4-mapped (::ffff:a.b.c.d): bytes 0-9 zero, bytes 10-11 = 0xff -> unwrap IPv4.
+  // IPv4 embebida en los 32 bits bajos: bytes 0-9 en cero, bytes 10-11 son
+  // 0xffff (forma moderna "IPv4-mapped", ::ffff:a.b.c.d) O 0x0000 (forma
+  // obsoleta "IPv4-compatible", ::a.b.c.d — RFC 4291 §2.5.5.1). Regresion
+  // (ronda 68 del audit, CRITICAL): antes solo se desenvolvia la forma
+  // "mapped" (0xffff) — la forma "compatible" (0x0000) pasaba sin chequear.
+  // El parser WHATWG URL normaliza ambas formas a notacion hexadecimal pura
+  // (ej. `::169.254.169.254` -> hostname `[::a9fe:a9fe]`) antes de que este
+  // codigo vea el hostname, asi que el bypass no requiere notacion punteada
+  // — verificado en vivo que `http://[::a9fe:a9fe]/` (el endpoint de
+  // metadata cloud 169.254.169.254 en esta forma) evadia el blocklist por
+  // completo.
   let prefixZero = true;
   for (let i = 0; i < 10; i++) {
     if (b[i] !== 0) { prefixZero = false; break; }
   }
-  if (prefixZero && b[10] === 0xff && b[11] === 0xff) {
+  if (prefixZero && ((b[10] === 0xff && b[11] === 0xff) || (b[10] === 0 && b[11] === 0))) {
     return isBlockedIpv4([b[12], b[13], b[14], b[15]]);
   }
 
@@ -214,6 +228,43 @@ async function assertUrlSafe(url: string): Promise<UrlSafetyResult> {
     }
     // DNS failure -> fail-open, let fetch proceed (unpinned).
     return { pinnedAddress: null, family: null };
+  }
+}
+
+/**
+ * Validates that `hostname` is not a literal or DNS-resolved private/
+ * reserved/loopback/link-local address. Shares the same blocklist as
+ * assertUrlSafe() above, but factored out for reuse by shell-git.ts's SSRF
+ * guard (ronda 68 del audit, CRITICAL — ver el comentario en shell-git.ts).
+ * Unlike assertUrlSafe(), this does NOT restrict scheme (git legitimately
+ * uses ssh://, git://, not just http(s)) and does NOT return a pinned
+ * address (git manages its own connection; there's no fetch() here to pin
+ * a socket for). Throws `Blocked: ...` on a disallowed target; fails open
+ * on DNS resolution errors, same tradeoff as assertUrlSafe() above (a
+ * resolver error blocks nothing rather than the request itself failing).
+ */
+export async function assertHostnameSafe(hostname: string): Promise<void> {
+  const raw = stripBrackets(hostname);
+
+  if (isLiteralIp(hostname)) {
+    if (isBlockedIp(raw)) {
+      throw new Error(`Blocked: host resolves to a private/internal address (${raw})`);
+    }
+    return;
+  }
+
+  try {
+    const addresses = (await dnsLookup(hostname, { all: true })) as Array<{ address: string; family: number }>;
+    for (const a of addresses) {
+      if (isBlockedIp(a.address)) {
+        throw new Error(`Blocked: host resolves to a private/internal address (${hostname} -> ${a.address})`);
+      }
+    }
+  } catch (err: any) {
+    if (err && typeof err.message === 'string' && err.message.startsWith('Blocked:')) {
+      throw err;
+    }
+    // DNS failure -> fail-open, same tradeoff as assertUrlSafe().
   }
 }
 

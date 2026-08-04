@@ -468,6 +468,50 @@ describe('Git Skills', () => {
     expect(res.success).toBe(false);
     expect(res.error).toContain("must not start with '-'");
   });
+
+  /**
+   * Regresion (ronda 68 del audit, CRITICAL): git:clone/push/pull aceptaban
+   * una URL remota sin NINGUNA validacion de host/IP — a diferencia de
+   * shell-http.ts (blocklist de rangos privados/reservados + endpoint de
+   * metadata cloud), shell-git.ts nunca reutilizaba ese guard. Un agente
+   * con solo git:write (sin http:read/write) podia alcanzar cualquier host
+   * interno via `git:clone --url http://169.254.169.254/...` — git hace el
+   * connect TCP real independientemente de si el target es un repo git de
+   * verdad. Estos tests confirman que el bloqueo pasa ANTES de que
+   * gitExecArgs() invoque a git en absoluto (no hace falta un servidor
+   * real: alcanza con que el directorio destino nunca se cree).
+   */
+  it('GI13: git:clone --url apuntando al endpoint de metadata cloud (169.254.169.254) es rechazado', async () => {
+    const handler = findHandler(gitCommands, 'git', 'clone');
+    const target = join(tempDir, '..', 'gi13-should-not-exist');
+    const res = await handler({ url: 'http://169.254.169.254/latest/meta-data/', path: target });
+    expect(res.success).toBe(false);
+    expect(res.error).toContain('Blocked');
+    expect(existsSync(target)).toBe(false);
+  });
+
+  it('GI14: git:push --remote apuntando a una IP loopback (127.0.0.1) es rechazado', async () => {
+    const handler = findHandler(gitCommands, 'git', 'push');
+    const res = await handler({ remote: 'http://127.0.0.1:6379/repo.git', cwd: tempDir });
+    expect(res.success).toBe(false);
+    expect(res.error).toContain('Blocked');
+  });
+
+  it('GI15: git:pull --remote apuntando a una IP loopback (127.0.0.1) es rechazado', async () => {
+    const handler = findHandler(gitCommands, 'git', 'pull');
+    const res = await handler({ remote: 'http://127.0.0.1:6379/repo.git', cwd: tempDir });
+    expect(res.success).toBe(false);
+    expect(res.error).toContain('Blocked');
+  });
+
+  it('GI16: git:pull --remote con un nombre de remote normal ("origin") no dispara el chequeo SSRF', async () => {
+    const handler = findHandler(gitCommands, 'git', 'pull');
+    // 'origin' no es una URL remota (isRemoteGitUrl la descarta), asi que
+    // el chequeo SSRF debe ser un no-op — el error (si lo hay) viene de
+    // git mismo (sin remote configurado), nunca de "Blocked".
+    const res = await handler({ remote: 'origin', cwd: tempDir });
+    expect(res.error || '').not.toContain('Blocked');
+  });
 });
 
 /**

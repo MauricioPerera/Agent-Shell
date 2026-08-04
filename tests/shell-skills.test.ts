@@ -245,6 +245,40 @@ describe('HTTP Skills', () => {
     expect(globalThis.fetch).not.toHaveBeenCalled();
   });
 
+  /**
+   * Regresion (ronda 68 del audit, CRITICAL): isBlockedIpv6Bytes() solo
+   * bloqueaba ::1 (chequeando el ultimo byte === 1) — la direccion
+   * "unspecified" :: (los 16 bytes en cero) nunca se chequeaba, pese a
+   * rutear a servicios en loopback en la practica (verificado con un
+   * socket real durante el audit).
+   */
+  it('HT07c: blocks the IPv6 unspecified address (::)', async () => {
+    const handler = findHandler(httpCommands, 'http', 'get');
+    const result = await handler({ url: 'http://[::]/' });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('Blocked');
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
+  /**
+   * Regresion (ronda 68 del audit, CRITICAL): isBlockedIpv6Bytes() solo
+   * desenvolvia la forma IPv4-mapped moderna (::ffff:a.b.c.d, bytes 10-11 =
+   * 0xffff) — la forma IPv4-compatible obsoleta (::a.b.c.d, bytes 10-11 =
+   * 0x0000, RFC 4291 §2.5.5.1) pasaba sin chequear. El parser WHATWG URL
+   * normaliza esta forma a notacion hex pura (::a9fe:a9fe para
+   * ::169.254.169.254 = el endpoint de metadata cloud) antes de llegar a
+   * este codigo, asi que el bypass no depende de notacion punteada.
+   */
+  it('HT07d: blocks the IPv6 IPv4-compatible form of the cloud metadata IP (::a9fe:a9fe = ::169.254.169.254)', async () => {
+    const handler = findHandler(httpCommands, 'http', 'get');
+    const result = await handler({ url: 'http://[::a9fe:a9fe]/' });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('Blocked');
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
   it('HT08: blocks when DNS resolves hostname to a private IP', async () => {
     vi.mocked(dnsLookup).mockResolvedValue([
       { address: '169.254.169.254', family: 4 },

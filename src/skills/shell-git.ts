@@ -9,6 +9,7 @@ import { resolve, isAbsolute } from 'node:path';
 import type { SkillEntry } from './scaffold.js';
 import { createPathJail } from '../security/path-jail.js';
 import { filterSensitiveEnv } from '../security/secret-patterns.js';
+import { assertHostnameSafe } from './shell-http.js';
 
 function gitExec(cmd: string, cwd?: string): { stdout: string; stderr: string; exitCode: number } {
   try {
@@ -62,6 +63,30 @@ function gitExec(cmd: string, cwd?: string): { stdout: string; stderr: string; e
  */
 function looksLikeGitFlag(value: string): boolean {
   return value.startsWith('-');
+}
+
+/**
+ * Regresion (ronda 68 del audit, CRITICAL): git:clone/push/pull accept a
+ * caller-controlled remote URL (scheme://host/... or the SCP-like
+ * user@host:path form) that was passed straight to git with NO host/IP
+ * validation of any kind — none of the SSRF hardening built for
+ * shell-http.ts (private/reserved-IP blocklist, cloud-metadata-endpoint
+ * blocking) was ever reused here. An agent holding only git:write (not
+ * http:read/write) could reach an internal-only host or the cloud metadata
+ * endpoint via `git:clone --url http://169.254.169.254/...` — git performs
+ * the real TCP connect + HTTP GET (or SSH handshake) regardless of whether
+ * the target is a real git repository, enough for internal reachability/
+ * port-scanning. Extracts the bare hostname from either URL shape so it can
+ * be checked with shell-http.ts's assertHostnameSafe() before git ever runs.
+ */
+function extractGitRemoteHost(url: string): string | null {
+  const scpMatch = url.match(/^[^\s/\\]+@([^\s:/\\]+):/);
+  if (scpMatch) return scpMatch[1];
+  try {
+    return new URL(url).hostname || null;
+  } catch {
+    return null;
+  }
 }
 
 // Argument-vector git execution. No shell is spawned, so each argument is passed
@@ -197,6 +222,16 @@ function resolveCwd(rawCwd: string | undefined): { ok: true; cwd: string | undef
       if (looksLikeGitFlag(url)) {
         return { success: false, data: null, error: `git:clone --url must not start with '-' (would be parsed as a git option, not a repository): '${url}'` };
       }
+      if (isRemoteGitUrl(url)) {
+        const host = extractGitRemoteHost(url);
+        if (host) {
+          try {
+            await assertHostnameSafe(host);
+          } catch (err: any) {
+            return { success: false, data: null, error: `git:clone --url ${err.message}` };
+          }
+        }
+      }
       if (jailRootAbs) {
         const abs = isAbsolute(target) ? target : resolve(jailRootAbs, target);
         const check = assertInsideJail(abs);
@@ -264,6 +299,16 @@ function resolveCwd(rawCwd: string | undefined): { ok: true; cwd: string | undef
       if (branch && looksLikeGitFlag(branch)) {
         return { success: false, data: null, error: `git:push --branch must not start with '-' (would be parsed as a git option, e.g. --force): '${branch}'` };
       }
+      if (isRemoteGitUrl(remote)) {
+        const host = extractGitRemoteHost(remote);
+        if (host) {
+          try {
+            await assertHostnameSafe(host);
+          } catch (err: any) {
+            return { success: false, data: null, error: `git:push --remote ${err.message}` };
+          }
+        }
+      }
       // '--end-of-options' separates options from operands for push/pull
       // (unlike clone, plain '--' has a DIFFERENT meaning here — ref vs
       // pathspec disambiguation — so git added this dedicated separator).
@@ -284,6 +329,16 @@ function resolveCwd(rawCwd: string | undefined): { ok: true; cwd: string | undef
       }
       if (branch && looksLikeGitFlag(branch)) {
         return { success: false, data: null, error: `git:pull --branch must not start with '-' (would be parsed as a git option): '${branch}'` };
+      }
+      if (isRemoteGitUrl(remote)) {
+        const host = extractGitRemoteHost(remote);
+        if (host) {
+          try {
+            await assertHostnameSafe(host);
+          } catch (err: any) {
+            return { success: false, data: null, error: `git:pull --remote ${err.message}` };
+          }
+        }
       }
       const res = gitExecArgs(['pull', '--end-of-options', remote, ...(branch ? [branch] : [])], cwdCheck.cwd);
       return { success: res.exitCode === 0, data: res, error: res.exitCode !== 0 ? res.stderr : undefined };
